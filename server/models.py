@@ -2,9 +2,9 @@
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 
 class ApiModel(BaseModel):
@@ -35,6 +35,7 @@ class ScenarioId(StrEnum):
 
 class RecoveryStatus(StrEnum):
     IN_PROGRESS = "in_progress"
+    PENDING_APPROVAL = "pending_approval"
     COMPLETED = "completed"
 
 
@@ -111,9 +112,32 @@ class RecoveryEvent(ApiModel):
     created_at: datetime = Field(alias="createdAt")
 
 
-class RecoveryReceipt(ReplayReceiptTemplate):
+class RecoveryReceipt(ApiModel):
     recovery_id: str = Field(alias="recoveryId")
-    execution_mode: Literal[ExecutionMode.REPLAY_FIXTURE] = Field(alias="executionMode")
+    execution_mode: ExecutionMode = Field(alias="executionMode")
+    status: str
+    simulated: bool
+    provider_execution: bool = Field(alias="providerExecution")
+    model_ids: list[str] = Field(alias="modelIds")
+    boundary: str
+    provider_result: str = Field(alias="providerResult")
+    authorization_source: str = Field(alias="authorizationSource")
+    verification_results: list[str] = Field(alias="verificationResults")
+
+    @model_validator(mode="after")
+    def enforce_execution_mode_provenance(self) -> Self:
+        if self.execution_mode is ExecutionMode.REPLAY_FIXTURE and (
+            not self.simulated or self.provider_execution or self.model_ids
+        ):
+            raise ValueError(
+                "Replay receipts require simulated evidence, no provider execution, "
+                "and no model IDs"
+            )
+        if self.execution_mode is ExecutionMode.SDK_STUB and (
+            not self.simulated or self.model_ids
+        ):
+            raise ValueError("SDK stub receipts require simulated evidence and no model IDs")
+        return self
 
 
 class DemoResetResponse(ApiModel):

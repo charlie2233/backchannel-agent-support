@@ -1,17 +1,22 @@
-"""Bounded, keyless smoke proof for the deterministic replay path."""
+"""Bounded, keyless smoke proof for replay and deterministic SDK approval."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
 
+from agents import Runner
 from fastapi.testclient import TestClient
 
 from server.config import RuntimeSettings
 from server.main import create_app
+from server.models import ExecutionMode, RecoveryStatus
+from server.orchestrator import RecoveryOrchestrator
+from server.providers.hotel_simulator import HotelSimulator
 from server.store import SQLiteStore
 
 
@@ -47,15 +52,42 @@ def main() -> None:
             boundary = cast(str, receipt["boundary"])
             assert "no model call or provider execution" in boundary.lower()
 
+            hotel_provider = HotelSimulator()
+            orchestrator = RecoveryOrchestrator(
+                store=store,
+                hotel_provider=hotel_provider,
+            )
+            pending = asyncio.run(
+                orchestrator.start("hotel", execution_mode=ExecutionMode.SDK_STUB)
+            )
+            assert pending.recovery.status is RecoveryStatus.PENDING_APPROVAL
+            assert len(pending.sdk_result.interruptions) == 1
+            interruption = pending.sdk_result.interruptions[0]
+            assert interruption.tool_name == "commit_remedy"
+            assert hotel_provider.dispatch_count == 0
+
+            state = pending.sdk_result.to_state()
+            state.approve(interruption)
+            completed_result = asyncio.run(
+                Runner.run(pending.original_root_agent, state)
+            )
+            assert completed_result.interruptions == []
+            assert hotel_provider.dispatch_count == 1
+            sdk_receipt = store.get_receipt(pending.recovery.recovery_id)
+            assert sdk_receipt.execution_mode is ExecutionMode.SDK_STUB
+            assert sdk_receipt.provider_execution is True
+
             print(
                 json.dumps(
                     {
                         "smoke": "passed",
-                        "runtime": "Stub backend (keyless)",
-                        "executionMode": "replay_fixture",
-                        "receipt": "Simulated replay receipt",
-                        "providerExecution": False,
-                        "boundary": boundary,
+                        "runtimeMode": "stub_keyless",
+                        "replayMode": "replay_fixture",
+                        "replayProviderDispatchCount": 0,
+                        "sdkMode": "sdk_stub",
+                        "sdkApprovalCount": 1,
+                        "sdkPreapprovalDispatchCount": 0,
+                        "sdkPostapprovalDispatchCount": 1,
                     },
                     sort_keys=True,
                 )

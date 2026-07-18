@@ -1,0 +1,1 @@
+"""Deliberately simulated provider adapters."""

@@ -26,8 +26,12 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS recoveries (
     id TEXT PRIMARY KEY,
     scenario_id TEXT NOT NULL CHECK (scenario_id IN ('hotel', 'api-quota')),
-    execution_mode TEXT NOT NULL CHECK (execution_mode = 'replay_fixture'),
-    status TEXT NOT NULL CHECK (status IN ('in_progress', 'completed')),
+    execution_mode TEXT NOT NULL CHECK (
+        execution_mode IN ('openai_live', 'sdk_stub', 'replay_fixture')
+    ),
+    status TEXT NOT NULL CHECK (
+        status IN ('in_progress', 'pending_approval', 'completed')
+    ),
     current_step INTEGER NOT NULL CHECK (current_step BETWEEN 0 AND 5),
     current_step_summary TEXT NOT NULL,
     created_at TEXT NOT NULL,
@@ -112,6 +116,7 @@ class SQLiteStore:
         self._database_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
             connection.executescript(SCHEMA)
+            self._migrate_task2_recovery_constraints(connection)
             event_columns = {
                 cast(str, row["name"])
                 for row in connection.execute("PRAGMA table_info(events)").fetchall()
@@ -134,6 +139,68 @@ class SQLiteStore:
                 )
                 """
             )
+
+    @staticmethod
+    def _migrate_task2_recovery_constraints(connection: sqlite3.Connection) -> None:
+        """Expand Task 2 CHECK constraints while preserving rows and foreign keys."""
+
+        row = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'recoveries'"
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("recoveries table was not created")
+        table_sql = cast(str, row["sql"])
+        if "'sdk_stub'" in table_sql and "'pending_approval'" in table_sql:
+            return
+
+        connection.commit()
+        connection.execute("PRAGMA foreign_keys = OFF")
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("DROP TABLE IF EXISTS recoveries_task3")
+            connection.execute(
+                """
+                CREATE TABLE recoveries_task3 (
+                    id TEXT PRIMARY KEY,
+                    scenario_id TEXT NOT NULL CHECK (
+                        scenario_id IN ('hotel', 'api-quota')
+                    ),
+                    execution_mode TEXT NOT NULL CHECK (
+                        execution_mode IN ('openai_live', 'sdk_stub', 'replay_fixture')
+                    ),
+                    status TEXT NOT NULL CHECK (
+                        status IN ('in_progress', 'pending_approval', 'completed')
+                    ),
+                    current_step INTEGER NOT NULL CHECK (current_step BETWEEN 0 AND 5),
+                    current_step_summary TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO recoveries_task3 (
+                    id, scenario_id, execution_mode, status, current_step,
+                    current_step_summary, created_at, updated_at
+                )
+                SELECT
+                    id, scenario_id, execution_mode, status, current_step,
+                    current_step_summary, created_at, updated_at
+                FROM recoveries
+                """
+            )
+            connection.execute("DROP TABLE recoveries")
+            connection.execute("ALTER TABLE recoveries_task3 RENAME TO recoveries")
+            violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+            if violations:
+                raise RuntimeError("Recovery schema migration violated foreign keys")
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+        finally:
+            connection.execute("PRAGMA foreign_keys = ON")
 
     def _connect(self) -> sqlite3.Connection:
         if self._closed:
@@ -186,7 +253,7 @@ class SQLiteStore:
             {
                 "scenarioId": scenario_id.value,
                 "executionMode": execution_mode.value,
-                "summary": "Recovery created from a bundled replay fixture.",
+                "summary": "Recovery created for the selected execution mode.",
             },
             separators=(",", ":"),
             sort_keys=True,

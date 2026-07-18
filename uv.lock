@@ -64,7 +64,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.116,<1" },
-    { name = "openai-agents", specifier = ">=0.2" },
+    { name = "openai-agents", specifier = "==0.18.3" },
     { name = "pydantic", specifier = ">=2.11,<3" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.35,<1" },
 ]

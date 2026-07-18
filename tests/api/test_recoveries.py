@@ -9,6 +9,7 @@ from server.config import RuntimeSettings
 from server.events import stream_recovery_events
 from server.main import create_app
 from server.models import ExecutionMode, RecoveryEvent, RecoveryStatus
+from server.providers.hotel_simulator import HotelSimulator
 from server.replay.engine import ReplayEngine
 from server.replay.loader import ScenarioLoader
 from server.store import SQLiteStore
@@ -37,7 +38,7 @@ def test_scenarios_are_exactly_the_two_replay_definitions(client: TestClient) ->
     [
         ({"scenarioId": "unknown", "executionMode": "replay_fixture"}, 422),
         ({"scenarioId": "hotel", "executionMode": "openai_live"}, 422),
-        ({"scenarioId": "hotel", "executionMode": "sdk_stub"}, 422),
+        ({"scenarioId": "api-quota", "executionMode": "sdk_stub"}, 422),
         ({"scenarioId": "hotel", "executionMode": "unknown"}, 422),
     ],
 )
@@ -72,6 +73,27 @@ def test_replay_recovery_snapshot_and_receipt_are_durable(client: TestClient) ->
     assert "no model call or provider execution" in receipt["boundary"].lower()
 
     assert client.get(f"/api/recoveries/{uuid4()}/receipt").status_code == 404
+
+
+def test_sdk_stub_hotel_reaches_pending_approval_without_dispatch(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "api-sdk-stub.sqlite3")
+    provider = HotelSimulator()
+    with TestClient(
+        create_app(
+            RuntimeSettings(live_ready=False),
+            store=store,
+            hotel_provider=provider,
+        )
+    ) as client:
+        response = client.post(
+            "/api/recoveries",
+            json={"scenarioId": "hotel", "executionMode": "sdk_stub"},
+        )
+
+    assert response.status_code == 201
+    assert response.json()["status"] == "pending_approval"
+    assert response.json()["executionMode"] == "sdk_stub"
+    assert provider.dispatch_count == 0
 
 
 def test_demo_reset_is_forbidden_by_default_without_deleting_recovery(

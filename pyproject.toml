@@ -5,7 +5,7 @@ description = "A truthful operational recovery console"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "fastapi>=0.116,<1",
-  "openai-agents>=0.2",
+  "openai-agents==0.18.3",
   "pydantic>=2.11,<3",
   "uvicorn[standard]>=0.35,<1",
 ]
