@@ -37,14 +37,15 @@ async def stream_recovery_events(
     cursor = after_seq
     last_emission = monotonic()
     while True:
-        persisted = store.list_events(recovery_id, after_seq=cursor)
+        persisted, recovery_status = store.read_event_batch(
+            recovery_id, after_seq=cursor
+        )
         for event in persisted:
             yield encode_sse_event(event)
             cursor = event.seq
             last_emission = monotonic()
 
-        snapshot = store.get_recovery(recovery_id)
-        if snapshot.status is RecoveryStatus.COMPLETED:
+        if recovery_status is RecoveryStatus.COMPLETED:
             return
         if await is_disconnected():
             return

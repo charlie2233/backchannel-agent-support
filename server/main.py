@@ -158,6 +158,11 @@ def create_app(
 
     @application.post("/api/demo/reset", response_model=DemoResetResponse)
     def reset_demo() -> DemoResetResponse:
+        if not runtime_settings.demo_reset_enabled:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Forbidden",
+            )
         recovery_store.reset()
         return DemoResetResponse(reset=True)
 

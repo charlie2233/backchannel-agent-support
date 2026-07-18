@@ -2,6 +2,7 @@ export interface RecoveryEvent {
   recoveryId: string;
   seq: number;
   type: string;
+  terminal: boolean;
   data: Readonly<Record<string, unknown>>;
   createdAt: string;
 }
@@ -30,6 +31,7 @@ function isRecoveryEvent(value: unknown): value is RecoveryEvent {
     typeof candidate.seq === "number" &&
     candidate.seq > 0 &&
     typeof candidate.type === "string" &&
+    typeof candidate.terminal === "boolean" &&
     typeof candidate.data === "object" &&
     candidate.data !== null &&
     !Array.isArray(candidate.data) &&
@@ -58,13 +60,27 @@ export function connectRecoveryEvents(
   const source = createEventSource(
     `/api/recoveries/${encodeURIComponent(recoveryId)}/events`,
   );
+  let closed = false;
+  const closeOnce = () => {
+    if (closed) {
+      return;
+    }
+    closed = true;
+    source.close();
+  };
   source.onmessage = (message) => {
+    if (closed) {
+      return;
+    }
     try {
       const event = parseRecoveryEvent(message.data);
       if (event.recoveryId !== recoveryId) {
         throw new Error("Recovery event did not belong to the active recovery");
       }
       handlers.onEvent(event);
+      if (event.terminal) {
+        closeOnce();
+      }
     } catch (error) {
       handlers.onError?.(
         error instanceof Error ? error : new Error("Recovery event could not be read"),
@@ -72,7 +88,10 @@ export function connectRecoveryEvents(
     }
   };
   source.onerror = () => {
+    if (closed) {
+      return;
+    }
     handlers.onError?.(new Error("Recovery event stream disconnected"));
   };
-  return () => source.close();
+  return closeOnce;
 }

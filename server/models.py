@@ -106,6 +106,7 @@ class RecoveryEvent(ApiModel):
     recovery_id: str = Field(alias="recoveryId")
     seq: int = Field(ge=1)
     type: str
+    terminal: bool
     data: dict[str, JsonValue]
     created_at: datetime = Field(alias="createdAt")
 

@@ -20,7 +20,10 @@ def main() -> None:
     with TemporaryDirectory(prefix="backchannel-smoke-") as temporary_directory:
         store = SQLiteStore(Path(temporary_directory) / "smoke.sqlite3")
         with TestClient(
-            create_app(RuntimeSettings.from_environment(), store=store)
+            create_app(
+                RuntimeSettings(live_ready=False, demo_reset_enabled=True),
+                store=store,
+            )
         ) as client:
             health = client.get("/health")
             health.raise_for_status()

@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS events (
     recovery_id TEXT NOT NULL REFERENCES recoveries(id) ON DELETE CASCADE,
     seq INTEGER NOT NULL CHECK (seq >= 1),
     type TEXT NOT NULL,
+    terminal INTEGER NOT NULL DEFAULT 0 CHECK (terminal IN (0, 1)),
     data_json TEXT NOT NULL,
     created_at TEXT NOT NULL,
     UNIQUE (recovery_id, seq)
@@ -111,6 +112,28 @@ class SQLiteStore:
         self._database_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
             connection.executescript(SCHEMA)
+            event_columns = {
+                cast(str, row["name"])
+                for row in connection.execute("PRAGMA table_info(events)").fetchall()
+            }
+            if "terminal" not in event_columns:
+                connection.execute(
+                    "ALTER TABLE events ADD COLUMN terminal INTEGER NOT NULL DEFAULT 0"
+                )
+            connection.execute(
+                """
+                UPDATE events
+                SET terminal = 1
+                WHERE recovery_id IN (
+                    SELECT id FROM recoveries WHERE status = 'completed'
+                )
+                AND seq = (
+                    SELECT MAX(final_event.seq)
+                    FROM events AS final_event
+                    WHERE final_event.recovery_id = events.recovery_id
+                )
+                """
+            )
 
     def _connect(self) -> sqlite3.Connection:
         if self._closed:
@@ -144,6 +167,7 @@ class SQLiteStore:
             recoveryId=cast(str, row["recovery_id"]),
             seq=cast(int, row["seq"]),
             type=cast(str, row["type"]),
+            terminal=bool(cast(int, row["terminal"])),
             data=data,
             createdAt=datetime.fromisoformat(cast(str, row["created_at"])),
         )
@@ -189,8 +213,9 @@ class SQLiteStore:
             )
             connection.execute(
                 """
-                INSERT INTO events (recovery_id, seq, type, data_json, created_at)
-                VALUES (?, 1, 'recovery.created', ?, ?)
+                INSERT INTO events (
+                    recovery_id, seq, type, terminal, data_json, created_at
+                ) VALUES (?, 1, 'recovery.created', 0, ?, ?)
                 """,
                 (recovery_id, created_data, now.isoformat()),
             )
@@ -244,10 +269,18 @@ class SQLiteStore:
             )
             connection.execute(
                 """
-                INSERT INTO events (recovery_id, seq, type, data_json, created_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO events (
+                    recovery_id, seq, type, terminal, data_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (recovery_id, next_sequence, event_type, event_json, now.isoformat()),
+                (
+                    recovery_id,
+                    next_sequence,
+                    event_type,
+                    int(status is RecoveryStatus.COMPLETED),
+                    event_json,
+                    now.isoformat(),
+                ),
             )
             if receipt_json is not None:
                 connection.execute(
@@ -269,22 +302,33 @@ class SQLiteStore:
         return self._recovery_from_row(row)
 
     def list_events(self, recovery_id: str, *, after_seq: int = 0) -> list[RecoveryEvent]:
+        events, _ = self.read_event_batch(recovery_id, after_seq=after_seq)
+        return events
+
+    def read_event_batch(
+        self, recovery_id: str, *, after_seq: int = 0
+    ) -> tuple[list[RecoveryEvent], RecoveryStatus]:
+        """Read events and status from one explicit SQLite snapshot."""
+
         with self._lock, self._connect() as connection:
-            recovery = connection.execute(
-                "SELECT id FROM recoveries WHERE id = ?", (recovery_id,)
-            ).fetchone()
-            if recovery is None:
-                raise RecoveryNotFoundError("Recovery not found")
+            connection.execute("BEGIN")
             rows = connection.execute(
                 """
-                SELECT recovery_id, seq, type, data_json, created_at
+                SELECT recovery_id, seq, type, terminal, data_json, created_at
                 FROM events
                 WHERE recovery_id = ? AND seq > ?
                 ORDER BY seq ASC
                 """,
                 (recovery_id, after_seq),
             ).fetchall()
-        return [self._event_from_row(row) for row in rows]
+            recovery = connection.execute(
+                "SELECT status FROM recoveries WHERE id = ?", (recovery_id,)
+            ).fetchone()
+            if recovery is None:
+                raise RecoveryNotFoundError("Recovery not found")
+            recovery_status = RecoveryStatus(cast(str, recovery["status"]))
+            connection.commit()
+        return [self._event_from_row(row) for row in rows], recovery_status
 
     def get_receipt(self, recovery_id: str) -> RecoveryReceipt:
         with self._lock, self._connect() as connection:

@@ -1,3 +1,4 @@
+import asyncio
 import json
 from uuid import uuid4
 
@@ -5,7 +6,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from server.config import RuntimeSettings
+from server.events import stream_recovery_events
 from server.main import create_app
+from server.models import ExecutionMode, RecoveryEvent, RecoveryStatus
+from server.replay.engine import ReplayEngine
+from server.replay.loader import ScenarioLoader
 from server.store import SQLiteStore
 
 
@@ -42,7 +47,7 @@ def test_create_recovery_validates_scenario_and_execution_mode(
     assert client.post("/api/recoveries", json=payload).status_code == expected_status
 
 
-def test_replay_recovery_snapshot_receipt_and_reset_are_durable(client: TestClient) -> None:
+def test_replay_recovery_snapshot_and_receipt_are_durable(client: TestClient) -> None:
     created = client.post(
         "/api/recoveries",
         json={"scenarioId": "api-quota", "executionMode": "replay_fixture"},
@@ -66,11 +71,40 @@ def test_replay_recovery_snapshot_receipt_and_reset_are_durable(client: TestClie
     assert "simulated" in json.dumps(receipt).lower()
     assert "no model call or provider execution" in receipt["boundary"].lower()
 
-    reset = client.post("/api/demo/reset")
-    assert reset.status_code == 200
-    assert reset.json() == {"reset": True}
-    assert client.get(f"/api/recoveries/{recovery_id}").status_code == 404
     assert client.get(f"/api/recoveries/{uuid4()}/receipt").status_code == 404
+
+
+def test_demo_reset_is_forbidden_by_default_without_deleting_recovery(
+    client: TestClient,
+) -> None:
+    created = client.post(
+        "/api/recoveries",
+        json={"scenarioId": "api-quota", "executionMode": "replay_fixture"},
+    )
+    recovery_id = created.json()["recoveryId"]
+
+    reset = client.post("/api/demo/reset")
+
+    assert reset.status_code == 403
+    assert reset.json() == {"detail": "Forbidden"}
+    assert client.get(f"/api/recoveries/{recovery_id}").status_code == 200
+
+
+def test_demo_reset_deletes_recovery_only_when_explicitly_enabled(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "reset-enabled.sqlite3")
+    settings = RuntimeSettings(live_ready=False, demo_reset_enabled=True)
+    with TestClient(create_app(settings, store=store)) as client:
+        created = client.post(
+            "/api/recoveries",
+            json={"scenarioId": "api-quota", "executionMode": "replay_fixture"},
+        )
+        recovery_id = created.json()["recoveryId"]
+
+        reset = client.post("/api/demo/reset")
+
+        assert reset.status_code == 200
+        assert reset.json() == {"reset": True}
+        assert client.get(f"/api/recoveries/{recovery_id}").status_code == 404
 
 
 def test_last_event_id_replays_only_newer_persisted_events(client: TestClient) -> None:
@@ -113,3 +147,54 @@ def test_last_event_id_must_be_a_non_negative_integer(client: TestClient) -> Non
         ).status_code
         == 400
     )
+
+
+def test_terminal_transition_after_event_read_is_emitted_before_stream_end(
+    tmp_path, monkeypatch
+) -> None:
+    store = SQLiteStore(tmp_path / "terminal-race.sqlite3")
+    recovery = ReplayEngine(store, ScenarioLoader()).start(
+        "hotel", execution_mode=ExecutionMode.REPLAY_FIXTURE
+    )
+    cursor = store.list_events(recovery.recovery_id)[-1].seq
+    original_read = store.read_event_batch
+    injected = False
+
+    def read_with_terminal_commit(
+        recovery_id: str, *, after_seq: int
+    ) -> tuple[list[RecoveryEvent], RecoveryStatus]:
+        nonlocal injected
+        batch = original_read(recovery_id, after_seq=after_seq)
+        if not injected:
+            injected = True
+            store.record_transition(
+                recovery_id,
+                status=RecoveryStatus.COMPLETED,
+                current_step=5,
+                current_step_summary="Terminal event committed at the old race boundary.",
+                event_type="recovery.test_terminal",
+                event_data={"summary": "Final persisted event"},
+            )
+        return batch
+
+    monkeypatch.setattr(store, "read_event_batch", read_with_terminal_commit)
+
+    async def connected() -> bool:
+        return False
+
+    async def collect() -> list[str]:
+        return [
+            chunk
+            async for chunk in stream_recovery_events(
+                store,
+                recovery.recovery_id,
+                after_seq=cursor,
+                is_disconnected=connected,
+                poll_interval_seconds=0,
+            )
+        ]
+
+    chunks = asyncio.run(collect())
+    assert len(chunks) == 1
+    assert f"id: {cursor + 1}" in chunks[0]
+    assert '"terminal":true' in chunks[0]
