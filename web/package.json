@@ -1,0 +1,27 @@
+{
+  "name": "@backchannel/web",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc --noEmit && vite build",
+    "check": "tsc --noEmit && vitest run && vite build",
+    "dev": "vite",
+    "test": "vitest"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "vite": "latest",
+    "react": "latest",
+    "react-dom": "latest"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "latest",
+    "@testing-library/react": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "jsdom": "latest",
+    "typescript": "latest",
+    "vitest": "latest"
+  }
+}
