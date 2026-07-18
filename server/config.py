@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 DEVELOPMENT_CORS_ORIGINS = (
     "http://localhost:5173",
@@ -17,9 +18,11 @@ class RuntimeSettings:
 
     live_ready: bool
     development_cors_origins: tuple[str, ...] = DEVELOPMENT_CORS_ORIGINS
+    database_path: Path = Path("backchannel.sqlite3")
 
     @classmethod
     def from_environment(cls) -> RuntimeSettings:
         # Collapse configuration to a boolean immediately. The value is not retained.
         live_ready = bool(os.environ.get("OPENAI_API_KEY", "").strip())
-        return cls(live_ready=live_ready)
+        database_path = Path(os.environ.get("BACKCHANNEL_DB_PATH", "backchannel.sqlite3"))
+        return cls(live_ready=live_ready, database_path=database_path)

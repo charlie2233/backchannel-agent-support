@@ -1,0 +1,73 @@
+{
+  "id": "api-quota",
+  "title": "API quota recovery",
+  "summary": "A deterministic quota trace resolves inside delegated authority.",
+  "executionMode": "replay_fixture",
+  "initialStep": 0,
+  "initialSummary": "Replay recovery created; no model call or provider execution.",
+  "events": [
+    {
+      "type": "recovery.detected",
+      "status": "in_progress",
+      "currentStep": 0,
+      "summary": "Quota pressure found in the bundled usage trace.",
+      "data": {"phase": "Detect", "summary": "Recorded quota pressure replayed."}
+    },
+    {
+      "type": "evidence.recorded",
+      "status": "in_progress",
+      "currentStep": 1,
+      "summary": "Recorded allowance and demand compared.",
+      "data": {"phase": "Prove", "summary": "Recorded allowance evidence replayed."}
+    },
+    {
+      "type": "remedy.recorded",
+      "status": "in_progress",
+      "currentStep": 2,
+      "summary": "A simulated temporary allocation was selected in the fixture.",
+      "data": {"phase": "Negotiate", "summary": "Recorded allocation terms replayed."}
+    },
+    {
+      "type": "delegated_authority.recorded",
+      "status": "in_progress",
+      "currentStep": 3,
+      "summary": "Fixture records delegated authority; no human approval.",
+      "data": {"phase": "Authorize", "summary": "Recorded delegated authority replayed."}
+    },
+    {
+      "type": "execution.simulation_recorded",
+      "status": "in_progress",
+      "currentStep": 4,
+      "summary": "A simulated outcome was replayed; provider dispatch did not begin.",
+      "data": {
+        "phase": "Execute",
+        "summary": "Simulated outcome recorded without provider dispatch.",
+        "providerExecution": false
+      }
+    },
+    {
+      "type": "receipt.simulation_sealed",
+      "status": "completed",
+      "currentStep": 5,
+      "summary": "Simulated verification evidence was sealed in the replay fixture.",
+      "data": {
+        "phase": "Verify & seal",
+        "summary": "Simulated replay receipt recorded.",
+        "providerExecution": false
+      }
+    }
+  ],
+  "receipt": {
+    "status": "simulated_completed",
+    "simulated": true,
+    "providerExecution": false,
+    "modelIds": [],
+    "boundary": "Simulated replay receipt — no model call or provider execution.",
+    "providerResult": "None — recorded fixture outcome only.",
+    "authorizationSource": "Recorded delegated-authority fixture",
+    "verificationResults": [
+      "Simulated quota allocation evidence recorded",
+      "No provider dispatch occurred"
+    ]
+  }
+}

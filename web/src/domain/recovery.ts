@@ -13,6 +13,17 @@ export type LifecycleStep = (typeof lifecycleSteps)[number];
 export type ScenarioId = "hotel" | "api-quota";
 export type RecoveryStatus = "in_progress" | "completed";
 
+export interface RecoverySnapshot {
+  recoveryId: string;
+  scenarioId: ScenarioId;
+  executionMode: ExecutionMode;
+  status: RecoveryStatus;
+  currentStep: number;
+  currentStepSummary: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface EvidenceEntry {
   label: string;
   value: string;

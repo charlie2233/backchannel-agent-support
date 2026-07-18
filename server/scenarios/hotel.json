@@ -1,0 +1,43 @@
+{
+  "id": "hotel",
+  "title": "Hotel booking recovery",
+  "summary": "A conflicting room assignment is paused at operator authorization.",
+  "executionMode": "replay_fixture",
+  "initialStep": 0,
+  "initialSummary": "Replay recovery created; no model call or provider execution.",
+  "events": [
+    {
+      "type": "recovery.detected",
+      "status": "in_progress",
+      "currentStep": 0,
+      "summary": "Conflict found in the bundled booking trace.",
+      "data": {"phase": "Detect", "summary": "Recorded fixture conflict detected."}
+    },
+    {
+      "type": "evidence.recorded",
+      "status": "in_progress",
+      "currentStep": 1,
+      "summary": "Consumer and demo-provider fixture records compared.",
+      "data": {"phase": "Prove", "summary": "Recorded evidence comparison replayed."}
+    },
+    {
+      "type": "remedy.recorded",
+      "status": "in_progress",
+      "currentStep": 2,
+      "summary": "One simulated replacement remedy recorded.",
+      "data": {"phase": "Negotiate", "summary": "Recorded remedy terms replayed."}
+    },
+    {
+      "type": "authorization.boundary_recorded",
+      "status": "in_progress",
+      "currentStep": 3,
+      "summary": "Replay paused before any provider dispatch.",
+      "data": {
+        "phase": "Authorize",
+        "summary": "Recorded consent boundary reached; execution has not begun.",
+        "providerExecution": false
+      }
+    }
+  ],
+  "receipt": null
+}
