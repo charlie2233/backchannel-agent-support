@@ -11,6 +11,6 @@
     "test": "npm --workspace web test -- --run"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13 <23"
   }
 }
