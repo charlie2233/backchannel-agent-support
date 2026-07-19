@@ -32,21 +32,24 @@ export const recoveryScenarios = [
     executionMode: "replay_fixture",
     status: "completed",
     currentStep: 5,
-    currentStepSummary: "Simulated verification evidence is sealed in the fixture.",
+    currentStepSummary: "Recorded verification and permission revocation are sealed.",
     lifecycleDetails: {
-      Detect: "Quota pressure found in the bundled usage trace.",
-      Prove: "Recorded allowance and demand compared.",
-      Negotiate: "A simulated temporary allocation was selected.",
-      Authorize: "Fixture records delegated authority; no human approval.",
-      Execute: "Simulated execution event replayed.",
-      "Verify & seal": "Simulated receipt replayed.",
+      Detect: "Recorded demand of 1200 units exceeds the 1000-unit baseline ceiling.",
+      Prove: "Recorded provider proof establishes a 200-unit shortfall.",
+      Negotiate: "A 250-unit us-east-1 burst raises the ceiling to 1250 for 900 seconds.",
+      Authorize:
+        "Recorded 300 USD minor-unit cost is within the delegated 500-unit limit; approval count is zero.",
+      Execute: "Recorded SDK-stub execution was verified at the temporary ceiling.",
+      "Verify & seal":
+        "Recorded permission quota-burst-demo-us-east-1 was revoked and the 1000-unit baseline restored.",
     },
     evidence: [
       { label: "Fixture", value: "api-quota-completed-v1", monospace: true },
       { label: "Model call", value: "None — bundled replay" },
       { label: "Provider execution", value: "None — replay only" },
       { label: "Execution mode", value: "replay_fixture", monospace: true },
-      { label: "Receipt", value: "Simulated fixture evidence" },
+      { label: "Approval count", value: "0 — delegated authority" },
+      { label: "Receipt", value: "Recorded, simulated fixture evidence" },
     ],
   },
 ] as const satisfies ReadonlyArray<RecoveryScenario>;

@@ -31,3 +31,7 @@ def test_keyless_stub_smoke_proves_approve_and_decline(
         "Temporary permission revoked.",
         "Cancellation receipt sealed.",
     ]
+    assert output["quotaSdkStatus"] == "completed"
+    assert output["quotaSdkApprovalCount"] == 0
+    assert output["quotaSdkPermissionRevoked"] is True
+    assert output["resetReplayScenarioIds"] == ["hotel", "api-quota"]

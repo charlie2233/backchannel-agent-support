@@ -18,6 +18,7 @@ from server.agents.schemas import CommitRemedyArguments
 from server.digest import remedy_consent_digest
 from server.models import (
     OPENAI_LIVE_BOUNDARY,
+    QUOTA_SDK_STUB_BOUNDARY,
     SDK_STUB_BOUNDARY,
     ApprovalDecisionRequest,
     ApprovalDecisionResponse,
@@ -1672,6 +1673,26 @@ class SQLiteStore:
                 if receipt.execution_mode is not existing_mode:
                     raise ReceiptTransitionError(
                         "Receipt execution mode does not match the recovery"
+                    )
+                existing_scenario = ScenarioId(cast(str, existing["scenario_id"]))
+                is_quota_sdk_receipt = (
+                    receipt.execution_mode is ExecutionMode.SDK_STUB
+                    and receipt.status == "completed"
+                    and receipt.approval_count == 0
+                    and receipt.boundary == QUOTA_SDK_STUB_BOUNDARY
+                )
+                if (
+                    receipt.execution_mode is ExecutionMode.SDK_STUB
+                    and receipt.status == "completed"
+                    and is_quota_sdk_receipt
+                    != (existing_scenario is ScenarioId.API_QUOTA)
+                ):
+                    raise ReceiptTransitionError(
+                        "Delegated quota receipt does not match the recovery scenario"
+                    )
+                if is_quota_sdk_receipt and not receipt.has_canonical_quota_evidence:
+                    raise ReceiptTransitionError(
+                        "Delegated quota receipt evidence does not match canonical facts"
                     )
             if pending_approval is not None:
                 if pending_approval.recovery_id != recovery_id:

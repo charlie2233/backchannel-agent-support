@@ -1,4 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import App from "./App";
@@ -34,6 +35,274 @@ function stubHealthWithUnavailableRecovery() {
 }
 
 describe("Backchannel console", () => {
+  it("runs API quota only through the zero-approval SDK stub and renders its proof", async () => {
+    const requests: Array<{ scenarioId: string; executionMode: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/health") {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                backend: "openai",
+                liveReady: true,
+                providerBoundary: "demo_adapter_only",
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        if (url === "/api/recoveries") {
+          const request = JSON.parse(String(init?.body)) as {
+            scenarioId: string;
+            executionMode: string;
+          };
+          requests.push(request);
+          const quota = request.scenarioId === "api-quota";
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                recoveryId: quota
+                  ? "22222222-2222-4222-8222-222222222222"
+                  : "11111111-1111-4111-8111-111111111111",
+                scenarioId: request.scenarioId,
+                executionMode: request.executionMode,
+                modelIds: quota ? [] : ["gpt-5.6-luna", "gpt-5.6-terra"],
+                rootTraceId: quota
+                  ? "qa_trace_0123456789abcdef0123456789abcdef"
+                  : "trace_0123456789abcdef0123456789abcdef",
+                status: quota ? "completed" : "in_progress",
+                currentStep: quota ? 5 : 0,
+                currentStepSummary: quota
+                  ? "Execution verified, temporary permission revoked, and receipt sealed."
+                  : "Live hotel recovery started.",
+                createdAt: "2026-07-19T12:00:00Z",
+                updatedAt: "2026-07-19T12:00:01Z",
+                pendingApproval: null,
+              }),
+              { status: 201, headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+
+    render(
+      <StrictMode>
+        <App />
+      </StrictMode>,
+    );
+    expect((await screen.findAllByText("Live hotel recovery started."))[0]).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: /API quota recovery/i }));
+
+    expect(
+      await screen.findByText(
+        "Execution verified, temporary permission revoked, and receipt sealed.",
+      ),
+    ).toBeVisible();
+    expect(requests).toEqual([
+      { scenarioId: "hotel", executionMode: "openai_live" },
+      { scenarioId: "api-quota", executionMode: "sdk_stub" },
+    ]);
+    const lifecycle = screen.getByRole("list", { name: "Recovery lifecycle" });
+    expect(within(lifecycle).getByText("Provider proved a 1000-unit baseline ceiling.")).toBeVisible();
+    expect(
+      within(lifecycle).getByText("A 250-unit us-east-1 burst raises the ceiling to 1250."),
+    ).toBeVisible();
+    expect(
+      within(lifecycle).getByText(
+        "Delegated authority covers 300 USD minor units within a 500-unit limit; approval count is zero.",
+      ),
+    ).toBeVisible();
+    expect(
+      within(lifecycle).getByText(
+        "Execution was verified and temporary permission quota-burst-demo-us-east-1 was revoked.",
+      ),
+    ).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Approve remedy" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Decline" })).not.toBeInTheDocument();
+    expect(screen.queryByText("GPT-5.6 agents")).not.toBeInTheDocument();
+    expect(screen.getByText("SDK stub")).toBeVisible();
+  });
+
+  it("keeps the automatic hotel replay fallback out of the API quota workspace", async () => {
+    const requests: Array<{ scenarioId: string; executionMode: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/health") {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                backend: "stub",
+                liveReady: false,
+                providerBoundary: "demo_adapter_only",
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        if (url === "/api/recoveries") {
+          const request = JSON.parse(String(init?.body)) as {
+            scenarioId: string;
+            executionMode: string;
+          };
+          requests.push(request);
+          const quota = request.scenarioId === "api-quota";
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                recoveryId: quota
+                  ? "22222222-2222-4222-8222-222222222222"
+                  : "11111111-1111-4111-8111-111111111111",
+                scenarioId: request.scenarioId,
+                executionMode: request.executionMode,
+                modelIds: [],
+                rootTraceId: quota
+                  ? "qa_trace_0123456789abcdef0123456789abcdef"
+                  : null,
+                status: quota ? "completed" : "in_progress",
+                currentStep: quota ? 5 : 1,
+                currentStepSummary: quota
+                  ? "Quota SDK proof loaded."
+                  : "Hotel replay fallback loaded.",
+                createdAt: "2026-07-19T12:00:00Z",
+                updatedAt: "2026-07-19T12:00:01Z",
+                pendingApproval: null,
+              }),
+              { status: 201, headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+
+    render(<App />);
+    expect((await screen.findAllByText("Hotel replay fallback loaded."))[0]).toBeVisible();
+    expect(screen.getByText(/replay fixture is starting automatically/i)).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: /API quota recovery/i }));
+
+    expect(await screen.findByText("Quota SDK proof loaded.")).toBeVisible();
+    expect(screen.queryByText(/replay fixture is starting automatically/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Run replay fixture" })).not.toBeInTheDocument();
+    expect(requests).toEqual([
+      { scenarioId: "hotel", executionMode: "replay_fixture" },
+      { scenarioId: "api-quota", executionMode: "sdk_stub" },
+    ]);
+  });
+
+  it("coalesces rapid quota clicks, keeps SDK provenance on failure, and permits retry", async () => {
+    const quotaRequests: string[] = [];
+    let settleFirstQuotaRequest: ((response: Response) => void) | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/health") {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                backend: "openai",
+                liveReady: true,
+                providerBoundary: "demo_adapter_only",
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        if (url === "/api/recoveries") {
+          const request = JSON.parse(String(init?.body)) as {
+            scenarioId: string;
+            executionMode: string;
+          };
+          if (request.scenarioId === "api-quota") {
+            quotaRequests.push(request.executionMode);
+            if (quotaRequests.length === 1) {
+              return new Promise<Response>((resolve) => {
+                settleFirstQuotaRequest = resolve;
+              });
+            }
+            return Promise.resolve(
+              new Response(
+                JSON.stringify({
+                  recoveryId: "22222222-2222-4222-8222-222222222222",
+                  scenarioId: "api-quota",
+                  executionMode: "sdk_stub",
+                  modelIds: [],
+                  rootTraceId: "qa_trace_0123456789abcdef0123456789abcdef",
+                  status: "completed",
+                  currentStep: 5,
+                  currentStepSummary: "Quota retry completed with server evidence.",
+                  createdAt: "2026-07-19T12:00:00Z",
+                  updatedAt: "2026-07-19T12:00:01Z",
+                  pendingApproval: null,
+                }),
+                { status: 201, headers: { "Content-Type": "application/json" } },
+              ),
+            );
+          }
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                recoveryId: "11111111-1111-4111-8111-111111111111",
+                scenarioId: "hotel",
+                executionMode: "openai_live",
+                modelIds: ["gpt-5.6-luna", "gpt-5.6-terra"],
+                rootTraceId: "trace_0123456789abcdef0123456789abcdef",
+                status: "in_progress",
+                currentStep: 0,
+                currentStepSummary: "Live hotel recovery started.",
+                createdAt: "2026-07-19T12:00:00Z",
+                updatedAt: "2026-07-19T12:00:01Z",
+                pendingApproval: null,
+              }),
+              { status: 201, headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+
+    render(<App />);
+    expect((await screen.findAllByText("Live hotel recovery started."))[0]).toBeVisible();
+    const quotaButton = screen.getByRole("button", { name: /API quota recovery/i });
+    fireEvent.click(quotaButton);
+    fireEvent.click(quotaButton);
+
+    expect(quotaRequests).toEqual(["sdk_stub"]);
+    expect(screen.getByText("SDK QA workspace")).toBeVisible();
+    expect(screen.getByText("Loading deterministic trace")).toBeVisible();
+    settleFirstQuotaRequest?.(new Response(null, { status: 500 }));
+
+    expect(
+      await screen.findByRole("alert", {
+        name: "",
+      }),
+    ).toHaveTextContent("The deterministic quota trace could not be loaded.");
+    expect(quotaRequests).toEqual(["sdk_stub"]);
+    expect(screen.getByText("SDK QA workspace")).toBeVisible();
+    expect(screen.getByText("Quota proof unavailable")).toBeVisible();
+    expect(screen.getByText("No completed quota receipt is being shown.")).toBeVisible();
+    expect(screen.queryByText("Completed fixture")).not.toBeInTheDocument();
+    expect(screen.queryByText("Replay completed")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Recorded verification and permission revocation are sealed."),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(quotaButton);
+
+    expect(await screen.findByText("Quota retry completed with server evidence.")).toBeVisible();
+    expect(quotaRequests).toEqual(["sdk_stub", "sdk_stub"]);
+    expect(screen.getByText("SDK QA workspace")).toBeVisible();
+  });
+
   it("retries replay once after a stable live-admission error and discloses it", async () => {
     const requestModes: string[] = [];
     const safeExplanation =
@@ -430,12 +699,55 @@ describe("Backchannel console", () => {
     expect(screen.queryByText(/GPT-5\.6 agents/i)).not.toBeInTheDocument();
   });
 
-  it("marks every lifecycle step recorded for a completed scenario", () => {
-    stubHealthWithUnavailableRecovery();
+  it("marks every lifecycle step recorded for an authoritative completed quota", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/health") {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                backend: "stub",
+                liveReady: false,
+                providerBoundary: "demo_adapter_only",
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        if (url === "/api/recoveries") {
+          const request = JSON.parse(String(init?.body)) as { scenarioId: string };
+          if (request.scenarioId === "hotel") {
+            return Promise.resolve(new Response(null, { status: 503 }));
+          }
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                recoveryId: "22222222-2222-4222-8222-222222222222",
+                scenarioId: "api-quota",
+                executionMode: "sdk_stub",
+                modelIds: [],
+                rootTraceId: "qa_trace_0123456789abcdef0123456789abcdef",
+                status: "completed",
+                currentStep: 5,
+                currentStepSummary: "Authoritative quota receipt sealed.",
+                createdAt: "2026-07-19T12:00:00Z",
+                updatedAt: "2026-07-19T12:00:01Z",
+                pendingApproval: null,
+              }),
+              { status: 201, headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
     render(<App />);
 
     fireEvent.click(screen.getByRole("button", { name: /API quota recovery/i }));
 
+    expect(await screen.findByText("Authoritative quota receipt sealed.")).toBeVisible();
     const lifecycle = screen.getByRole("list", { name: "Recovery lifecycle" });
     expect(within(lifecycle).getAllByText("Recorded")).toHaveLength(6);
   });

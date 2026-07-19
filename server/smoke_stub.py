@@ -51,6 +51,27 @@ def _run_smoke() -> None:
             boundary = cast(str, receipt["boundary"])
             assert "no model call or provider execution" in boundary.lower()
 
+            quota_sdk_created = client.post(
+                "/api/recoveries",
+                json={"scenarioId": "api-quota", "executionMode": "sdk_stub"},
+            )
+            quota_sdk_created.raise_for_status()
+            quota_sdk_snapshot = cast(dict[str, object], quota_sdk_created.json())
+            quota_sdk_recovery_id = cast(str, quota_sdk_snapshot["recoveryId"])
+            assert quota_sdk_snapshot["status"] == "completed"
+            assert quota_sdk_snapshot["pendingApproval"] is None
+            quota_sdk_receipt_response = client.get(
+                f"/api/recoveries/{quota_sdk_recovery_id}/receipt"
+            )
+            quota_sdk_receipt_response.raise_for_status()
+            quota_sdk_receipt = cast(
+                dict[str, object], quota_sdk_receipt_response.json()
+            )
+            assert quota_sdk_receipt["approvalCount"] == 0
+            assert quota_sdk_receipt["providerExecution"] is True
+            assert quota_sdk_receipt["modelCall"] is False
+            assert quota_sdk_receipt["modelIds"] == []
+
             approve_created = client.post(
                 "/api/recoveries",
                 json={"scenarioId": "hotel", "executionMode": "sdk_stub"},
@@ -162,6 +183,45 @@ def _run_smoke() -> None:
             ]
             assert restarted_provider.dispatch_count == 1
 
+            persisted_quota = restarted_client.get(
+                f"/api/recoveries/{quota_sdk_recovery_id}"
+            )
+            persisted_quota.raise_for_status()
+            assert persisted_quota.json()["status"] == "completed"
+            persisted_quota_receipt = restarted_store.get_receipt(
+                quota_sdk_recovery_id
+            )
+            assert persisted_quota_receipt.approval_count == 0
+            assert persisted_quota_receipt.provider_execution is True
+            quota_permission_revoked = any(
+                "permission revoked" in result.lower()
+                for result in persisted_quota_receipt.verification_results
+            )
+            assert quota_permission_revoked is True
+
+            approve_execution_count = restarted_store.count_executions(
+                approve_recovery_id
+            )
+            decline_execution_count = restarted_store.count_executions(
+                decline_recovery_id
+            )
+            reset = restarted_client.post("/api/demo/reset")
+            reset.raise_for_status()
+            reset_scenario_ids: list[str] = []
+            for scenario_id in ("hotel", "api-quota"):
+                reset_replay = restarted_client.post(
+                    "/api/recoveries",
+                    json={
+                        "scenarioId": scenario_id,
+                        "executionMode": "replay_fixture",
+                    },
+                )
+                reset_replay.raise_for_status()
+                reset_body = cast(dict[str, object], reset_replay.json())
+                assert reset_body["scenarioId"] == scenario_id
+                assert reset_body["executionMode"] == "replay_fixture"
+                reset_scenario_ids.append(scenario_id)
+
         print(
             json.dumps(
                 {
@@ -173,19 +233,19 @@ def _run_smoke() -> None:
                     "sdkMode": "sdk_stub",
                     "sdkApprovalCount": 1,
                     "sdkApproveStatus": approved_body["status"],
-                    "sdkApproveExecutionCount": restarted_store.count_executions(
-                        approve_recovery_id
-                    ),
+                    "sdkApproveExecutionCount": approve_execution_count,
                     "sdkDeclineStatus": declined_body["status"],
-                    "sdkDeclineExecutionCount": restarted_store.count_executions(
-                        decline_recovery_id
-                    ),
+                    "sdkDeclineExecutionCount": decline_execution_count,
                     "sdkDeclineProviderDispatchCount": decline_dispatch_count,
                     "sdkDeclineVerificationResults": decline_receipt.verification_results,
                     "sdkPreapprovalDispatchCount": 0,
                     "sdkPostapprovalDispatchCount": 1,
                     "sdkRestartResume": "passed",
                     "sdkSerializedStateOutput": "redacted",
+                    "quotaSdkStatus": quota_sdk_snapshot["status"],
+                    "quotaSdkApprovalCount": persisted_quota_receipt.approval_count,
+                    "quotaSdkPermissionRevoked": quota_permission_revoked,
+                    "resetReplayScenarioIds": reset_scenario_ids,
                 },
                 sort_keys=True,
             )

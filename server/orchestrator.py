@@ -54,6 +54,10 @@ from server.agents.versioning import (
 from server.digest import remedy_consent_digest
 from server.logging import get_safe_logger
 from server.models import (
+    QUOTA_SDK_AUTHORIZATION_SOURCE,
+    QUOTA_SDK_PROVIDER_RESULT,
+    QUOTA_SDK_STUB_BOUNDARY,
+    QUOTA_SDK_VERIFICATION_RESULTS,
     ApprovalDecisionRequest,
     ApprovalDecisionResponse,
     DecisionAction,
@@ -69,6 +73,16 @@ from server.policy import (
     exact_hotel_terms,
 )
 from server.providers.hotel_simulator import HotelSimulator
+from server.providers.quota_simulator import (
+    QUOTA_AGENT_GRAPH_VERSION,
+    QUOTA_PROTOCOL_VERSION,
+    QUOTA_START_PROMPT,
+    QuotaAgentContext,
+    QuotaRecoveryResult,
+    QuotaSimulator,
+    build_quota_agent,
+    quota_definition_digest,
+)
 from server.store import (
     ApprovalDecisionClaim,
     ApprovalDecisionError,
@@ -108,12 +122,19 @@ class PendingSdkApproval:
     original_root_agent: Agent[HotelAgentContext]
 
 
+@dataclass(frozen=True, slots=True)
+class CompletedSdkRecovery:
+    recovery: RecoverySnapshot
+    sdk_result: RunResult
+
+
 class RecoveryOrchestrator:
     def __init__(
         self,
         *,
         store: SQLiteStore,
         hotel_provider: HotelSimulator,
+        quota_provider: QuotaSimulator | None = None,
         version_policy: ApprovalVersionPolicy | None = None,
         live_ready: bool = False,
         model_provider: ModelProvider | None = None,
@@ -121,6 +142,7 @@ class RecoveryOrchestrator:
         self._store = store
         self._hotel_provider = hotel_provider
         self._hotel_provider.bind_store(store)
+        self._quota_provider = quota_provider or QuotaSimulator()
         self._version_policy = version_policy or ApprovalVersionPolicy.current()
         self._live_ready = live_ready
         self._model_provider = model_provider
@@ -199,11 +221,17 @@ class RecoveryOrchestrator:
         *,
         execution_mode: ExecutionMode,
         recovery_id: str | None = None,
-    ) -> PendingSdkApproval:
+    ) -> PendingSdkApproval | CompletedSdkRecovery:
         try:
             approved_scenario = ScenarioId(scenario_id)
         except ValueError as error:
             raise UnsupportedOrchestrationError("Unknown scenario") from error
+        if approved_scenario is ScenarioId.API_QUOTA:
+            if execution_mode is not ExecutionMode.SDK_STUB:
+                raise UnsupportedOrchestrationError(
+                    "API quota recovery supports sdk_stub only in orchestration"
+                )
+            return await self._start_quota_sdk(recovery_id=recovery_id)
         if execution_mode is ExecutionMode.OPENAI_LIVE and not self._live_ready:
             raise UnsupportedOrchestrationError(
                 "openai_live requires a server-side live-ready runtime"
@@ -408,6 +436,185 @@ class RecoveryOrchestrator:
             recovery=recovery,
             sdk_result=result,
             original_root_agent=original_root_agent,
+        )
+
+    async def _start_quota_sdk(
+        self,
+        *,
+        recovery_id: str | None,
+    ) -> CompletedSdkRecovery:
+        """Complete the zero-interruption quota protocol through one keyless SDK run."""
+
+        quota_recovery_id = recovery_id or str(uuid4())
+        root_trace_id = new_qa_trace_id()
+        context = QuotaAgentContext(
+            recovery_id=quota_recovery_id,
+            provider=self._quota_provider,
+        )
+        agent = build_quota_agent(context=context)
+        definition_digest = quota_definition_digest(agent)
+        self._store.create_recovery(
+            recovery_id=quota_recovery_id,
+            scenario_id=ScenarioId.API_QUOTA,
+            execution_mode=ExecutionMode.SDK_STUB,
+            current_step=0,
+            current_step_summary="Deterministic API quota SDK recovery started.",
+            model_ids=[],
+            root_trace_id=root_trace_id,
+            model_call=False,
+            sdk_version=self._version_policy.sdk_version,
+            protocol_version=QUOTA_PROTOCOL_VERSION,
+            agent_graph_version=QUOTA_AGENT_GRAPH_VERSION,
+            definition_digest=definition_digest,
+        )
+        sdk_result = await Runner.run(
+            agent,
+            QUOTA_START_PROMPT,
+            context=context,
+            run_config=configure_sdk_stub_tracing(
+                "Backchannel deterministic API quota recovery"
+            ),
+        )
+        if sdk_result.interruptions:
+            raise RuntimeError("Quota SDK run must not create a human interruption")
+        result = self._quota_provider.result_for(context.idempotency_key)
+        self._record_quota_trace(
+            recovery_id=quota_recovery_id,
+            root_trace_id=root_trace_id,
+            definition_digest=definition_digest,
+            result=result,
+        )
+        return CompletedSdkRecovery(
+            recovery=self._store.get_recovery(quota_recovery_id),
+            sdk_result=sdk_result,
+        )
+
+    def _record_quota_trace(
+        self,
+        *,
+        recovery_id: str,
+        root_trace_id: str,
+        definition_digest: str,
+        result: QuotaRecoveryResult,
+    ) -> None:
+        """Persist the completed, already-revoked quota history and terminal receipt."""
+
+        proof = result.ceiling_proof
+        grant = result.grant
+        authority = result.authority
+        transitions: list[tuple[str, int, str, dict[str, Any]]] = [
+            (
+                "quota.pressure_detected",
+                0,
+                "Quota demand exceeds the provider-proven baseline ceiling.",
+                {
+                    "phase": "Detect",
+                    "region": grant.region,
+                    "baselineCeilingUnits": proof.baseline_ceiling_units,
+                    "requiredUnits": proof.required_units,
+                    "shortfallUnits": proof.shortfall_units,
+                },
+            ),
+            (
+                "quota.ceiling_proven",
+                1,
+                "Provider evidence proves the exact quota ceiling and shortfall.",
+                {
+                    "phase": "Prove",
+                    "providerEvidenceId": proof.provider_evidence_id,
+                    "baselineCeilingUnits": proof.baseline_ceiling_units,
+                    "requiredUnits": proof.required_units,
+                    "shortfallUnits": proof.shortfall_units,
+                },
+            ),
+            (
+                "quota.burst_selected",
+                2,
+                "A temporary US-region burst covers the proven shortfall.",
+                {
+                    "phase": "Negotiate",
+                    "permissionId": grant.permission_id,
+                    "region": grant.region,
+                    "burstUnits": grant.burst_units,
+                    "effectiveCeilingUnits": grant.effective_ceiling_units,
+                    "durationSeconds": grant.duration_seconds,
+                    "extraCostMinor": grant.extra_cost_minor,
+                    "currency": grant.currency,
+                },
+            ),
+            (
+                "quota.delegated_authority_confirmed",
+                3,
+                "Delegated policy authorizes the exact burst with zero human approvals.",
+                {
+                    "phase": "Authorize",
+                    "approvalCount": result.approval_count,
+                    "hardConstraintsSatisfied": result.hard_constraints_satisfied,
+                    "delegatedAuthoritySatisfied": result.delegated_authority_satisfied,
+                    "maximumExtraCostMinor": authority.maximum_extra_cost_minor,
+                    "maximumDurationSeconds": authority.maximum_duration_seconds,
+                    "allowedRegions": list(authority.allowed_regions),
+                },
+            ),
+            (
+                "quota.burst_executed",
+                4,
+                "The demo adapter executed and verified the temporary burst.",
+                {
+                    "phase": "Execute",
+                    "providerExecution": True,
+                    "executionVerified": result.execution_verified,
+                    "effectiveCeilingUnits": grant.effective_ceiling_units,
+                },
+            ),
+        ]
+        for event_type, step, summary, data in transitions:
+            self._store.record_transition(
+                recovery_id,
+                status=RecoveryStatus.IN_PROGRESS,
+                current_step=step,
+                current_step_summary=summary,
+                event_type=event_type,
+                event_data=data,
+            )
+
+        receipt = RecoveryReceipt(
+            recoveryId=recovery_id,
+            executionMode=ExecutionMode.SDK_STUB,
+            status="completed",
+            simulated=True,
+            providerExecution=True,
+            modelCall=False,
+            modelIds=[],
+            rootTraceId=root_trace_id,
+            sdkVersion=self._version_policy.sdk_version,
+            protocolVersion=QUOTA_PROTOCOL_VERSION,
+            agentGraphVersion=QUOTA_AGENT_GRAPH_VERSION,
+            definitionDigest=definition_digest,
+            boundary=QUOTA_SDK_STUB_BOUNDARY,
+            providerResult=QUOTA_SDK_PROVIDER_RESULT,
+            authorizationSource=QUOTA_SDK_AUTHORIZATION_SOURCE,
+            verificationResults=list(QUOTA_SDK_VERIFICATION_RESULTS),
+            approvalCount=0,
+        )
+        self._store.record_transition(
+            recovery_id,
+            status=RecoveryStatus.COMPLETED,
+            current_step=5,
+            current_step_summary=(
+                "Execution verified, temporary permission revoked, and receipt sealed."
+            ),
+            event_type="quota.receipt_sealed",
+            event_data={
+                "phase": "Verify & seal",
+                "approvalCount": result.approval_count,
+                "providerExecution": True,
+                "executionVerified": result.execution_verified,
+                "permissionRevoked": result.permission_revoked,
+                "restoredCeilingUnits": result.restored_ceiling_units,
+                "summary": "Verified quota recovery evidence sealed.",
+            },
+            receipt=receipt,
         )
 
     def _complete_committed_claim(

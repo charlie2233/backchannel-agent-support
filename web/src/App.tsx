@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   LIVE_ADMISSION_MESSAGES,
@@ -50,6 +50,18 @@ function workspaceLabel(mode: RecoverySnapshot["executionMode"] | undefined): st
 function serverLifecycleDetails(
   snapshot: RecoverySnapshot,
 ): RecoveryScenario["lifecycleDetails"] {
+  if (snapshot.scenarioId === "api-quota") {
+    return {
+      Detect: "Server detected demand of 1200 units above the 1000-unit baseline ceiling.",
+      Prove: "Provider proved a 1000-unit baseline ceiling.",
+      Negotiate: "A 250-unit us-east-1 burst raises the ceiling to 1250.",
+      Authorize:
+        "Delegated authority covers 300 USD minor units within a 500-unit limit; approval count is zero.",
+      Execute: "The demo quota adapter verified execution at the temporary 1250-unit ceiling.",
+      "Verify & seal":
+        "Execution was verified and temporary permission quota-burst-demo-us-east-1 was revoked.",
+    };
+  }
   const recorded = {
     Detect: "Server recovery detected the hotel booking conflict.",
     Prove: "Server-side recovery evidence was recorded.",
@@ -106,12 +118,43 @@ export default function App() {
   const [health, setHealth] = useState<HealthStatus | null>(null);
   const [healthError, setHealthError] = useState(false);
   const [hotelSnapshot, setHotelSnapshot] = useState<RecoverySnapshot | null>(null);
+  const [quotaSnapshot, setQuotaSnapshot] = useState<RecoverySnapshot | null>(null);
+  const [quotaLoading, setQuotaLoading] = useState(false);
+  const [quotaError, setQuotaError] = useState<string | null>(null);
+  const quotaStartedRef = useRef(false);
   const [replayFallback, setReplayFallback] = useState<string | null>(null);
   const [replayLoading, setReplayLoading] = useState(false);
   const [replayError, setReplayError] = useState<string | null>(null);
 
   const activeScenario =
     recoveryScenarios.find((scenario) => scenario.id === activeId) ?? recoveryScenarios[0];
+
+  const startQuota = useCallback(async () => {
+    if (quotaStartedRef.current) {
+      return;
+    }
+    quotaStartedRef.current = true;
+    setQuotaLoading(true);
+    setQuotaError(null);
+    try {
+      setQuotaSnapshot(await createRecovery("api-quota", "sdk_stub"));
+    } catch {
+      quotaStartedRef.current = false;
+      setQuotaError("The deterministic quota trace could not be loaded.");
+    } finally {
+      setQuotaLoading(false);
+    }
+  }, []);
+
+  const selectScenario = useCallback(
+    (scenarioId: ScenarioId) => {
+      setActiveId(scenarioId);
+      if (scenarioId === "api-quota" && quotaSnapshot === null && !quotaLoading) {
+        void startQuota();
+      }
+    },
+    [quotaLoading, quotaSnapshot, startQuota],
+  );
 
   const startReplay = useCallback(async (signal?: AbortSignal) => {
     setReplayLoading(true);
@@ -178,20 +221,46 @@ export default function App() {
     return () => controller.abort();
   }, [health, startReplay]);
 
-  const activeSnapshot = activeId === "hotel" ? hotelSnapshot : null;
+  const activeSnapshot = activeId === "hotel" ? hotelSnapshot : quotaSnapshot;
   const activeScenarioView = useMemo<RecoveryScenario>(
-    () =>
-      activeSnapshot === null
-        ? activeScenario
-        : {
-            ...activeScenario,
-            executionMode: activeSnapshot.executionMode,
-            status: activeSnapshot.status,
-            currentStep: activeSnapshot.currentStep,
-            currentStepSummary: activeSnapshot.currentStepSummary,
-            lifecycleDetails: serverLifecycleDetails(activeSnapshot),
-          },
-    [activeScenario, activeSnapshot],
+    () => {
+      if (activeSnapshot !== null) {
+        return {
+          ...activeScenario,
+          executionMode: activeSnapshot.executionMode,
+          status: activeSnapshot.status,
+          currentStep: activeSnapshot.currentStep,
+          currentStepSummary: activeSnapshot.currentStepSummary,
+          lifecycleDetails: serverLifecycleDetails(activeSnapshot),
+        };
+      }
+      if (activeId !== "api-quota") {
+        return activeScenario;
+      }
+      const waiting = quotaLoading
+        ? "Starting the deterministic quota SDK trace."
+        : "No server quota proof is available.";
+      return {
+        ...activeScenario,
+        executionMode: "sdk_stub",
+        status: "in_progress",
+        currentStep: 0,
+        currentStepSummary: waiting,
+        lifecycleDetails: {
+          Detect: waiting,
+          Prove: "Waiting for provider ceiling evidence.",
+          Negotiate: "Waiting for exact temporary burst terms.",
+          Authorize: "Waiting for delegated-authority evidence.",
+          Execute: "No quota adapter execution has been recorded.",
+          "Verify & seal": "No terminal quota receipt is available.",
+        },
+        evidence: [
+          { label: "Execution mode", value: "sdk_stub", monospace: true },
+          { label: "Server evidence", value: quotaLoading ? "Loading" : "Unavailable" },
+        ],
+      };
+    },
+    [activeId, activeScenario, activeSnapshot, quotaLoading],
   );
 
   const refreshHotelSnapshot = useCallback(async () => {
@@ -219,7 +288,7 @@ export default function App() {
         <div className="top-context">
           <span>Operational recovery console</span>
           <span className="environment-badge">
-            {workspaceLabel(activeSnapshot?.executionMode)}
+            {workspaceLabel(activeScenarioView.executionMode)}
           </span>
         </div>
       </header>
@@ -228,12 +297,12 @@ export default function App() {
         <ScenarioRail
           scenarios={recoveryScenarios}
           activeId={activeId}
-          onSelect={setActiveId}
+          onSelect={selectScenario}
         />
 
         <main className="workspace">
           <ProvenanceStrip presentation={presentation} healthError={healthError} />
-          {replayFallback !== null ? (
+          {activeId === "hotel" && replayFallback !== null ? (
             <section className="replay-fallback" aria-live="polite">
               <div>
                 <p className="eyebrow">Replay fallback</p>
@@ -249,6 +318,9 @@ export default function App() {
                 {replayLoading ? "Loading replay fixture…" : "Run replay fixture"}
               </button>
             </section>
+          ) : null}
+          {activeId === "api-quota" && quotaError !== null ? (
+            <p role="alert">{quotaError}</p>
           ) : null}
           <section className="recovery-heading" aria-labelledby="recovery-title">
             <div>
@@ -269,11 +341,27 @@ export default function App() {
           <Lifecycle scenario={activeScenarioView} />
         </main>
 
-        <EvidenceInspector
-          scenario={activeScenarioView}
-          snapshot={activeSnapshot}
-          onServerSuccess={refreshHotelSnapshot}
-        />
+        {activeId === "api-quota" && activeSnapshot === null ? (
+          <aside className="evidence-inspector" aria-labelledby="quota-evidence-heading">
+            <div className="inspector-heading">
+              <p className="eyebrow">Server quota proof</p>
+              <h2 id="quota-evidence-heading">
+                {quotaLoading ? "Loading deterministic trace" : "Quota proof unavailable"}
+              </h2>
+              <p>{activeScenarioView.currentStepSummary}</p>
+            </div>
+            <div className="execution-boundary">
+              <strong>No completed quota receipt is being shown.</strong>
+              <p>Only server-returned SDK evidence can complete this scenario.</p>
+            </div>
+          </aside>
+        ) : (
+          <EvidenceInspector
+            scenario={activeScenarioView}
+            snapshot={activeSnapshot}
+            onServerSuccess={refreshHotelSnapshot}
+          />
+        )}
       </div>
     </div>
   );

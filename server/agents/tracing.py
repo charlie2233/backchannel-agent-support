@@ -17,12 +17,14 @@ LIVE_TRACE_METADATA_KEYS = frozenset(
 )
 
 
-def configure_sdk_stub_tracing() -> RunConfig:
+def configure_sdk_stub_tracing(
+    workflow_name: str = "Backchannel deterministic hotel recovery",
+) -> RunConfig:
     """Disable tracing for one explicit keyless SDK run."""
 
     return RunConfig(
         tracing_disabled=True,
-        workflow_name="Backchannel deterministic hotel recovery",
+        workflow_name=workflow_name,
     )
 
 

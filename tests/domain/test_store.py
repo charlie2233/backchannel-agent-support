@@ -234,7 +234,7 @@ def test_replay_persistence_rolls_back_an_incomplete_event_set(tmp_path) -> None
             """
             CREATE TRIGGER reject_partial_replay
             BEFORE INSERT ON events
-            WHEN NEW.type = 'remedy.recorded'
+            WHEN NEW.type = 'quota.burst_selected'
             BEGIN
                 SELECT RAISE(ABORT, 'injected replay event failure');
             END

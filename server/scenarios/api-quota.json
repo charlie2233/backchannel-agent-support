@@ -4,56 +4,99 @@
   "summary": "A deterministic quota trace resolves inside delegated authority.",
   "executionMode": "replay_fixture",
   "initialStep": 0,
-  "initialSummary": "Replay recovery created; no model call or provider execution.",
+  "initialSummary": "Recorded replay created; no model call or provider execution.",
   "events": [
     {
-      "type": "recovery.detected",
+      "type": "quota.pressure_detected",
       "status": "in_progress",
       "currentStep": 0,
-      "summary": "Quota pressure found in the bundled usage trace.",
-      "data": {"phase": "Detect", "summary": "Recorded quota pressure replayed."}
-    },
-    {
-      "type": "evidence.recorded",
-      "status": "in_progress",
-      "currentStep": 1,
-      "summary": "Recorded allowance and demand compared.",
-      "data": {"phase": "Prove", "summary": "Recorded allowance evidence replayed."}
-    },
-    {
-      "type": "remedy.recorded",
-      "status": "in_progress",
-      "currentStep": 2,
-      "summary": "A simulated temporary allocation was selected in the fixture.",
-      "data": {"phase": "Negotiate", "summary": "Recorded allocation terms replayed."}
-    },
-    {
-      "type": "delegated_authority.recorded",
-      "status": "in_progress",
-      "currentStep": 3,
-      "summary": "Fixture records delegated authority; no human approval.",
-      "data": {"phase": "Authorize", "summary": "Recorded delegated authority replayed."}
-    },
-    {
-      "type": "execution.simulation_recorded",
-      "status": "in_progress",
-      "currentStep": 4,
-      "summary": "A simulated outcome was replayed; provider dispatch did not begin.",
+      "summary": "Recorded demand exceeds the provider-proven baseline ceiling.",
       "data": {
-        "phase": "Execute",
-        "summary": "Simulated outcome recorded without provider dispatch.",
-        "providerExecution": false
+        "phase": "Detect",
+        "region": "us-east-1",
+        "baselineCeilingUnits": 1000,
+        "requiredUnits": 1200,
+        "shortfallUnits": 200,
+        "providerExecution": false,
+        "summary": "Recorded quota pressure replayed."
       }
     },
     {
-      "type": "receipt.simulation_sealed",
+      "type": "quota.ceiling_proven",
+      "status": "in_progress",
+      "currentStep": 1,
+      "summary": "Recorded provider evidence proves the exact ceiling and shortfall.",
+      "data": {
+        "phase": "Prove",
+        "providerEvidenceId": "quota-ceiling-proof-demo",
+        "baselineCeilingUnits": 1000,
+        "requiredUnits": 1200,
+        "shortfallUnits": 200,
+        "providerExecution": false,
+        "summary": "Recorded provider ceiling proof replayed."
+      }
+    },
+    {
+      "type": "quota.burst_selected",
+      "status": "in_progress",
+      "currentStep": 2,
+      "summary": "Recorded temporary US-region burst covers the proven shortfall.",
+      "data": {
+        "phase": "Negotiate",
+        "permissionId": "quota-burst-demo-us-east-1",
+        "region": "us-east-1",
+        "burstUnits": 250,
+        "effectiveCeilingUnits": 1250,
+        "durationSeconds": 900,
+        "extraCostMinor": 300,
+        "currency": "USD",
+        "providerExecution": false,
+        "summary": "Recorded burst terms replayed."
+      }
+    },
+    {
+      "type": "quota.delegated_authority_confirmed",
+      "status": "in_progress",
+      "currentStep": 3,
+      "summary": "Recorded delegated policy authorizes the burst with zero approvals.",
+      "data": {
+        "phase": "Authorize",
+        "approvalCount": 0,
+        "hardConstraintsSatisfied": true,
+        "delegatedAuthoritySatisfied": true,
+        "maximumExtraCostMinor": 500,
+        "maximumDurationSeconds": 900,
+        "allowedRegions": ["us-east-1"],
+        "providerExecution": false,
+        "summary": "Recorded delegated-authority evidence replayed."
+      }
+    },
+    {
+      "type": "quota.burst_executed",
+      "status": "in_progress",
+      "currentStep": 4,
+      "summary": "Recorded execution verification replayed without provider dispatch.",
+      "data": {
+        "phase": "Execute",
+        "effectiveCeilingUnits": 1250,
+        "executionVerified": true,
+        "providerExecution": false,
+        "summary": "Recorded execution outcome replayed."
+      }
+    },
+    {
+      "type": "quota.receipt_sealed",
       "status": "completed",
       "currentStep": 5,
-      "summary": "Simulated verification evidence was sealed in the replay fixture.",
+      "summary": "Recorded verification, permission revocation, and receipt replayed.",
       "data": {
         "phase": "Verify & seal",
-        "summary": "Simulated replay receipt recorded.",
-        "providerExecution": false
+        "approvalCount": 0,
+        "executionVerified": true,
+        "permissionRevoked": true,
+        "restoredCeilingUnits": 1000,
+        "providerExecution": false,
+        "summary": "Recorded sealed receipt replayed."
       }
     }
   ],
@@ -62,12 +105,17 @@
     "simulated": true,
     "providerExecution": false,
     "modelIds": [],
-    "boundary": "Simulated replay receipt — no model call or provider execution.",
-    "providerResult": "None — recorded fixture outcome only.",
-    "authorizationSource": "Recorded delegated-authority fixture",
+    "boundary": "Recorded replay only — no model call or provider execution.",
+    "providerResult": "Recorded SDK-stub outcome only; replay changed no real quota.",
+    "authorizationSource": "Recorded predelegated API quota policy evidence.",
     "verificationResults": [
-      "Simulated quota allocation evidence recorded",
-      "No provider dispatch occurred"
-    ]
+      "Recorded provider proof: baseline 1000 units, demand 1200 units, shortfall 200 units.",
+      "Recorded temporary burst: 250 units in us-east-1 for 900 seconds.",
+      "Recorded effective ceiling: 1250 units.",
+      "Recorded cost: 300 USD minor units within the delegated 500-unit limit.",
+      "Recorded approval count: zero; no human interruption.",
+      "Recorded permission quota-burst-demo-us-east-1 revoked and baseline restored to 1000 units."
+    ],
+    "approvalCount": 0
   }
 }

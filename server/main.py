@@ -47,6 +47,7 @@ from server.orchestrator import (
     UnsupportedOrchestrationError,
 )
 from server.providers.hotel_simulator import HotelSimulator
+from server.providers.quota_simulator import QuotaSimulator
 from server.replay.engine import ReplayEngine, UnsupportedExecutionModeError
 from server.replay.loader import ScenarioLoader, ScenarioNotFoundError
 from server.store import ApprovalDecisionError, RecoveryNotFoundError, SQLiteStore
@@ -117,6 +118,7 @@ def create_app(
     *,
     store: SQLiteStore | None = None,
     hotel_provider: HotelSimulator | None = None,
+    quota_provider: QuotaSimulator | None = None,
     orchestrator: RecoveryOrchestrator | None = None,
     model_provider: ModelProvider | None = None,
 ) -> FastAPI:
@@ -131,6 +133,7 @@ def create_app(
         recovery_orchestrator = RecoveryOrchestrator(
             store=recovery_store,
             hotel_provider=provider,
+            quota_provider=quota_provider,
             live_ready=runtime_settings.live_ready,
             model_provider=model_provider,
         )
@@ -317,6 +320,14 @@ def create_app(
                     status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                     detail={"code": "invalid_scenario"},
                 ) from error
+        if (
+            payload.scenario_id.value == "api-quota"
+            and payload.execution_mode is ExecutionMode.OPENAI_LIVE
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={"code": "unsupported_scenario_mode"},
+            )
         if (
             payload.execution_mode is ExecutionMode.OPENAI_LIVE
             and not runtime_settings.live_ready

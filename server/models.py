@@ -41,6 +41,27 @@ SDK_STUB_BOUNDARY = (
     "Deterministic Agents SDK model and demo hotel adapter only; "
     "no OpenAI model call, real booking, or payment change."
 )
+QUOTA_SDK_STUB_BOUNDARY = (
+    "Deterministic Agents SDK stub and demo quota adapter only; "
+    "no OpenAI model call or real quota change."
+)
+QUOTA_SDK_PROVIDER_RESULT = (
+    "Demo quota adapter verified 1200 units against a temporary "
+    "1250-unit US-region ceiling; no real quota was changed."
+)
+QUOTA_SDK_AUTHORIZATION_SOURCE = (
+    "Predelegated API quota policy: US-only, at most 500 USD minor "
+    "units, for at most 900 seconds."
+)
+QUOTA_SDK_VERIFICATION_RESULTS = (
+    "Provider proved the baseline quota ceiling at 1000 units.",
+    "Temporary US-region burst granted: 250 units for 900 seconds.",
+    "All hard constraints remained satisfied.",
+    "Extra cost of 300 USD minor units stayed within the delegated 500-unit limit.",
+    "Approval count is zero; no human interruption was created.",
+    "Execution verified at an effective ceiling of 1250 units.",
+    "Temporary quota permission revoked; baseline ceiling restored to 1000 units.",
+)
 OPENAI_LIVE_BOUNDARY = (
     "OpenAI agent model calls and demo hotel adapter only; no real booking or payment change."
 )
@@ -99,6 +120,7 @@ class ReplayReceiptTemplate(ApiModel):
     provider_result: str = Field(alias="providerResult")
     authorization_source: str = Field(alias="authorizationSource")
     verification_results: list[str] = Field(alias="verificationResults")
+    approval_count: Literal[0] = Field(alias="approvalCount")
 
 
 class ReplayScenarioDefinition(ApiModel):
@@ -300,11 +322,45 @@ class RecoveryReceipt(ApiModel):
     provider_result: str = Field(alias="providerResult")
     authorization_source: str = Field(alias="authorizationSource")
     verification_results: list[str] = Field(alias="verificationResults")
+    approval_count: int = Field(default=0, alias="approvalCount", ge=0)
     approved_remedy_digest: str | None = Field(
         default=None,
         alias="approvedRemedyDigest",
         pattern=r"^sha256:[0-9a-f]{64}$",
     )
+
+    @property
+    def has_canonical_quota_evidence(self) -> bool:
+        """Return whether all delegated-quota evidence matches the executed demo facts."""
+
+        return (
+            self.provider_result == QUOTA_SDK_PROVIDER_RESULT
+            and self.authorization_source == QUOTA_SDK_AUTHORIZATION_SOURCE
+            and tuple(self.verification_results) == QUOTA_SDK_VERIFICATION_RESULTS
+        )
+
+    @model_validator(mode="before")
+    @classmethod
+    def infer_legacy_approval_count(cls, value: object) -> object:
+        """Upgrade stored pre-Task-9 receipts without weakening new quota evidence."""
+
+        if not isinstance(value, dict):
+            return value
+        if "approvalCount" in value or "approval_count" in value:
+            return value
+        migrated = dict(value)
+        execution_mode = migrated.get("executionMode", migrated.get("execution_mode"))
+        status = migrated.get("status")
+        migrated["approvalCount"] = int(
+            status == "completed"
+            and execution_mode in {
+                ExecutionMode.SDK_STUB,
+                ExecutionMode.SDK_STUB.value,
+                ExecutionMode.OPENAI_LIVE,
+                ExecutionMode.OPENAI_LIVE.value,
+            }
+        )
+        return migrated
 
     @model_validator(mode="after")
     def enforce_execution_mode_provenance(self) -> Self:
@@ -321,6 +377,7 @@ class RecoveryReceipt(ApiModel):
                 or self.agent_graph_version is not None
                 or self.definition_digest is not None
                 or self.approved_remedy_digest is not None
+                or self.approval_count != 0
             ):
                 raise ValueError(
                     "Replay receipts require simulated-completed evidence, no provider "
@@ -336,6 +393,7 @@ class RecoveryReceipt(ApiModel):
             self.definition_digest,
         )
         if self.execution_mode is ExecutionMode.SDK_STUB:
+            quota_completion = self.status == "completed" and self.approval_count == 0
             if (
                 not self.simulated
                 or self.model_call
@@ -343,10 +401,18 @@ class RecoveryReceipt(ApiModel):
                 or self.root_trace_id is None
                 or not is_valid_qa_trace_id(self.root_trace_id)
                 or any(marker is None for marker in version_markers)
-                or self.boundary != SDK_STUB_BOUNDARY
+                or self.boundary
+                != (QUOTA_SDK_STUB_BOUNDARY if quota_completion else SDK_STUB_BOUNDARY)
             ):
                 raise ValueError(
                     "SDK stub receipts require versioned QA provenance and no model call"
+                )
+            if quota_completion and self.approved_remedy_digest is not None:
+                raise ValueError("Delegated quota completion cannot claim a human-approved digest")
+            if quota_completion and not self.has_canonical_quota_evidence:
+                raise ValueError(
+                    "Delegated quota completion requires canonical provider, authorization, "
+                    "and verification evidence"
                 )
         if self.execution_mode is ExecutionMode.OPENAI_LIVE:
             if (
@@ -357,6 +423,7 @@ class RecoveryReceipt(ApiModel):
                 or not is_valid_live_trace_id(self.root_trace_id)
                 or any(marker is None for marker in version_markers)
                 or self.boundary != OPENAI_LIVE_BOUNDARY
+                or (self.status == "completed" and self.approval_count != 1)
             ):
                 raise ValueError(
                     "OpenAI live receipts require real model-call, root-trace, version, "
@@ -367,9 +434,18 @@ class RecoveryReceipt(ApiModel):
         if (
             self.execution_mode in {ExecutionMode.SDK_STUB, ExecutionMode.OPENAI_LIVE}
             and self.status == "completed"
+            and self.approval_count > 0
             and self.approved_remedy_digest is None
         ):
             raise ValueError("Completed SDK receipts require an approved remedy digest")
+        if (
+            self.execution_mode is ExecutionMode.SDK_STUB
+            and self.status == "completed"
+            and self.approval_count not in {0, 1}
+        ):
+            raise ValueError("SDK completion approval count must be zero or one")
+        if self.status != "completed" and self.approval_count != 0:
+            raise ValueError("Non-completed receipts cannot claim an approval")
         if self.status == RecoveryStatus.CLOSED_WITHOUT_ACTION.value and (
             self.provider_execution is not False or self.approved_remedy_digest is not None
         ):
