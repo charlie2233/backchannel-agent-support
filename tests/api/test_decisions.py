@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import multiprocessing
 import os
 import sqlite3
+import time
 from concurrent.futures import ThreadPoolExecutor
+from queue import Empty
 from threading import Barrier
 from typing import Any
 
@@ -13,8 +16,10 @@ from fastapi.testclient import TestClient
 
 from server.config import RuntimeSettings
 from server.main import create_app
+from server.models import ApprovalDecisionRequest
+from server.orchestrator import RecoveryOrchestrator
 from server.providers.hotel_simulator import HotelSimulator
-from server.store import SQLiteStore
+from server.store import ApprovalDecisionError, SQLiteStore
 
 
 def decision_payload(
@@ -62,46 +67,77 @@ def _decision_process_worker(
     database_path: str,
     job_queue: Any,
     result_queue: Any,
+    phase_queue: Any,
     start_barrier: Any,
 ) -> None:
-    """Race decisions from one independent interpreter without returning SDK state."""
+    """Race direct orchestrator decisions from one independent interpreter."""
 
     iteration = -1
+    phase = "initializing"
     store: SQLiteStore | None = None
+
+    def report_phase(next_phase: str) -> None:
+        nonlocal phase
+        phase = next_phase
+        phase_queue.put(
+            {
+                "iteration": iteration,
+                "pid": os.getpid(),
+                "phase": phase,
+            }
+        )
+
     try:
+        report_phase("worker_started")
         store = SQLiteStore(database_path)
+        report_phase("store_ready")
         provider = HotelSimulator(store=store)
-        app = create_app(
-            RuntimeSettings(live_ready=False),
+        orchestrator = RecoveryOrchestrator(
             store=store,
             hotel_provider=provider,
         )
-        with TestClient(app) as client:
-            while True:
-                job = job_queue.get()
-                if job is None:
-                    return
-                iteration, recovery_id, payload = job
-                start_barrier.wait(timeout=30)
-                before_dispatches = provider.dispatch_count
-                response = client.post(
-                    f"/api/recoveries/{recovery_id}/decisions",
-                    json=payload,
+        report_phase("ready")
+        while True:
+            report_phase("waiting_for_job")
+            job = job_queue.get()
+            if job is None:
+                report_phase("stopping")
+                return
+            iteration, recovery_id, payload = job
+            request = ApprovalDecisionRequest.model_validate(payload)
+            report_phase("waiting_at_barrier")
+            start_barrier.wait(timeout=20)
+            before_dispatches = provider.dispatch_count
+            report_phase("approving")
+            try:
+                response = asyncio.run(
+                    orchestrator.approve_decision(recovery_id, request)
                 )
-                result_queue.put(
-                    {
-                        "iteration": iteration,
-                        "pid": os.getpid(),
-                        "status": response.status_code,
-                        "body": response.json(),
-                        "dispatchDelta": provider.dispatch_count - before_dispatches,
-                    }
-                )
+            except ApprovalDecisionError as error:
+                status_code = error.status_code
+                body: dict[str, object] = {"detail": error.public_detail}
+                report_phase("decision_conflict")
+            else:
+                status_code = 200
+                body = response.model_dump(mode="json", by_alias=True)
+                report_phase("decision_completed")
+            result_queue.put(
+                {
+                    "iteration": iteration,
+                    "pid": os.getpid(),
+                    "phase": phase,
+                    "status": status_code,
+                    "body": body,
+                    "dispatchDelta": provider.dispatch_count - before_dispatches,
+                }
+            )
+            report_phase("result_sent")
     except BaseException as error:
         result_queue.put(
             {
                 "iteration": iteration,
                 "pid": os.getpid(),
+                "phase": phase,
                 "errorType": type(error).__name__,
                 "error": str(error)[:200],
             }
@@ -109,6 +145,47 @@ def _decision_process_worker(
     finally:
         if store is not None:
             store.close()
+
+
+def _drain_process_phases(phase_queue: Any) -> list[dict[str, object]]:
+    diagnostics: list[dict[str, object]] = []
+    while True:
+        try:
+            diagnostics.append(phase_queue.get_nowait())
+        except Empty:
+            return diagnostics
+
+
+def _wait_for_process_workers(
+    phase_queue: Any,
+    processes: list[Any],
+) -> list[dict[str, object]]:
+    deadline = time.monotonic() + 30
+    diagnostics: list[dict[str, object]] = []
+    ready_pids: set[int] = set()
+    while len(ready_pids) < len(processes):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            worker_states = [
+                {
+                    "pid": process.pid,
+                    "alive": process.is_alive(),
+                    "exitcode": process.exitcode,
+                }
+                for process in processes
+            ]
+            pytest.fail(
+                "Timed out waiting for direct decision workers to initialize: "
+                f"workers={worker_states}, phases={diagnostics[-20:]}"
+            )
+        try:
+            diagnostic = phase_queue.get(timeout=remaining)
+        except Empty:
+            continue
+        diagnostics.append(diagnostic)
+        if diagnostic.get("phase") == "ready":
+            ready_pids.add(int(diagnostic["pid"]))
+    return diagnostics
 
 
 def test_public_sdk_stub_creation_and_typed_approval_complete_once(
@@ -270,25 +347,31 @@ def test_two_processes_race_twenty_times_with_one_durable_winner(tmp_path) -> No
         store=creator_store,
         hotel_provider=creator_provider,
     )
-    process_context = multiprocessing.get_context("spawn")
+    process_context = multiprocessing.get_context("fork")
     first_jobs = process_context.Queue()
     second_jobs = process_context.Queue()
+    job_queues = (first_jobs, second_jobs)
     results = process_context.Queue()
+    phases = process_context.Queue()
     start_barrier = process_context.Barrier(2)
     processes = [
         process_context.Process(
             target=_decision_process_worker,
-            args=(str(database_path), jobs, results, start_barrier),
+            args=(str(database_path), jobs, results, phases, start_barrier),
         )
-        for jobs in (first_jobs, second_jobs)
+        for jobs in job_queues
     ]
+    started_processes: list[Any] = []
     worker_pids: set[int] = set()
 
-    for process in processes:
-        process.start()
     try:
+        for process in processes:
+            process.start()
+            started_processes.append(process)
+        _wait_for_process_workers(phases, processes)
         with TestClient(creator_app) as creator:
             for iteration in range(20):
+                _drain_process_phases(phases)
                 snapshot = create_sdk_recovery(creator)
                 recovery_id = str(snapshot["recoveryId"])
                 first_jobs.put(
@@ -311,7 +394,38 @@ def test_two_processes_race_twenty_times_with_one_durable_winner(tmp_path) -> No
                         ),
                     )
                 )
-                outcomes = [results.get(timeout=30), results.get(timeout=30)]
+                outcomes: list[dict[str, object]] = []
+                try:
+                    for _worker in processes:
+                        outcomes.append(results.get(timeout=20))
+                except Empty:
+                    worker_states = [
+                        {
+                            "pid": process.pid,
+                            "alive": process.is_alive(),
+                            "exitcode": process.exitcode,
+                        }
+                        for process in processes
+                    ]
+                    received = [
+                        {
+                            key: outcome.get(key)
+                            for key in (
+                                "iteration",
+                                "pid",
+                                "phase",
+                                "status",
+                                "errorType",
+                            )
+                        }
+                        for outcome in outcomes
+                    ]
+                    phase_diagnostics = _drain_process_phases(phases)[-20:]
+                    pytest.fail(
+                        "Timed out waiting for direct decision worker: "
+                        f"iteration={iteration}, received={received}, "
+                        f"workers={worker_states}, phases={phase_diagnostics}"
+                    )
 
                 assert all("error" not in outcome for outcome in outcomes), outcomes
                 assert {outcome["iteration"] for outcome in outcomes} == {iteration}
@@ -343,21 +457,22 @@ def test_two_processes_race_twenty_times_with_one_durable_winner(tmp_path) -> No
                         (recovery_id,),
                     ).fetchone() == (1,)
     finally:
-        first_jobs.put(None)
-        second_jobs.put(None)
-        for process in processes:
-            process.join(timeout=30)
-        for process in processes:
+        for jobs in job_queues[: len(started_processes)]:
+            jobs.put(None)
+        for process in started_processes:
+            process.join(timeout=5)
+        for process in started_processes:
             if process.is_alive():
                 process.terminate()
                 process.join(timeout=10)
-        for queue in (first_jobs, second_jobs, results):
+        for queue in (first_jobs, second_jobs, results, phases):
             queue.close()
             queue.join_thread()
         creator_store.close()
 
     assert len(worker_pids) == 2
     assert os.getpid() not in worker_pids
+    assert len(started_processes) == 2
     assert all(process.exitcode == 0 for process in processes)
 
 

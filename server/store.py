@@ -1587,8 +1587,31 @@ class SQLiteStore:
             raise ValueError("Only completed executions with results can be finalized")
         if receipt.recovery_id != execution.recovery_id:
             raise ReceiptTransitionError("Execution receipt recovery ID mismatch")
+        if (
+            execution.remedy_digest is None
+            or receipt.approved_remedy_digest != execution.remedy_digest
+        ):
+            raise ReceiptTransitionError("Execution receipt approved digest mismatch")
+        if not execution.provider_execution or not receipt.provider_execution:
+            raise ReceiptTransitionError("Execution receipt provider evidence mismatch")
+        provider_result = execution.result_json.get("provider_result")
+        if not isinstance(provider_result, str) or receipt.provider_result != provider_result:
+            raise ReceiptTransitionError("Execution receipt provider result mismatch")
         now = self._now()
         receipt_json = receipt.model_dump_json(by_alias=True, exclude_none=True)
+        terminal_data: dict[str, JsonValue] = {
+            "recoveryId": execution.recovery_id,
+            "executionMode": receipt.execution_mode.value,
+            "providerExecution": execution.provider_execution,
+            "approvedRemedyDigest": execution.remedy_digest,
+            "phase": "Verify & seal",
+            "summary": "Committed demo-provider result finalized after restart.",
+        }
+        terminal_json = json.dumps(
+            terminal_data,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
         changed = False
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -1602,9 +1625,49 @@ class SQLiteStore:
                 raise ReceiptTransitionError("Execution receipt mode mismatch")
 
             existing_receipt = connection.execute(
-                "SELECT 1 FROM receipts WHERE recovery_id = ?",
+                "SELECT receipt_json FROM receipts WHERE recovery_id = ?",
                 (execution.recovery_id,),
             ).fetchone()
+            if existing_receipt is not None:
+                try:
+                    stored_receipt = RecoveryReceipt.model_validate_json(
+                        cast(str, existing_receipt["receipt_json"])
+                    )
+                except (TypeError, ValueError):
+                    raise ReceiptTransitionError(
+                        "Existing receipt evidence mismatch"
+                    ) from None
+                if stored_receipt != receipt:
+                    raise ReceiptTransitionError("Existing receipt evidence mismatch")
+
+            terminal_events = connection.execute(
+                """
+                SELECT type, data_json FROM events
+                WHERE recovery_id = ? AND terminal = 1
+                ORDER BY seq ASC
+                """,
+                (execution.recovery_id,),
+            ).fetchall()
+            if len(terminal_events) > 1:
+                raise ReceiptTransitionError("Existing terminal evidence mismatch")
+            if terminal_events:
+                terminal_event = terminal_events[0]
+                try:
+                    stored_terminal_data = json.loads(
+                        cast(str, terminal_event["data_json"])
+                    )
+                except (TypeError, ValueError):
+                    raise ReceiptTransitionError(
+                        "Existing terminal evidence mismatch"
+                    ) from None
+                if (
+                    cast(str, terminal_event["type"]) != "recovery.completed"
+                    or stored_terminal_data != terminal_data
+                ):
+                    raise ReceiptTransitionError(
+                        "Existing terminal evidence mismatch"
+                    )
+
             if existing_receipt is None:
                 connection.execute(
                     """
@@ -1615,14 +1678,7 @@ class SQLiteStore:
                 )
                 changed = True
 
-            terminal_event = connection.execute(
-                """
-                SELECT 1 FROM events
-                WHERE recovery_id = ? AND terminal = 1
-                """,
-                (execution.recovery_id,),
-            ).fetchone()
-            if terminal_event is None:
+            if not terminal_events:
                 next_sequence = cast(
                     int,
                     connection.execute(
@@ -1639,17 +1695,7 @@ class SQLiteStore:
                     (
                         execution.recovery_id,
                         next_sequence,
-                        json.dumps(
-                            {
-                                "phase": "Verify & seal",
-                                "providerExecution": True,
-                                "summary": (
-                                    "Committed demo-provider result finalized after restart."
-                                ),
-                            },
-                            separators=(",", ":"),
-                            sort_keys=True,
-                        ),
+                        terminal_json,
                         now.isoformat(),
                     ),
                 )
