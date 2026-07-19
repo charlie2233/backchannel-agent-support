@@ -2,10 +2,13 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   ACTIVE_HOTEL_RECOVERY_KEY,
+  ACTIVE_HOTEL_RECOVERY_MODE_KEY,
   clearActiveHotelRecovery,
   clearPendingDecisionForRecovery,
   PENDING_DECISION_KEY,
+  persistActiveHotelRecovery,
   readActiveHotelRecovery,
+  readActiveHotelRecoveryMode,
 } from "./session";
 
 const recoveryId = "11111111-2222-4333-8444-555555555555";
@@ -48,6 +51,25 @@ describe("recovery session storage", () => {
 
     expect(readActiveHotelRecovery()).toBe(recoveryId);
     expect(sessionStorage.getItem(ACTIVE_HOTEL_RECOVERY_KEY)).toBe(recoveryId);
+  });
+
+  it("persists and clears the active recovery mode with its exact recovery ID", () => {
+    expect(persistActiveHotelRecovery(recoveryId, "openai_live")).toBe(true);
+    expect(readActiveHotelRecovery()).toBe(recoveryId);
+    expect(readActiveHotelRecoveryMode()).toBe("openai_live");
+
+    expect(clearActiveHotelRecovery(recoveryId)).toBe(true);
+    expect(sessionStorage.getItem(ACTIVE_HOTEL_RECOVERY_MODE_KEY)).toBeNull();
+  });
+
+  it("evicts an invalid or orphaned stored execution mode", () => {
+    sessionStorage.setItem(ACTIVE_HOTEL_RECOVERY_MODE_KEY, "openai_live");
+    expect(readActiveHotelRecoveryMode()).toBeNull();
+
+    sessionStorage.setItem(ACTIVE_HOTEL_RECOVERY_KEY, recoveryId);
+    sessionStorage.setItem(ACTIVE_HOTEL_RECOVERY_MODE_KEY, "secret_live_mode");
+    expect(readActiveHotelRecoveryMode()).toBeNull();
+    expect(sessionStorage.getItem(ACTIVE_HOTEL_RECOVERY_MODE_KEY)).toBeNull();
   });
 
   it("evicts only a valid pending claim matching a malformed active recovery id", () => {

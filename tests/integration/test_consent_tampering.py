@@ -372,7 +372,7 @@ def test_terms_mutated_after_display_fail_digest_recheck_with_zero_execution(
         )
 
     assert response.status_code == 422
-    assert response.json()["detail"]["code"] == "remedy_digest_mismatch"
+    assert response.json()["error"]["code"] == "remedy_digest_mismatch"
     assert provider.dispatch_count == 0
     assert store.count_decisions(recovery_id) == 0
     assert store.count_executions(recovery_id) == 0
@@ -442,7 +442,7 @@ def test_displayed_commitment_cannot_diverge_from_restored_sdk_arguments(
         )
 
     assert response.status_code == 409
-    assert response.json()["detail"]["code"] == "resume_incompatible"
+    assert response.json()["error"]["code"] == "resume_incompatible"
     assert provider.dispatch_count == 0
     assert store.count_executions(recovery_id) == 0
 
@@ -493,7 +493,7 @@ def test_expired_exact_digest_fails_closed(tmp_path) -> None:
         )
 
     assert response.status_code == 422
-    assert response.json()["detail"]["code"] == "remedy_expired"
+    assert response.json()["error"]["code"] == "remedy_expired"
     assert provider.dispatch_count == 0
     assert store.count_decisions(recovery_id) == 0
     assert store.count_executions(recovery_id) == 0
@@ -575,7 +575,7 @@ def test_recomputed_digest_cannot_bypass_current_policy_or_authority(
         )
 
     assert response.status_code == 422
-    assert response.json()["detail"]["code"] == expected_code
+    assert response.json()["error"]["code"] == expected_code
     assert provider.dispatch_count == 0
     assert store.count_decisions(recovery_id) == 0
     assert store.count_executions(recovery_id) == 0

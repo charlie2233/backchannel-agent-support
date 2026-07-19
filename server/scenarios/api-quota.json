@@ -58,7 +58,7 @@
     }
   ],
   "receipt": {
-    "status": "simulated_completed",
+    "status": "completed",
     "simulated": true,
     "providerExecution": false,
     "modelIds": [],

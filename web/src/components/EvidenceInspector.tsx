@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-import { postDecision } from "../api/client";
+import { postDecision, PublicApiError } from "../api/client";
 import type {
   DecisionAction,
   DecisionRequest,
@@ -93,6 +93,39 @@ function matchingStoredClaim(
 }
 
 function ReceiptInspector({ receipt }: { receipt: RecoveryReceipt }) {
+  if (receipt.executionMode === "replay_fixture") {
+    return (
+      <aside className="evidence-inspector receipt-inspector" aria-labelledby="replay-heading">
+        <div className="inspector-heading">
+          <p className="eyebrow">Recorded simulated fixture evidence</p>
+          <h2 id="replay-heading">Completed replay receipt</h2>
+          <p>No model call or provider dispatch occurred.</p>
+        </div>
+        <div className="receipt-verdict">
+          <strong>Simulated replay only.</strong>
+          <p>{receipt.providerResult}</p>
+        </div>
+        <ul className="receipt-checks" aria-label="Recorded replay verification">
+          {receipt.verificationResults.map((result) => <li key={result}>{result}</li>)}
+        </ul>
+        <dl className="evidence-list">
+          <div>
+            <dt>Model call</dt>
+            <dd>None — recorded replay</dd>
+          </div>
+          <div>
+            <dt>Provider dispatch</dt>
+            <dd>No</dd>
+          </div>
+          <div>
+            <dt>Boundary</dt>
+            <dd>{receipt.boundary}</dd>
+          </div>
+        </dl>
+      </aside>
+    );
+  }
+
   if (receipt.status === "closed_without_action") {
     const closureProof = [
       "Human consent requested.",
@@ -228,6 +261,8 @@ export function EvidenceInspector({
   const activeRequest = useRef<DecisionRequest | null>(
     synchronousStoredClaim?.request ?? null,
   );
+  const renderedRecoveryId = useRef(snapshot?.recoveryId ?? null);
+  renderedRecoveryId.current = snapshot?.recoveryId ?? null;
   const stateLockedDecision =
     lockedDecision !== null &&
     snapshot !== null &&
@@ -325,6 +360,7 @@ export function EvidenceInspector({
               remedyDigest: approval.remedyDigest,
               toolCallId: approval.toolCallId,
             };
+      const submittedRecoveryId = snapshot.recoveryId;
       if (
         !persistPendingDecision({ recoveryId: snapshot.recoveryId, request })
       ) {
@@ -338,6 +374,9 @@ export function EvidenceInspector({
       setStatusMessage(null);
       try {
         const response = await postDecision(snapshot.recoveryId, request);
+        if (renderedRecoveryId.current !== submittedRecoveryId) {
+          return;
+        }
         if (!responseMatchesRequest(response, request, snapshot.recoveryId)) {
           throw new Error("Decision acknowledgement did not match the durable request");
         }
@@ -348,14 +387,21 @@ export function EvidenceInspector({
             : "Decline accepted. Waiting for terminal evidence.",
         );
         onDecisionAccepted?.(response);
-      } catch {
-        setError(
-          action === "approve"
-            ? "Approval could not be recorded. Retry the same decision."
-            : "Decline could not be recorded. Retry the same decision.",
-        );
+      } catch (caught: unknown) {
+        if (renderedRecoveryId.current !== submittedRecoveryId) {
+          return;
+        }
+        const prefix =
+          caught instanceof PublicApiError
+            ? caught.message
+            : action === "approve"
+              ? "Approval could not be recorded."
+              : "Decline could not be recorded.";
+        setError(`${prefix} Retry the same decision.`);
       } finally {
-        setSubmittingAction(null);
+        if (renderedRecoveryId.current === submittedRecoveryId) {
+          setSubmittingAction(null);
+        }
       }
     };
 

@@ -298,6 +298,60 @@ a:focus-visible {
   color: #1849a9;
 }
 
+.live-run-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  padding: 12px 14px;
+}
+
+.live-run-controls p {
+  flex: 1 1 100%;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.live-run-controls p[role="alert"] {
+  border-left: 3px solid var(--danger);
+  background: #fef3f2;
+  padding: 9px 10px;
+  color: var(--danger);
+}
+
+.live-run-controls button {
+  min-height: 38px;
+  border: 1px solid #1849a9;
+  border-radius: 7px;
+  background: var(--accent);
+  padding: 8px 13px;
+  color: white;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.live-run-controls button:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.recovery-loading {
+  min-height: 180px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 28px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .recovery-heading {
   display: flex;
   align-items: flex-end;

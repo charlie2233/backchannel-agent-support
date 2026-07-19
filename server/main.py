@@ -1,18 +1,40 @@
-"""FastAPI entry point for truthful replay recovery persistence and streaming."""
+"""FastAPI entry point with a bounded, identity-safe public demo boundary."""
+
+from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Annotated
+from typing import Annotated, NoReturn
 from uuid import UUID
 
-from fastapi import FastAPI, Header, HTTPException, Request, Response, status
+from fastapi import FastAPI, Header, Request, Response, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from openai import AsyncOpenAI
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from server.agents.live_models import ResponseMetadataRecorder, SafeOpenAIResponsesProvider
+from server.agents.live_models import (
+    LiveModelRequestError,
+    ResponseMetadataRecorder,
+    SafeOpenAIResponsesProvider,
+)
+from server.cleanup import RecoveryCleanupService
 from server.config import RuntimeSettings
+from server.controls import (
+    LiveConcurrencyGate,
+    LiveConcurrencyLimitError,
+    PublicApiException,
+    PublicBoundaryMiddleware,
+    PublicIdentityHasher,
+    PublicLiveAdmissionError,
+    identity_from_scope,
+    public_error_detail,
+    recovery_id_from_scope,
+    request_id_from_scope,
+)
 from server.events import stream_recovery_events
+from server.logging import log_public_event
 from server.models import (
     ApprovalDecisionRequest,
     CreateRecoveryRequest,
@@ -25,6 +47,7 @@ from server.models import (
     RecoveryReceipt,
     RecoverySnapshot,
     RuntimeBackend,
+    ScenarioId,
     ScenarioResponse,
 )
 from server.orchestrator import (
@@ -39,6 +62,68 @@ from server.replay.loader import ScenarioLoader, ScenarioNotFoundError
 from server.store import ApprovalDecisionError, RecoveryNotFoundError, SQLiteStore
 
 
+def _raise_public(
+    *,
+    status_code: int,
+    code: str,
+    recovery_id: str | None = None,
+    retry_after_seconds: int | None = None,
+    replay_offer: bool = False,
+) -> NoReturn:
+    raise PublicApiException(
+        status_code=status_code,
+        code=code,
+        recovery_id=recovery_id,
+        retry_after_seconds=retry_after_seconds,
+        replay_offer=replay_offer,
+    )
+
+
+def _public_error_response(
+    request: Request,
+    *,
+    status_code: int,
+    code: str,
+    recovery_id: str | None = None,
+    retry_after_seconds: int | None = None,
+    replay_offer: bool = False,
+) -> JSONResponse:
+    request_id = request_id_from_scope(request.scope)
+    resolved_recovery_id = recovery_id or recovery_id_from_scope(request.scope)
+    safe_detail = public_error_detail(
+        code=code,
+        request_id=request_id,
+        recovery_id=resolved_recovery_id,
+        retry_after_seconds=retry_after_seconds,
+        replay_offer=replay_offer,
+    )
+    safe_code = str(safe_detail["code"])
+    log_public_event(
+        event="request_rejected",
+        request_id=request_id,
+        code=safe_code,
+        status_code=status_code,
+        recovery_id=resolved_recovery_id,
+    )
+    headers = {"Cache-Control": "no-store"}
+    if retry_after_seconds is not None:
+        headers["Retry-After"] = str(retry_after_seconds)
+    return JSONResponse(
+        status_code=status_code,
+        content={"error": safe_detail},
+        headers=headers,
+    )
+
+
+def _decision_error_code(code: str) -> str:
+    return {
+        "constraint_denied": "constraint_denied",
+        "remedy_expired": "remedy_expired",
+        "resume_owner_lost": "decision_in_progress",
+        "model_metadata_conflict": "model_metadata_conflict",
+    }.get(code, code)
+
+
 def create_app(
     settings: RuntimeSettings | None = None,
     *,
@@ -50,7 +135,11 @@ def create_app(
     recovery_store = store or SQLiteStore(runtime_settings.database_path)
     scenario_loader = ScenarioLoader()
     replay_engine = ReplayEngine(recovery_store, scenario_loader)
+    live_gate = LiveConcurrencyGate(
+        max_concurrent=runtime_settings.live_max_concurrent
+    )
     recovery_orchestrator = orchestrator
+    live_client: AsyncOpenAI | None = None
     if recovery_orchestrator is None:
         provider = hotel_provider or HotelSimulator(store=recovery_store)
         live_client = AsyncOpenAI() if runtime_settings.live_ready else None
@@ -73,35 +162,120 @@ def create_app(
                 live_provider_factory if runtime_settings.live_ready else None
             ),
         )
+
     @asynccontextmanager
     async def lifespan(_application: FastAPI) -> AsyncIterator[None]:
-        await recovery_orchestrator.startup()
+        cleanup_service = RecoveryCleanupService(
+            store=recovery_store,
+            ttl=runtime_settings.recovery_ttl,
+            interval=runtime_settings.cleanup_interval,
+            batch_size=runtime_settings.cleanup_batch_size,
+        )
+        _application.state.cleanup_service = cleanup_service
         try:
+            await recovery_orchestrator.startup()
+            await cleanup_service.startup()
             yield
         finally:
-            await recovery_orchestrator.shutdown()
+            try:
+                await cleanup_service.shutdown()
+            finally:
+                try:
+                    await recovery_orchestrator.shutdown()
+                finally:
+                    if live_client is not None:
+                        await live_client.close()
 
     application = FastAPI(
         title="Backchannel API",
         version="0.3.0",
         lifespan=lifespan,
+        docs_url=None if runtime_settings.deployed else "/docs",
+        redoc_url=None,
     )
     application.state.recovery_store = recovery_store
     application.state.recovery_orchestrator = recovery_orchestrator
+    application.state.live_gate = live_gate
     application.add_middleware(
         CORSMiddleware,
-        allow_origins=list(runtime_settings.development_cors_origins),
-        allow_credentials=False,
+        allow_origins=list(runtime_settings.cors_origins),
+        allow_credentials=True,
         allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["Accept", "Content-Type", "Last-Event-ID"],
     )
+    application.add_middleware(
+        PublicBoundaryMiddleware,
+        max_body_bytes=runtime_settings.max_request_body_bytes,
+        identity_hasher=PublicIdentityHasher(runtime_settings.identity_hmac_secret),
+        session_store=recovery_store,
+        session_ttl_seconds=int(runtime_settings.demo_session_ttl.total_seconds()),
+        trusted_proxy_cidrs=runtime_settings.trusted_proxy_cidrs,
+        deployed=runtime_settings.deployed,
+        allowed_origins=runtime_settings.cors_origins,
+    )
+
+    @application.exception_handler(PublicApiException)
+    async def public_api_exception_handler(
+        request: Request,
+        error: PublicApiException,
+    ) -> JSONResponse:
+        return _public_error_response(
+            request,
+            status_code=error.status_code,
+            code=error.code,
+            recovery_id=error.recovery_id,
+            retry_after_seconds=error.retry_after_seconds,
+            replay_offer=error.replay_offer,
+        )
+
+    @application.exception_handler(RequestValidationError)
+    async def validation_exception_handler(
+        request: Request,
+        _error: RequestValidationError,
+    ) -> JSONResponse:
+        return _public_error_response(
+            request,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            code="invalid_request",
+        )
+
+    @application.exception_handler(StarletteHTTPException)
+    async def http_exception_handler(
+        request: Request,
+        error: StarletteHTTPException,
+    ) -> JSONResponse:
+        if error.status_code == status.HTTP_404_NOT_FOUND:
+            code = "not_found"
+        elif error.status_code == status.HTTP_405_METHOD_NOT_ALLOWED:
+            code = "method_not_allowed"
+        else:
+            code = "invalid_request"
+        return _public_error_response(
+            request,
+            status_code=error.status_code,
+            code=code,
+        )
+
+    @application.exception_handler(Exception)
+    async def unhandled_exception_handler(
+        request: Request,
+        _error: Exception,
+    ) -> JSONResponse:
+        return _public_error_response(
+            request,
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            code="internal_error",
+        )
 
     @application.get("/health", response_model=HealthResponse)
     def health() -> HealthResponse:
-        backend = RuntimeBackend.OPENAI if runtime_settings.live_ready else RuntimeBackend.STUB
+        backend = (
+            RuntimeBackend.OPENAI if runtime_settings.live_ready else RuntimeBackend.STUB
+        )
         return HealthResponse(
             backend=backend,
             liveReady=runtime_settings.live_ready,
+            sdkStubReady=runtime_settings.sdk_stub_ready,
             providerBoundary=ProviderBoundary.DEMO_ADAPTER_ONLY,
         )
 
@@ -126,34 +300,93 @@ def create_app(
         response_model=RecoverySnapshot,
         status_code=status.HTTP_201_CREATED,
     )
-    async def create_recovery(payload: CreateRecoveryRequest) -> RecoverySnapshot:
+    async def create_recovery(
+        request: Request,
+        payload: CreateRecoveryRequest,
+    ) -> RecoverySnapshot:
         if payload.execution_mode is ExecutionMode.REPLAY_FIXTURE:
             try:
                 return replay_engine.start(
                     payload.scenario_id,
                     execution_mode=payload.execution_mode,
                 )
-            except (ScenarioNotFoundError, UnsupportedExecutionModeError) as error:
-                raise HTTPException(
+            except (ScenarioNotFoundError, UnsupportedExecutionModeError):
+                _raise_public(
                     status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                    detail=str(error),
-                ) from error
+                    code="invalid_request",
+                )
+        if (
+            payload.execution_mode is ExecutionMode.SDK_STUB
+            and not runtime_settings.sdk_stub_ready
+        ):
+            _raise_public(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                code="invalid_request",
+            )
+        if payload.execution_mode is ExecutionMode.OPENAI_LIVE:
+            if payload.scenario_id is not ScenarioId.HOTEL:
+                _raise_public(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    code="invalid_request",
+                )
+            if not runtime_settings.live_ready:
+                _raise_public(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    code="live_unavailable",
+                    replay_offer=True,
+                )
+            try:
+                async with live_gate.slot():
+                    identity = identity_from_scope(request.scope)
+                    recovery_store.claim_public_live_admission(
+                        session_hash=identity.session_hash,
+                        ip_hash=identity.ip_hash,
+                        cooldown=runtime_settings.live_cooldown,
+                        daily_budget=runtime_settings.live_daily_budget,
+                        session_ttl=runtime_settings.demo_session_ttl,
+                    )
+                    pending = await recovery_orchestrator.start(
+                        payload.scenario_id,
+                        execution_mode=payload.execution_mode,
+                    )
+                    return pending.recovery
+            except LiveConcurrencyLimitError:
+                _raise_public(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    code="live_capacity_reached",
+                    retry_after_seconds=1,
+                    replay_offer=True,
+                )
+            except PublicLiveAdmissionError as error:
+                _raise_public(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    code=error.code,
+                    retry_after_seconds=error.retry_after_seconds,
+                    replay_offer=True,
+                )
+            except (LiveUnavailableError, LiveModelRequestError):
+                _raise_public(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    code="live_unavailable",
+                    replay_offer=True,
+                )
         try:
             pending = await recovery_orchestrator.start(
                 payload.scenario_id,
                 execution_mode=payload.execution_mode,
             )
             return pending.recovery
-        except UnsupportedOrchestrationError as error:
-            raise HTTPException(
+        except UnsupportedOrchestrationError:
+            _raise_public(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail=str(error),
-            ) from error
-        except LiveUnavailableError as error:
-            raise HTTPException(
+                code="invalid_request",
+            )
+        except LiveUnavailableError:
+            _raise_public(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail={"code": error.code},
-            ) from error
+                code="live_unavailable",
+                replay_offer=True,
+            )
 
     @application.post(
         "/api/recoveries/{recovery_id}/decisions",
@@ -165,33 +398,57 @@ def create_app(
     ) -> DecisionResponse:
         recovery_key = str(recovery_id)
         try:
+            snapshot = recovery_store.get_recovery(recovery_key)
+        except RecoveryNotFoundError:
+            _raise_public(
+                status_code=status.HTTP_404_NOT_FOUND,
+                code="not_found",
+                recovery_id=recovery_key,
+            )
+        try:
+            if snapshot.execution_mode is ExecutionMode.OPENAI_LIVE:
+                async with live_gate.slot():
+                    return await recovery_orchestrator.decide(recovery_key, payload)
             return await recovery_orchestrator.decide(recovery_key, payload)
+        except LiveConcurrencyLimitError:
+            _raise_public(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                code="live_capacity_reached",
+                recovery_id=recovery_key,
+                retry_after_seconds=1,
+            )
         except ApprovalDecisionError as error:
-            raise HTTPException(
+            _raise_public(
                 status_code=error.status_code,
-                detail=error.public_detail,
-            ) from error
-        except ResumeIncompatibleError as error:
-            raise HTTPException(
+                code=_decision_error_code(error.code),
+                recovery_id=recovery_key,
+            )
+        except ResumeIncompatibleError:
+            _raise_public(
                 status_code=status.HTTP_409_CONFLICT,
-                detail=error.public_detail,
-            ) from error
-        except LiveUnavailableError as error:
-            raise HTTPException(
+                code="resume_incompatible",
+                recovery_id=recovery_key,
+            )
+        except (LiveUnavailableError, LiveModelRequestError):
+            _raise_public(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail={"code": error.code, "recoveryId": recovery_key},
-            ) from error
+                code="live_unavailable",
+                recovery_id=recovery_key,
+            )
 
     @application.get(
         "/api/recoveries/{recovery_id}", response_model=RecoverySnapshot
     )
     def get_recovery(recovery_id: UUID) -> RecoverySnapshot:
+        recovery_key = str(recovery_id)
         try:
-            return recovery_store.get_recovery(str(recovery_id))
-        except RecoveryNotFoundError as error:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="Not found"
-            ) from error
+            return recovery_store.get_recovery(recovery_key)
+        except RecoveryNotFoundError:
+            _raise_public(
+                status_code=status.HTTP_404_NOT_FOUND,
+                code="not_found",
+                recovery_id=recovery_key,
+            )
 
     @application.get("/api/recoveries/{recovery_id}/events")
     async def recovery_events(
@@ -201,25 +458,23 @@ def create_app(
     ) -> Response:
         cursor = 0
         if last_event_id is not None:
+            if len(last_event_id) > 20:
+                _raise_public(status_code=400, code="invalid_request")
             try:
                 cursor = int(last_event_id)
-            except ValueError as error:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Last-Event-ID must be a non-negative integer",
-                ) from error
+            except ValueError:
+                _raise_public(status_code=400, code="invalid_request")
             if cursor < 0:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Last-Event-ID must be a non-negative integer",
-                )
+                _raise_public(status_code=400, code="invalid_request")
         recovery_key = str(recovery_id)
         try:
             recovery_store.get_recovery(recovery_key)
-        except RecoveryNotFoundError as error:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="Not found"
-            ) from error
+        except RecoveryNotFoundError:
+            _raise_public(
+                status_code=status.HTTP_404_NOT_FOUND,
+                code="not_found",
+                recovery_id=recovery_key,
+            )
 
         return StreamingResponse(
             stream_recovery_events(
@@ -239,19 +494,22 @@ def create_app(
         "/api/recoveries/{recovery_id}/receipt", response_model=RecoveryReceipt
     )
     def get_receipt(recovery_id: UUID) -> RecoveryReceipt:
+        recovery_key = str(recovery_id)
         try:
-            return recovery_store.get_receipt(str(recovery_id))
-        except RecoveryNotFoundError as error:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail="Not found"
-            ) from error
+            return recovery_store.get_receipt(recovery_key)
+        except RecoveryNotFoundError:
+            _raise_public(
+                status_code=status.HTTP_404_NOT_FOUND,
+                code="not_found",
+                recovery_id=recovery_key,
+            )
 
     @application.post("/api/demo/reset", response_model=DemoResetResponse)
     def reset_demo() -> DemoResetResponse:
         if not runtime_settings.demo_reset_enabled:
-            raise HTTPException(
+            _raise_public(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Forbidden",
+                code="invalid_request",
             )
         recovery_store.reset()
         return DemoResetResponse(reset=True)

@@ -15,7 +15,7 @@ export function ProvenanceStrip({ presentation, healthError }: ProvenanceStripPr
           <p>
             {healthError
               ? "The health endpoint could not be verified, so no runtime claim is shown."
-              : "Waiting for /health before making a runtime claim."}
+              : "Waiting for verified health and recovery evidence before making a runtime claim."}
           </p>
         </div>
       </section>

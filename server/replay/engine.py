@@ -6,7 +6,6 @@ from uuid import uuid4
 
 from server.models import (
     ExecutionMode,
-    RecoveryReceipt,
     RecoverySnapshot,
     ScenarioId,
 )
@@ -34,29 +33,7 @@ class ReplayEngine:
 
         scenario = self._loader.get(scenario_id)
         recovery_id = str(uuid4())
-        snapshot = self._store.create_recovery(
+        return self._store.create_replay_recovery(
             recovery_id=recovery_id,
-            scenario_id=scenario.id,
-            execution_mode=execution_mode,
-            current_step=scenario.initial_step,
-            current_step_summary=scenario.initial_summary,
+            scenario=scenario,
         )
-        final_event_index = len(scenario.events) - 1
-        for index, event in enumerate(scenario.events):
-            receipt = None
-            if index == final_event_index and scenario.receipt is not None:
-                receipt = RecoveryReceipt(
-                    recoveryId=recovery_id,
-                    executionMode=ExecutionMode.REPLAY_FIXTURE,
-                    **scenario.receipt.model_dump(),
-                )
-            snapshot = self._store.record_transition(
-                recovery_id,
-                status=event.status,
-                current_step=event.current_step,
-                current_step_summary=event.summary,
-                event_type=event.type,
-                event_data=event.data,
-                receipt=receipt,
-            )
-        return snapshot

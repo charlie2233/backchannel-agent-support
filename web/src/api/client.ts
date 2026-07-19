@@ -22,11 +22,204 @@ export class HttpStatusError extends Error {
   }
 }
 
-function failedRequest(label: string, response: Response): HttpStatusError {
-  return new HttpStatusError(
-    `${label} failed with status ${response.status}`,
-    response.status,
+export type PublicErrorCode =
+  | "invalid_request"
+  | "method_not_allowed"
+  | "not_found"
+  | "unsupported_media_type"
+  | "request_too_large"
+  | "live_unavailable"
+  | "live_cooldown"
+  | "live_daily_budget_exceeded"
+  | "live_capacity_reached"
+  | "resume_incompatible"
+  | "already_decided"
+  | "decision_id_conflict"
+  | "remedy_mismatch"
+  | "remedy_digest_mismatch"
+  | "tool_call_mismatch"
+  | "consent_expired"
+  | "hard_constraint_denied"
+  | "authority_denied"
+  | "constraint_denied"
+  | "remedy_expired"
+  | "decision_unavailable"
+  | "decision_in_progress"
+  | "model_metadata_conflict"
+  | "internal_error";
+
+export interface ReplayFixtureFallback {
+  kind: "show_replay_fixture";
+  scenarioId: "hotel";
+  executionMode: "replay_fixture";
+}
+
+const publicMessages: Readonly<Record<PublicErrorCode, string>> = {
+  invalid_request: "The request is invalid.",
+  method_not_allowed: "The method is not allowed.",
+  not_found: "The requested resource was not found.",
+  unsupported_media_type: "Content-Type must be application/json.",
+  request_too_large: "The request body is too large.",
+  live_unavailable: "Live mode is unavailable on this server.",
+  live_cooldown: "Live mode is cooling down for this demo identity.",
+  live_daily_budget_exceeded: "The live demo budget is exhausted for today.",
+  live_capacity_reached: "The live demo is currently at capacity.",
+  resume_incompatible: "The saved decision cannot be resumed safely.",
+  already_decided: "This recovery already has a terminal decision.",
+  decision_id_conflict: "This decision identifier was already used.",
+  remedy_mismatch: "The decision does not match the pending remedy.",
+  remedy_digest_mismatch: "The decision does not match the displayed terms.",
+  tool_call_mismatch: "The decision does not match the pending tool call.",
+  consent_expired: "The displayed remedy has expired.",
+  hard_constraint_denied: "The remedy no longer satisfies hard constraints.",
+  authority_denied: "The remedy exceeds delegated authority.",
+  constraint_denied: "The remedy no longer satisfies hard constraints.",
+  remedy_expired: "The displayed remedy has expired.",
+  decision_unavailable: "The pending decision is unavailable.",
+  decision_in_progress: "The durable decision is already being resumed.",
+  model_metadata_conflict: "The saved decision cannot be resumed safely.",
+  internal_error: "The request could not be completed.",
+};
+
+const publicErrorCodes = new Set<string>(Object.keys(publicMessages));
+const fallbackCodes = new Set<PublicErrorCode>([
+  "live_unavailable",
+  "live_cooldown",
+  "live_daily_budget_exceeded",
+  "live_capacity_reached",
+]);
+
+export class PublicApiError extends HttpStatusError {
+  readonly code: PublicErrorCode | "unexpected_response";
+  readonly requestId: string | null;
+  readonly recoveryId: string | null;
+  readonly retryAfterSeconds: number | null;
+  readonly fallback: ReplayFixtureFallback | null;
+
+  constructor(
+    message: string,
+    status: number,
+    options: {
+      code: PublicErrorCode | "unexpected_response";
+      requestId: string | null;
+      recoveryId: string | null;
+      retryAfterSeconds: number | null;
+      fallback: ReplayFixtureFallback | null;
+    },
+  ) {
+    super(message, status);
+    this.name = "PublicApiError";
+    this.code = options.code;
+    this.requestId = options.requestId;
+    this.recoveryId = options.recoveryId;
+    this.retryAfterSeconds = options.retryAfterSeconds;
+    this.fallback = options.fallback;
+  }
+}
+
+function unexpectedResponse(status: number): PublicApiError {
+  return new PublicApiError("The server returned an unexpected response.", status, {
+    code: "unexpected_response",
+    requestId: null,
+    recoveryId: null,
+    retryAfterSeconds: null,
+    fallback: null,
+  });
+}
+
+async function successfulJson(response: Response): Promise<unknown> {
+  try {
+    return await response.json();
+  } catch {
+    throw unexpectedResponse(response.status);
+  }
+}
+
+function isUuid(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value)
   );
+}
+
+function isReplayFallback(value: unknown): value is ReplayFixtureFallback {
+  return (
+    isRecord(value) &&
+    hasExactKeys(value, ["kind", "scenarioId", "executionMode"]) &&
+    value.kind === "show_replay_fixture" &&
+    value.scenarioId === "hotel" &&
+    value.executionMode === "replay_fixture"
+  );
+}
+
+async function failedRequest(
+  response: Response,
+  options: {
+    allowFallback?: boolean;
+    expectedRecoveryId?: string;
+  } = {},
+): Promise<PublicApiError> {
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    return unexpectedResponse(response.status);
+  }
+  if (!isRecord(body) || !hasExactKeys(body, ["error"]) || !isRecord(body.error)) {
+    return unexpectedResponse(response.status);
+  }
+  const error = body.error;
+  if (
+    !hasExactKeys(error, [
+      "code",
+      "message",
+      "requestId",
+      "recoveryId",
+      "retryAfterSeconds",
+      "fallback",
+    ]) ||
+    typeof error.code !== "string" ||
+    !publicErrorCodes.has(error.code) ||
+    typeof error.message !== "string" ||
+    error.message !== publicMessages[error.code as PublicErrorCode] ||
+    typeof error.requestId !== "string" ||
+    !/^req_[0-9a-f]{32}$/.test(error.requestId) ||
+    !(error.recoveryId === null || isUuid(error.recoveryId)) ||
+    !(
+      error.retryAfterSeconds === null ||
+      (Number.isInteger(error.retryAfterSeconds) && Number(error.retryAfterSeconds) >= 0)
+    )
+  ) {
+    return unexpectedResponse(response.status);
+  }
+  if (
+    options.expectedRecoveryId !== undefined &&
+    error.recoveryId !== options.expectedRecoveryId
+  ) {
+    return unexpectedResponse(response.status);
+  }
+  const code = error.code as PublicErrorCode;
+  let fallback: ReplayFixtureFallback | null = null;
+  if (error.fallback !== null) {
+    if (
+      options.allowFallback !== true ||
+      !fallbackCodes.has(code) ||
+      !isReplayFallback(error.fallback)
+    ) {
+      return unexpectedResponse(response.status);
+    }
+    fallback = error.fallback;
+  } else if (options.allowFallback === true && fallbackCodes.has(code)) {
+    return unexpectedResponse(response.status);
+  }
+  return new PublicApiError(error.message, response.status, {
+    code,
+    requestId: error.requestId,
+    recoveryId: error.recoveryId,
+    retryAfterSeconds:
+      error.retryAfterSeconds === null ? null : Number(error.retryAfterSeconds),
+    fallback,
+  });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -125,8 +318,15 @@ function isHealthStatus(value: unknown): value is HealthStatus {
 
   const candidate = value as Record<string, unknown>;
   return (
+    hasExactKeys(candidate, [
+      "backend",
+      "liveReady",
+      "sdkStubReady",
+      "providerBoundary",
+    ]) &&
     (candidate.backend === "openai" || candidate.backend === "stub") &&
     typeof candidate.liveReady === "boolean" &&
+    typeof candidate.sdkStubReady === "boolean" &&
     candidate.providerBoundary === "demo_adapter_only"
   );
 }
@@ -134,16 +334,17 @@ function isHealthStatus(value: unknown): value is HealthStatus {
 export async function getHealth(signal?: AbortSignal): Promise<HealthStatus> {
   const response = await fetch("/health", {
     headers: { Accept: "application/json" },
+    credentials: "same-origin",
     signal,
   });
 
   if (!response.ok) {
-    throw failedRequest("Health request", response);
+    throw await failedRequest(response);
   }
 
-  const body: unknown = await response.json();
+  const body = await successfulJson(response);
   if (!isHealthStatus(body)) {
-    throw new Error("Health response did not match the runtime contract");
+    throw unexpectedResponse(response.status);
   }
 
   return body;
@@ -203,7 +404,7 @@ export function isRecoverySnapshot(value: unknown): value is RecoverySnapshot {
       typeof value.agentGraphVersion === "string" &&
       typeof value.promptToolSchemaHash === "string");
   return (
-    typeof value.recoveryId === "string" &&
+    isUuid(value.recoveryId) &&
     (value.scenarioId === "hotel" || value.scenarioId === "api-quota") &&
     (value.executionMode === "openai_live" ||
       value.executionMode === "sdk_stub" ||
@@ -224,9 +425,9 @@ export function isRecoverySnapshot(value: unknown): value is RecoverySnapshot {
 }
 
 async function readRecovery(response: Response): Promise<RecoverySnapshot> {
-  const body: unknown = await response.json();
+  const body = await successfulJson(response);
   if (!isRecoverySnapshot(body)) {
-    throw new Error("Recovery response did not match the snapshot contract");
+    throw unexpectedResponse(response.status);
   }
   return body;
 }
@@ -237,12 +438,17 @@ export async function getRecovery(
 ): Promise<RecoverySnapshot> {
   const response = await fetch(`/api/recoveries/${encodeURIComponent(recoveryId)}`, {
     headers: { Accept: "application/json" },
+    credentials: "same-origin",
     signal,
   });
   if (!response.ok) {
-    throw failedRequest("Recovery request", response);
+    throw await failedRequest(response, { expectedRecoveryId: recoveryId });
   }
-  return readRecovery(response);
+  const recovery = await readRecovery(response);
+  if (recovery.recoveryId !== recoveryId) {
+    throw unexpectedResponse(response.status);
+  }
+  return recovery;
 }
 
 export async function createRecovery(
@@ -257,12 +463,22 @@ export async function createRecovery(
       "Content-Type": "application/json",
     },
     body: JSON.stringify({ scenarioId, executionMode }),
+    credentials: "same-origin",
     signal,
   });
   if (!response.ok) {
-    throw failedRequest("Recovery creation", response);
+    throw await failedRequest(response, {
+      allowFallback: executionMode === "openai_live",
+    });
   }
-  return readRecovery(response);
+  const recovery = await readRecovery(response);
+  if (
+    recovery.scenarioId !== scenarioId ||
+    recovery.executionMode !== executionMode
+  ) {
+    throw unexpectedResponse(response.status);
+  }
+  return recovery;
 }
 
 function isApprovalDecisionResponse(
@@ -278,7 +494,7 @@ function isApprovalDecisionResponse(
       "executionStarted",
     ]) &&
     typeof value.clientDecisionId === "string" &&
-    typeof value.recoveryId === "string" &&
+    isUuid(value.recoveryId) &&
     value.decision === "approve" &&
     value.status === "completed" &&
     isSha256Digest(value.approvedRemedyDigest) &&
@@ -299,7 +515,7 @@ function isDeclineDecisionResponse(
       "executionStarted",
     ]) &&
     typeof value.clientDecisionId === "string" &&
-    typeof value.recoveryId === "string" &&
+    isUuid(value.recoveryId) &&
     value.decision === "decline" &&
     (value.status === "closed_without_action" || value.status === "outcome_unknown") &&
     isSha256Digest(value.decisionRemedyDigest) &&
@@ -328,15 +544,28 @@ export async function postDecision(
         "Content-Type": "application/json",
       },
       body: JSON.stringify(decision),
+      credentials: "same-origin",
       signal,
     },
   );
   if (!response.ok) {
-    throw failedRequest("Decision request", response);
+    throw await failedRequest(response, { expectedRecoveryId: recoveryId });
   }
-  const body: unknown = await response.json();
+  const body = await successfulJson(response);
   if (!isDecisionResponse(body)) {
-    throw new Error("Decision response did not match the terminal action contract");
+    throw unexpectedResponse(response.status);
+  }
+  const responseDigest =
+    body.decision === "approve"
+      ? body.approvedRemedyDigest
+      : body.decisionRemedyDigest;
+  if (
+    body.recoveryId !== recoveryId ||
+    body.clientDecisionId !== decision.clientDecisionId ||
+    body.decision !== decision.decision ||
+    responseDigest !== decision.remedyDigest
+  ) {
+    throw unexpectedResponse(response.status);
   }
   return body;
 }
@@ -389,7 +618,7 @@ function isRecoveryReceipt(value: unknown): value is RecoveryReceipt {
     value.status === "closed_without_action" ||
     value.status === "outcome_unknown";
   const commonFieldsAreValid =
-    typeof value.recoveryId === "string" &&
+    isUuid(value.recoveryId) &&
     executionModeIsValid &&
     statusIsTerminal &&
     typeof value.simulated === "boolean" &&
@@ -440,7 +669,25 @@ function isRecoveryReceipt(value: unknown): value is RecoveryReceipt {
   }
 
   if (value.executionMode === "replay_fixture") {
-    return true;
+    return (
+      value.status === "completed" &&
+      value.simulated === true &&
+      value.providerExecution === false &&
+      modelIds.length === 0 &&
+      value.rootTraceId === null &&
+      value.sdkVersion === null &&
+      value.protocolVersion === null &&
+      value.agentGraphVersion === null &&
+      value.promptToolSchemaHash === null &&
+      value.decision === null &&
+      value.decisionRemedyDigest === null &&
+      value.executionCount === 0 &&
+      value.providerDispatchStarted === false &&
+      value.exactInterruptionRejected === false &&
+      value.permissionRevoked === false &&
+      value.scopeClosed === false &&
+      value.approvedRemedyDigest === null
+    );
   }
   if (!value.permissionRevoked || !value.scopeClosed || value.decisionRemedyDigest === null) {
     return false;
@@ -480,14 +727,21 @@ export async function getReceipt(
 ): Promise<RecoveryReceipt> {
   const response = await fetch(
     `/api/recoveries/${encodeURIComponent(recoveryId)}/receipt`,
-    { headers: { Accept: "application/json" }, signal },
+    {
+      headers: { Accept: "application/json" },
+      credentials: "same-origin",
+      signal,
+    },
   );
   if (!response.ok) {
-    throw failedRequest("Receipt request", response);
+    throw await failedRequest(response, { expectedRecoveryId: recoveryId });
   }
-  const body: unknown = await response.json();
+  const body = await successfulJson(response);
   if (!isRecoveryReceipt(body)) {
-    throw new Error("Receipt response did not match the terminal evidence contract");
+    throw unexpectedResponse(response.status);
+  }
+  if (body.recoveryId !== recoveryId) {
+    throw unexpectedResponse(response.status);
   }
   return body;
 }

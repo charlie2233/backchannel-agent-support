@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { createRecovery, getHealth, postDecision } from "./api/client";
+import {
+  createRecovery,
+  getHealth,
+  postDecision,
+  PublicApiError,
+} from "./api/client";
 import { EvidenceInspector } from "./components/EvidenceInspector";
 import { Lifecycle } from "./components/Lifecycle";
 import { ProvenanceStrip } from "./components/ProvenanceStrip";
@@ -13,15 +18,21 @@ import {
   type RecoverySnapshot,
   type ScenarioId,
 } from "./domain/recovery";
-import { deriveRuntimePresentation, type HealthStatus } from "./domain/runtime";
 import {
-  clearActiveHotelRecovery,
+  deriveRuntimePresentation,
+  type ExecutionMode,
+  type HealthStatus,
+} from "./domain/runtime";
+import {
   clearPendingDecisionForRecovery,
   persistActiveHotelRecovery,
   readActiveHotelRecovery,
   readPendingDecision,
 } from "./domain/session";
-import { recoveryScenarios } from "./fixtures/recoveries";
+import {
+  hotelReplayCompletedPresentation,
+  recoveryScenarios,
+} from "./fixtures/recoveries";
 import { useRecovery } from "./hooks/useRecovery";
 
 let activeHotelCreation: Promise<RecoverySnapshot> | null = null;
@@ -60,6 +71,26 @@ function recoveryStateLabel(snapshot: RecoverySnapshot | null, scenario: Recover
   return snapshot.pendingApproval === null ? "Decision in progress" : "Awaiting approval";
 }
 
+function environmentLabel(mode: ExecutionMode | null): string {
+  switch (mode) {
+    case "openai_live":
+      return "OpenAI live workspace";
+    case "sdk_stub":
+      return "SDK QA workspace";
+    case "replay_fixture":
+      return "Replay workspace";
+    case null:
+      return "Runtime pending";
+  }
+}
+
+function safeLiveStartError(error: unknown): Error {
+  if (error instanceof PublicApiError) {
+    return error;
+  }
+  return new Error("Live recovery could not be started.");
+}
+
 interface AutomaticDecisionRetry {
   recoveryId: string;
   request: DecisionRequest;
@@ -91,12 +122,19 @@ export default function App() {
     readActiveHotelRecovery(),
   );
   const [createdSnapshot, setCreatedSnapshot] = useState<RecoverySnapshot | null>(null);
+  const [defaultCreationPending, setDefaultCreationPending] = useState(
+    hotelRecoveryId === null,
+  );
+  const [runAction, setRunAction] = useState<"live" | "replay" | null>(null);
+  const [liveStartError, setLiveStartError] = useState<Error | null>(null);
   const [automaticDecisionRetry, setAutomaticDecisionRetry] =
     useState<AutomaticDecisionRetry | null>(() =>
       storedAutomaticDecisionRetry(hotelRecoveryId),
     );
   const retriedClaims = useRef(new Set<string>());
-  const replacedRecoveries = useRef(new Set<string>());
+  const actionInFlight = useRef(false);
+  const selectionGeneration = useRef(0);
+  const actionController = useRef<AbortController | null>(null);
 
   const recovery = useRecovery(hotelRecoveryId, {
     initialSnapshot:
@@ -105,6 +143,7 @@ export default function App() {
 
   const activeScenario =
     recoveryScenarios.find((scenario) => scenario.id === activeId) ?? recoveryScenarios[0];
+  const hotelScenario = recoveryScenarios[0];
 
   useEffect(() => {
     const controller = new AbortController();
@@ -125,63 +164,64 @@ export default function App() {
 
   useEffect(() => {
     if (hotelRecoveryId !== null) {
+      setDefaultCreationPending(false);
+      return;
+    }
+    if (health === null) {
+      setDefaultCreationPending(!healthError);
+      return;
+    }
+    if (!health.sdkStubReady) {
+      setDefaultCreationPending(false);
       return;
     }
     let disposed = false;
+    const generation = selectionGeneration.current;
+    setDefaultCreationPending(true);
     const creation = createHotelRecoveryOnce();
     void creation
       .then((snapshot) => {
-        if (disposed) {
+        if (disposed || generation !== selectionGeneration.current) {
           return;
         }
-        persistActiveHotelRecovery(snapshot.recoveryId);
+        persistActiveHotelRecovery(snapshot.recoveryId, snapshot.executionMode);
         setCreatedSnapshot(snapshot);
         setHotelRecoveryId(snapshot.recoveryId);
-        if (activeHotelCreation === creation) {
-          activeHotelCreation = null;
-        }
       })
       .catch(() => {
+        if (!disposed && generation === selectionGeneration.current) {
+          setCreatedSnapshot(null);
+        }
+      })
+      .finally(() => {
         if (activeHotelCreation === creation) {
           activeHotelCreation = null;
         }
-        if (!disposed) {
-          setCreatedSnapshot(null);
+        if (!disposed && generation === selectionGeneration.current) {
+          setDefaultCreationPending(false);
         }
       });
     return () => {
       disposed = true;
     };
-  }, [hotelRecoveryId]);
+  }, [health, healthError, hotelRecoveryId]);
 
   useEffect(() => {
+    const snapshot = recovery.snapshot;
     if (
       hotelRecoveryId === null ||
-      recovery.errorPhase !== "initial" ||
-      (recovery.errorStatus !== 404 && recovery.errorStatus !== 422) ||
-      replacedRecoveries.current.has(hotelRecoveryId)
+      snapshot === null ||
+      snapshot.recoveryId !== hotelRecoveryId
     ) {
       return;
     }
+    persistActiveHotelRecovery(hotelRecoveryId, snapshot.executionMode);
+  }, [hotelRecoveryId, recovery.snapshot]);
 
-    const storedRecoveryId = readActiveHotelRecovery();
-    clearPendingDecisionForRecovery(hotelRecoveryId);
-    setAutomaticDecisionRetry((current) =>
-      current?.recoveryId === hotelRecoveryId ? null : current,
-    );
-    if (storedRecoveryId !== null && storedRecoveryId !== hotelRecoveryId) {
-      setCreatedSnapshot(null);
-      setHotelRecoveryId(storedRecoveryId);
-      return;
-    }
-
-    replacedRecoveries.current.add(hotelRecoveryId);
-    clearActiveHotelRecovery(hotelRecoveryId);
-    setCreatedSnapshot(null);
-    setHotelRecoveryId((current) =>
-      current === hotelRecoveryId ? null : current,
-    );
-  }, [hotelRecoveryId, recovery.errorPhase, recovery.errorStatus]);
+  useEffect(() => () => {
+    selectionGeneration.current += 1;
+    actionController.current?.abort();
+  }, []);
 
   useEffect(() => {
     const snapshot = recovery.snapshot;
@@ -251,6 +291,53 @@ export default function App() {
     }
   }, [recovery.receipt, recovery.snapshot]);
 
+  const runRecovery = async (executionMode: "openai_live" | "replay_fixture") => {
+    if (
+      actionInFlight.current ||
+      readPendingDecision() !== null ||
+      defaultCreationPending ||
+      recovery.loading ||
+      (hotelRecoveryId !== null &&
+        (recovery.snapshot === null ||
+          !isTerminalRecoveryStatus(recovery.snapshot.status)))
+    ) {
+      return;
+    }
+    actionInFlight.current = true;
+    const generation = selectionGeneration.current + 1;
+    selectionGeneration.current = generation;
+    const controller = new AbortController();
+    actionController.current?.abort();
+    actionController.current = controller;
+    setRunAction(executionMode === "openai_live" ? "live" : "replay");
+    setLiveStartError(null);
+
+    try {
+      const snapshot = await createRecovery("hotel", executionMode, controller.signal);
+      if (controller.signal.aborted || generation !== selectionGeneration.current) {
+        return;
+      }
+      persistActiveHotelRecovery(snapshot.recoveryId, snapshot.executionMode);
+      setCreatedSnapshot(snapshot);
+      setHotelRecoveryId(snapshot.recoveryId);
+    } catch (error: unknown) {
+      if (
+        controller.signal.aborted ||
+        generation !== selectionGeneration.current ||
+        (error instanceof DOMException && error.name === "AbortError")
+      ) {
+        return;
+      }
+      setLiveStartError(safeLiveStartError(error));
+    } finally {
+      if (generation === selectionGeneration.current) {
+        actionInFlight.current = false;
+        actionController.current = null;
+        setRunAction(null);
+      }
+    }
+  };
+
   const activeSnapshot = activeId === "hotel" ? recovery.snapshot : null;
   const activeReceipt = activeId === "hotel" ? recovery.receipt : null;
   const automaticSubmittingAction =
@@ -264,24 +351,63 @@ export default function App() {
     )
       ? automaticDecisionRetry.request.decision
       : null;
-  const activeScenarioView = useMemo<RecoveryScenario>(
+  const hotelScenarioView = useMemo<RecoveryScenario>(
     () =>
-      activeSnapshot === null
-        ? activeScenario
+      recovery.snapshot === null
+        ? hotelScenario
         : {
-            ...activeScenario,
-            executionMode: activeSnapshot.executionMode,
-            status: activeSnapshot.status,
-            currentStep: activeSnapshot.currentStep,
-            currentStepSummary: activeSnapshot.currentStepSummary,
+            ...hotelScenario,
+            executionMode: recovery.snapshot.executionMode,
+            status: recovery.snapshot.status,
+            currentStep: recovery.snapshot.currentStep,
+            currentStepSummary: recovery.snapshot.currentStepSummary,
+            ...(recovery.snapshot.executionMode === "replay_fixture" &&
+            recovery.snapshot.status === "completed"
+              ? hotelReplayCompletedPresentation
+              : {}),
           },
-    [activeScenario, activeSnapshot],
+    [hotelScenario, recovery.snapshot],
+  );
+  const activeScenarioView =
+    activeId === "hotel" ? hotelScenarioView : activeScenario;
+  const scenarioRailScenarios = useMemo<ReadonlyArray<RecoveryScenario>>(
+    () =>
+      recoveryScenarios.map((scenario) =>
+        scenario.id === "hotel" ? hotelScenarioView : scenario,
+      ),
+    [hotelScenarioView],
   );
 
+  const activeExecutionMode: ExecutionMode | null =
+    activeSnapshot?.executionMode ??
+    (activeId === "hotel" ? null : "replay_fixture");
+
   const presentation = useMemo(
-    () => (health === null ? null : deriveRuntimePresentation(health, activeScenarioView)),
-    [activeScenarioView, health],
+    () =>
+      health === null || activeExecutionMode === null
+        ? null
+        : deriveRuntimePresentation(health, { executionMode: activeExecutionMode }),
+    [activeExecutionMode, health],
   );
+  const pendingDecision = readPendingDecision();
+  const replayFallbackAvailable =
+    healthError ||
+    health?.liveReady === false ||
+    (liveStartError instanceof PublicApiError && liveStartError.fallback !== null);
+  const unresolvedRecoveryActive =
+    activeId === "hotel" &&
+    (defaultCreationPending ||
+      recovery.loading ||
+      (hotelRecoveryId !== null &&
+        (activeSnapshot === null ||
+          !isTerminalRecoveryStatus(activeSnapshot.status))));
+  const switchingLocked = pendingDecision !== null || unresolvedRecoveryActive;
+  const hotelContentPending =
+    activeId === "hotel" &&
+    activeSnapshot === null &&
+    (defaultCreationPending || recovery.loading || runAction !== null);
+  const hotelContentUnavailable =
+    activeId === "hotel" && activeSnapshot === null && !hotelContentPending;
 
   return (
     <div className="app-frame">
@@ -296,20 +422,61 @@ export default function App() {
         <div className="top-context">
           <span>Operational recovery console</span>
           <span className="environment-badge">
-            {activeSnapshot?.executionMode === "sdk_stub" ? "SDK QA workspace" : "Replay workspace"}
+            {environmentLabel(activeExecutionMode)}
           </span>
         </div>
       </header>
 
       <div className="console-shell" id="workspace">
         <ScenarioRail
-          scenarios={recoveryScenarios}
+          scenarios={scenarioRailScenarios}
           activeId={activeId}
           onSelect={setActiveId}
         />
 
         <main className="workspace">
           <ProvenanceStrip presentation={presentation} healthError={healthError} />
+          {activeId === "hotel" ? (
+            <section className="live-run-controls" aria-label="Recovery execution controls">
+              {health?.liveReady === true ? (
+                <button
+                  type="button"
+                  disabled={runAction !== null || switchingLocked}
+                  onClick={() => void runRecovery("openai_live")}
+                >
+                  {runAction === "live" ? "Starting live recovery…" : "Run live recovery"}
+                </button>
+              ) : null}
+              {health?.liveReady === false ? (
+                <p>Live mode is unavailable on this server.</p>
+              ) : null}
+              {liveStartError !== null ? (
+                <p role="alert">
+                  {liveStartError.message}
+                  {liveStartError instanceof PublicApiError &&
+                  liveStartError.retryAfterSeconds !== null
+                    ? ` Try again in ${liveStartError.retryAfterSeconds} seconds.`
+                    : ""}
+                </p>
+              ) : null}
+              {replayFallbackAvailable ? (
+                <button
+                  type="button"
+                  disabled={runAction !== null || switchingLocked}
+                  onClick={() => void runRecovery("replay_fixture")}
+                >
+                  {runAction === "replay" ? "Starting replay fixture…" : "Run replay fixture"}
+                </button>
+              ) : null}
+              {switchingLocked ? (
+                <p>
+                  {pendingDecision !== null
+                    ? "A saved decision must be retried with its original recovery before switching modes."
+                    : "Finish or decline the active recovery before switching modes."}
+                </p>
+              ) : null}
+            </section>
+          ) : null}
           <section className="recovery-heading" aria-labelledby="recovery-title">
             <div>
               <p className="eyebrow">Active recovery</p>
@@ -319,15 +486,35 @@ export default function App() {
               {recoveryStateLabel(activeSnapshot, activeScenarioView)}
             </span>
           </section>
-          <Lifecycle scenario={activeScenarioView} />
+          {hotelContentPending ? (
+            <section className="recovery-loading" aria-live="polite" aria-busy="true">
+              Loading authoritative recovery…
+            </section>
+          ) : hotelContentUnavailable ? (
+            <section className="recovery-loading" role="status">
+              {recovery.error ?? "Choose an available execution mode to start this recovery."}
+            </section>
+          ) : (
+            <Lifecycle scenario={activeScenarioView} />
+          )}
         </main>
 
-        <EvidenceInspector
-          scenario={activeScenarioView}
-          snapshot={activeSnapshot}
-          receipt={activeReceipt}
-          externalSubmittingAction={automaticSubmittingAction}
-        />
+        {hotelContentPending ? (
+          <aside className="evidence-inspector" aria-live="polite" aria-busy="true">
+            Loading authoritative evidence…
+          </aside>
+        ) : hotelContentUnavailable ? (
+          <aside className="evidence-inspector" aria-live="polite">
+            No authoritative recovery evidence is available.
+          </aside>
+        ) : (
+          <EvidenceInspector
+            scenario={activeScenarioView}
+            snapshot={activeSnapshot}
+            receipt={activeReceipt}
+            externalSubmittingAction={automaticSubmittingAction}
+          />
+        )}
       </div>
     </div>
   );

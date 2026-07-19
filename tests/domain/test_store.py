@@ -2,6 +2,8 @@ import json
 import sqlite3
 from uuid import UUID
 
+import pytest
+
 from server.models import ExecutionMode, RecoveryStatus, ScenarioId
 from server.replay.engine import ReplayEngine
 from server.replay.loader import ScenarioLoader
@@ -12,6 +14,7 @@ REQUIRED_TABLES = {
     "events",
     "executions",
     "pending_approvals",
+    "public_live_cooldowns",
     "receipts",
     "recoveries",
     "remedies",
@@ -46,6 +49,42 @@ def test_hotel_recovery_and_ordered_events_survive_reopen(tmp_path) -> None:
         }
     assert REQUIRED_TABLES <= table_names
     reopened.close()
+
+
+def test_replay_start_rolls_back_the_whole_graph_after_a_midstream_write_failure(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "atomic-replay.sqlite3"
+    store = SQLiteStore(database_path)
+    engine = ReplayEngine(store, ScenarioLoader())
+    with sqlite3.connect(database_path) as connection:
+        connection.executescript(
+            """
+            CREATE TRIGGER fail_mid_replay
+            BEFORE INSERT ON events
+            WHEN NEW.seq = 4
+            BEGIN
+                SELECT RAISE(ABORT, 'injected replay write failure');
+            END;
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="injected replay write failure"):
+        engine.start("hotel", execution_mode=ExecutionMode.REPLAY_FIXTURE)
+
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM recoveries").fetchone() == (0,)
+        assert connection.execute("SELECT COUNT(*) FROM events").fetchone() == (0,)
+        assert connection.execute("SELECT COUNT(*) FROM receipts").fetchone() == (0,)
+        connection.execute("DROP TRIGGER fail_mid_replay")
+
+    completed = engine.start("hotel", execution_mode=ExecutionMode.REPLAY_FIXTURE)
+    events = store.list_events(completed.recovery_id)
+    assert completed.status is RecoveryStatus.COMPLETED
+    assert len(events) == 7
+    assert len([event for event in events if event.terminal]) == 1
+    assert events[-1].terminal is True
+    assert store.get_receipt(completed.recovery_id).status == "completed"
 
 
 def test_task2_recovery_constraints_migrate_without_losing_replay_rows(
@@ -151,7 +190,9 @@ def test_task2_recovery_constraints_migrate_without_losing_replay_rows(
     assert [event.type for event in store.list_events("legacy-replay")] == [
         "recovery.completed"
     ]
-    assert store.get_receipt("legacy-replay").provider_execution is False
+    legacy_receipt = store.get_receipt("legacy-replay")
+    assert legacy_receipt.status == "completed"
+    assert legacy_receipt.provider_execution is False
     sdk_recovery = store.create_recovery(
         recovery_id="sdk-stub-recovery",
         scenario_id=ScenarioId.HOTEL,
@@ -170,4 +211,11 @@ def test_task2_recovery_constraints_migrate_without_losing_replay_rows(
     assert pending.execution_mode is ExecutionMode.SDK_STUB
     assert pending.status is RecoveryStatus.PENDING_APPROVAL
     with sqlite3.connect(database_path) as connection:
+        persisted_receipt = json.loads(
+            connection.execute(
+                "SELECT receipt_json FROM receipts WHERE recovery_id = 'legacy-replay'"
+            ).fetchone()[0]
+        )
+        assert persisted_receipt["status"] == "completed"
+        assert "simulated_completed" not in persisted_receipt.values()
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []

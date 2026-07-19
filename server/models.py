@@ -17,7 +17,7 @@ from pydantic import (
 class ApiModel(BaseModel):
     """Base model that accepts Python names and emits explicit API aliases."""
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
 
 class ExecutionMode(StrEnum):
@@ -52,6 +52,7 @@ class HealthResponse(ApiModel):
 
     backend: RuntimeBackend
     live_ready: bool = Field(alias="liveReady")
+    sdk_stub_ready: bool = Field(alias="sdkStubReady")
     provider_boundary: ProviderBoundary = Field(alias="providerBoundary")
 
 
@@ -68,7 +69,7 @@ class ReplayEventTemplate(ApiModel):
 
 
 class ReplayReceiptTemplate(ApiModel):
-    status: str
+    status: Literal["completed"]
     simulated: Literal[True]
     provider_execution: Literal[False] = Field(alias="providerExecution")
     model_ids: list[str] = Field(alias="modelIds", max_length=0)
@@ -97,6 +98,8 @@ class ScenarioResponse(ApiModel):
 
 
 class CreateRecoveryRequest(ApiModel):
+    model_config = ConfigDict(populate_by_name=False, extra="forbid", frozen=True)
+
     scenario_id: ScenarioId = Field(alias="scenarioId")
     execution_mode: ExecutionMode = Field(alias="executionMode")
 
@@ -165,16 +168,31 @@ class PendingApprovalView(ApiModel):
 
 
 class ApprovalDecisionRequest(ApiModel):
-    model_config = ConfigDict(populate_by_name=True, extra="forbid", frozen=True)
+    model_config = ConfigDict(populate_by_name=False, extra="forbid", frozen=True)
 
     decision: Literal["approve", "decline"]
-    client_decision_id: str = Field(alias="clientDecisionId", min_length=1, max_length=128)
-    remedy_id: str = Field(alias="remedyId", min_length=1)
+    client_decision_id: str = Field(
+        alias="clientDecisionId",
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+    )
+    remedy_id: str = Field(
+        alias="remedyId",
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+    )
     remedy_digest: str = Field(
         alias="remedyDigest",
         pattern=r"^sha256:[0-9a-f]{64}$",
     )
-    tool_call_id: str = Field(alias="toolCallId", min_length=1)
+    tool_call_id: str = Field(
+        alias="toolCallId",
+        min_length=1,
+        max_length=256,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+    )
 
 
 class ApprovalDecisionResponse(ApiModel):
@@ -310,15 +328,27 @@ class RecoveryReceipt(ApiModel):
     @model_validator(mode="after")
     def enforce_execution_mode_provenance(self) -> Self:
         if self.execution_mode is ExecutionMode.REPLAY_FIXTURE and (
-            not self.simulated
+            self.status != RecoveryStatus.COMPLETED.value
+            or not self.simulated
             or self.provider_execution
             or self.model_ids
+            or self.root_trace_id is not None
+            or self.sdk_version is not None
+            or self.protocol_version is not None
+            or self.agent_graph_version is not None
+            or self.prompt_tool_schema_hash is not None
+            or self.decision is not None
+            or self.decision_remedy_digest is not None
             or self.execution_count != 0
             or self.provider_dispatch_started
+            or self.exact_interruption_rejected
+            or self.permission_revoked
+            or self.scope_closed
+            or self.approved_remedy_digest is not None
         ):
             raise ValueError(
-                "Replay receipts require simulated evidence, no provider execution, "
-                "and no model IDs"
+                "Replay receipts require completed simulated evidence with no model, "
+                "provider, decision, or permission-scope claims"
             )
         if self.execution_mode is ExecutionMode.OPENAI_LIVE:
             if (

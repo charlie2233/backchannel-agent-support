@@ -31,10 +31,30 @@ const provenanceCases: ReadonlyArray<{
 ];
 
 const healthCases: ReadonlyArray<HealthStatus> = [
-  { backend: "openai", liveReady: true, providerBoundary: "demo_adapter_only" },
-  { backend: "openai", liveReady: false, providerBoundary: "demo_adapter_only" },
-  { backend: "stub", liveReady: true, providerBoundary: "demo_adapter_only" },
-  { backend: "stub", liveReady: false, providerBoundary: "demo_adapter_only" },
+  {
+    backend: "openai",
+    liveReady: true,
+    sdkStubReady: true,
+    providerBoundary: "demo_adapter_only",
+  },
+  {
+    backend: "openai",
+    liveReady: false,
+    sdkStubReady: true,
+    providerBoundary: "demo_adapter_only",
+  },
+  {
+    backend: "stub",
+    liveReady: true,
+    sdkStubReady: true,
+    providerBoundary: "demo_adapter_only",
+  },
+  {
+    backend: "stub",
+    liveReady: false,
+    sdkStubReady: true,
+    providerBoundary: "demo_adapter_only",
+  },
 ];
 
 describe("deriveRuntimePresentation", () => {

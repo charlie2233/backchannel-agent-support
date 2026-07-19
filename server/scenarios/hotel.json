@@ -1,7 +1,7 @@
 {
   "id": "hotel",
   "title": "Hotel booking recovery",
-  "summary": "A conflicting room assignment is paused at operator authorization.",
+  "summary": "A deterministic hotel recovery trace is sealed without provider dispatch.",
   "executionMode": "replay_fixture",
   "initialStep": 0,
   "initialSummary": "Replay recovery created; no model call or provider execution.",
@@ -37,7 +37,41 @@
         "summary": "Recorded consent boundary reached; execution has not begun.",
         "providerExecution": false
       }
+    },
+    {
+      "type": "execution.simulation_recorded",
+      "status": "in_progress",
+      "currentStep": 4,
+      "summary": "A simulated no-dispatch outcome was replayed.",
+      "data": {
+        "phase": "Execute",
+        "summary": "Recorded replay outcome without provider dispatch.",
+        "providerExecution": false
+      }
+    },
+    {
+      "type": "receipt.simulation_sealed",
+      "status": "completed",
+      "currentStep": 5,
+      "summary": "Simulated hotel recovery evidence was sealed.",
+      "data": {
+        "phase": "Verify & seal",
+        "summary": "Simulated replay receipt recorded.",
+        "providerExecution": false
+      }
     }
   ],
-  "receipt": null
+  "receipt": {
+    "status": "completed",
+    "simulated": true,
+    "providerExecution": false,
+    "modelIds": [],
+    "boundary": "Simulated replay receipt — no model call or provider execution.",
+    "providerResult": "No provider dispatch — recorded fixture outcome only.",
+    "authorizationSource": "Recorded operator-boundary fixture",
+    "verificationResults": [
+      "Simulated hotel recovery evidence recorded",
+      "No provider dispatch occurred"
+    ]
+  }
 }

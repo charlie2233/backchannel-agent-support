@@ -5,6 +5,7 @@ export type RuntimeBackend = "openai" | "stub";
 export interface HealthStatus {
   backend: RuntimeBackend;
   liveReady: boolean;
+  sdkStubReady: boolean;
   providerBoundary: "demo_adapter_only";
 }
 

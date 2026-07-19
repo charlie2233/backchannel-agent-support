@@ -130,7 +130,7 @@ def test_decision_discriminator_is_required_and_identity_tampering_writes_nothin
                 },
             )
             assert tampered.status_code == 422
-            assert tampered.json()["detail"]["code"] == expected_code
+            assert tampered.json()["error"]["code"] == expected_code
         assert store.count_decisions(recovery_id) == 0
         assert store.count_executions(recovery_id) == 0
         assert provider.dispatch_count == 0
@@ -160,6 +160,6 @@ def test_same_client_id_opposite_action_is_a_conflict(tmp_path) -> None:
 
         assert first.status_code == 200
         assert opposite.status_code == 409
-        assert opposite.json()["detail"]["code"] == "decision_id_conflict"
+        assert opposite.json()["error"]["code"] == "decision_id_conflict"
         assert store.count_decisions(recovery_id) == 1
         assert store.count_executions(recovery_id) == 0

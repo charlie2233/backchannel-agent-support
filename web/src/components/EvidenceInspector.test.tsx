@@ -7,9 +7,11 @@ import { EvidenceInspector } from "./EvidenceInspector";
 
 const fullDigest = `sha256:${"0123456789abcdef".repeat(4)}` as `sha256:${string}`;
 
-function pendingSnapshot(): RecoverySnapshot {
+function pendingSnapshot(
+  recoveryId = "11111111-2222-4333-8444-555555555555",
+): RecoverySnapshot {
   return {
-    recoveryId: "11111111-2222-4333-8444-555555555555",
+    recoveryId,
     scenarioId: "hotel",
     executionMode: "sdk_stub",
     status: "pending_approval",
@@ -45,11 +47,14 @@ function pendingSnapshot(): RecoverySnapshot {
   };
 }
 
-function approvedResponse(clientDecisionId: string): Response {
+function approvedResponse(
+  clientDecisionId: string,
+  recoveryId = "11111111-2222-4333-8444-555555555555",
+): Response {
   return new Response(
     JSON.stringify({
       clientDecisionId,
-      recoveryId: "11111111-2222-4333-8444-555555555555",
+      recoveryId,
       decision: "approve",
       status: "completed",
       approvedRemedyDigest: fullDigest,
@@ -246,7 +251,7 @@ describe("EvidenceInspector exact consent", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Approve remedy" }));
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Approval could not be recorded. Retry the same decision.",
+      "The server returned an unexpected response. Retry the same decision.",
     );
     expect(screen.getByRole("button", { name: "Decline" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "Approve remedy" }));
@@ -260,6 +265,129 @@ describe("EvidenceInspector exact consent", () => {
     expect(postedBodies[1].clientDecisionId).toBe("decision-retry-742");
     expect(postedBodies[0].decision).toBe("approve");
     expect(postedBodies[1].decision).toBe("approve");
+  });
+
+  it.each([
+    {
+      label: "capacity",
+      failure: new Response(
+        JSON.stringify({
+          error: {
+            code: "live_capacity_reached",
+            message: "The live demo is currently at capacity.",
+            requestId: "req_11111111111111111111111111111111",
+            recoveryId: "11111111-2222-4333-8444-555555555555",
+            retryAfterSeconds: 1,
+            fallback: null,
+          },
+        }),
+        { status: 429, headers: { "Content-Type": "application/json" } },
+      ),
+      message: "The live demo is currently at capacity. Retry the same decision.",
+    },
+    {
+      label: "unavailable",
+      failure: new Response(
+        JSON.stringify({
+          error: {
+            code: "live_unavailable",
+            message: "Live mode is unavailable on this server.",
+            requestId: "req_22222222222222222222222222222222",
+            recoveryId: "11111111-2222-4333-8444-555555555555",
+            retryAfterSeconds: null,
+            fallback: null,
+          },
+        }),
+        { status: 503, headers: { "Content-Type": "application/json" } },
+      ),
+      message: "Live mode is unavailable on this server. Retry the same decision.",
+    },
+    {
+      label: "network",
+      failure: new TypeError("network-canary-must-not-render"),
+      message: "Approval could not be recorded. Retry the same decision.",
+    },
+  ])(
+    "retains the exact recovery and decision ID after a $label decision failure",
+    async ({ failure, message }) => {
+      const fetchMock = vi
+        .fn()
+        .mockImplementationOnce(() =>
+          failure instanceof Response
+            ? Promise.resolve(failure)
+            : Promise.reject(failure),
+        )
+        .mockResolvedValueOnce(approvedResponse("decision-live-retry-742"));
+      vi.stubGlobal("fetch", fetchMock);
+      render(
+        <EvidenceInspector
+          scenario={recoveryScenarios[0]}
+          snapshot={{ ...pendingSnapshot(), executionMode: "openai_live" }}
+          clientDecisionIdFactory={() => "decision-live-retry-742"}
+        />,
+      );
+
+      fireEvent.click(screen.getByRole("button", { name: "Approve remedy" }));
+
+      expect(await screen.findByRole("alert")).toHaveTextContent(message);
+      expect(screen.queryByText("network-canary-must-not-render")).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /replay/i })).not.toBeInTheDocument();
+      const stored = JSON.parse(
+        String(sessionStorage.getItem("backchannel.pendingDecision.v1")),
+      ) as { recoveryId: string; request: { clientDecisionId: string } };
+      expect(stored).toMatchObject({
+        recoveryId: "11111111-2222-4333-8444-555555555555",
+        request: { clientDecisionId: "decision-live-retry-742" },
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Approve remedy" }));
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+      const requests = fetchMock.mock.calls.map(([, init]) =>
+        JSON.parse(String((init as RequestInit).body)),
+      );
+      expect(requests[1]).toEqual(requests[0]);
+    },
+  );
+
+  it("ignores a delayed decision acknowledgement after the displayed recovery changes", async () => {
+    let resolveFirst: ((response: Response) => void) | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveFirst = resolve;
+          }),
+      ),
+    );
+    const onDecisionAccepted = vi.fn();
+    const view = render(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={pendingSnapshot()}
+        clientDecisionIdFactory={() => "decision-delayed-742"}
+        onDecisionAccepted={onDecisionAccepted}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Approve remedy" }));
+
+    const nextRecoveryId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    view.rerender(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={pendingSnapshot(nextRecoveryId)}
+        clientDecisionIdFactory={() => "decision-next-742"}
+        onDecisionAccepted={onDecisionAccepted}
+      />,
+    );
+    resolveFirst?.(approvedResponse("decision-delayed-742"));
+
+    await waitFor(() => {
+      expect(screen.getByText(nextRecoveryId)).toBeVisible();
+      expect(screen.getByRole("button", { name: "Approve remedy" })).toBeEnabled();
+    });
+    expect(onDecisionAccepted).not.toHaveBeenCalled();
+    expect(screen.queryByText(/Approval accepted/i)).not.toBeInTheDocument();
   });
 
   it("does not expose either action after the durable decision claim", () => {

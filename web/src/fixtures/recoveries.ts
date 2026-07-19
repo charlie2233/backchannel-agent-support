@@ -50,3 +50,22 @@ export const recoveryScenarios = [
     ],
   },
 ] as const satisfies ReadonlyArray<RecoveryScenario>;
+
+export const hotelReplayCompletedPresentation = {
+  summary: "A completed recorded hotel replay sealed simulated evidence with no provider dispatch.",
+  lifecycleDetails: {
+    Detect: "Conflict found in the bundled booking trace.",
+    Prove: "Consumer and demo-provider fixture records compared.",
+    Negotiate: "One simulated replacement remedy replayed.",
+    Authorize: "Recorded consent boundary replayed without runtime authority.",
+    Execute: "Recorded simulated outcome without provider dispatch.",
+    "Verify & seal": "Completed replay receipt sealed as simulated fixture evidence.",
+  },
+  evidence: [
+    { label: "Fixture", value: "hotel-completed-v1", monospace: true },
+    { label: "Model call", value: "None — recorded replay" },
+    { label: "Provider dispatch", value: "None — replay only" },
+    { label: "Execution mode", value: "replay_fixture", monospace: true },
+    { label: "Receipt", value: "Completed simulated fixture evidence" },
+  ],
+} as const satisfies Pick<RecoveryScenario, "summary" | "lifecycleDetails" | "evidence">;

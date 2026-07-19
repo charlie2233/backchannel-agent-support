@@ -67,7 +67,12 @@ def test_live_ready_hotel_route_returns_only_safe_complete_provenance(tmp_path) 
     orchestrator = _RouteContractOrchestrator()
     client = TestClient(
         create_app(
-            RuntimeSettings(live_ready=True),
+            RuntimeSettings(
+                live_ready=True,
+                identity_hmac_secret=(
+                    "test-identity-secret-that-is-at-least-32-bytes"
+                ),
+            ),
             store=store,
             hotel_provider=provider,
             orchestrator=orchestrator,

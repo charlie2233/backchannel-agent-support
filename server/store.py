@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -16,6 +17,7 @@ from pydantic import JsonValue
 
 from server.agents.live_models import ModelResponseMetadata
 from server.agents.schemas import CommitRemedyArguments
+from server.controls import HASH_PREFIX, PublicLiveAdmissionError
 from server.digest import remedy_consent_digest
 from server.models import (
     ApprovalDecisionRequest,
@@ -29,6 +31,7 @@ from server.models import (
     RecoveryReceipt,
     RecoverySnapshot,
     RecoveryStatus,
+    ReplayScenarioDefinition,
     ScenarioId,
 )
 from server.policy import (
@@ -206,17 +209,35 @@ CREATE TABLE IF NOT EXISTS receipt_provenance_migrations (
     migrated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS application_migrations (
+    name TEXT PRIMARY KEY,
+    applied_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS usage_ledger (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    recovery_id TEXT NOT NULL REFERENCES recoveries(id) ON DELETE CASCADE,
-    category TEXT NOT NULL,
-    amount INTEGER NOT NULL DEFAULT 0,
-    recorded_at TEXT NOT NULL
+    identity_kind TEXT NOT NULL CHECK (
+        identity_kind IN ('session', 'ip', 'global', 'legacy')
+    ),
+    identity_hash TEXT NOT NULL,
+    usage_day TEXT NOT NULL,
+    amount INTEGER NOT NULL DEFAULT 0 CHECK (amount >= 0),
+    last_admitted_at TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (identity_kind, identity_hash, usage_day)
+);
+
+CREATE TABLE IF NOT EXISTS public_live_cooldowns (
+    identity_kind TEXT NOT NULL CHECK (identity_kind IN ('session', 'ip')),
+    identity_hash TEXT NOT NULL,
+    last_admitted_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (identity_kind, identity_hash)
 );
 
 CREATE TABLE IF NOT EXISTS demo_sessions (
-    id TEXT PRIMARY KEY,
+    session_hash TEXT PRIMARY KEY,
     created_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
     expires_at TEXT NOT NULL
 );
 """
@@ -369,6 +390,7 @@ class SQLiteStore:
             self._migrate_task3_executions(connection)
             self._migrate_task6_approval_decisions(connection)
             self._migrate_task6_permission_scopes(connection)
+            self._migrate_task8_public_controls(connection)
             event_columns = {
                 cast(str, row["name"])
                 for row in connection.execute("PRAGMA table_info(events)").fetchall()
@@ -396,6 +418,220 @@ class SQLiteStore:
             )
             self._migrate_task6_receipts(connection)
             self._migrate_task7_receipt_provenance(connection)
+            self._migrate_task8_inert_replay_fixtures(connection)
+
+    @staticmethod
+    def _migrate_task8_inert_replay_fixtures(
+        connection: sqlite3.Connection,
+    ) -> None:
+        """Remove only legacy replay graphs that can never produce terminal evidence."""
+
+        migration_name = "task8_terminal_replay_fixtures"
+        if connection.execute(
+            "SELECT 1 FROM application_migrations WHERE name = ?",
+            (migration_name,),
+        ).fetchone() is not None:
+            return
+        connection.execute(
+            """
+            DELETE FROM recoveries
+            WHERE execution_mode = 'replay_fixture'
+              AND status IN ('in_progress', 'pending_approval')
+              AND NOT EXISTS (
+                  SELECT 1 FROM receipts WHERE receipts.recovery_id = recoveries.id
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM pending_approvals
+                  WHERE pending_approvals.recovery_id = recoveries.id
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM approval_decisions
+                  WHERE approval_decisions.recovery_id = recoveries.id
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM executions
+                  WHERE executions.recovery_id = recoveries.id
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM permission_scopes
+                  WHERE permission_scopes.recovery_id = recoveries.id
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM remedies WHERE remedies.recovery_id = recoveries.id
+              )
+            """
+        )
+        connection.execute(
+            "INSERT INTO application_migrations (name, applied_at) VALUES (?, ?)",
+            (migration_name, datetime.now(UTC).isoformat()),
+        )
+        if connection.execute("PRAGMA foreign_key_check").fetchall():
+            raise RuntimeError("Replay fixture migration violated foreign keys")
+
+    @staticmethod
+    def _migrate_task8_public_controls(connection: sqlite3.Connection) -> None:
+        """Remove recovery-cascade and raw-session storage while preserving aggregates."""
+
+        usage_columns = {
+            cast(str, row["name"])
+            for row in connection.execute("PRAGMA table_info(usage_ledger)").fetchall()
+        }
+        task8_usage_columns = {
+            "identity_kind",
+            "identity_hash",
+            "usage_day",
+            "amount",
+            "last_admitted_at",
+            "updated_at",
+        }
+        usage_foreign_keys = connection.execute(
+            "PRAGMA foreign_key_list(usage_ledger)"
+        ).fetchall()
+        if usage_columns == task8_usage_columns and usage_foreign_keys:
+            current_rows = connection.execute(
+                """
+                SELECT identity_kind, identity_hash, usage_day, amount,
+                       last_admitted_at, updated_at
+                FROM usage_ledger
+                """
+            ).fetchall()
+            connection.execute("DROP TABLE IF EXISTS usage_ledger_task8")
+            connection.execute(
+                """
+                CREATE TABLE usage_ledger_task8 (
+                    identity_kind TEXT NOT NULL CHECK (
+                        identity_kind IN ('session', 'ip', 'global', 'legacy')
+                    ),
+                    identity_hash TEXT NOT NULL,
+                    usage_day TEXT NOT NULL,
+                    amount INTEGER NOT NULL DEFAULT 0 CHECK (amount >= 0),
+                    last_admitted_at TEXT,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (identity_kind, identity_hash, usage_day)
+                )
+                """
+            )
+            connection.executemany(
+                """
+                INSERT INTO usage_ledger_task8 (
+                    identity_kind, identity_hash, usage_day, amount,
+                    last_admitted_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [tuple(row) for row in current_rows],
+            )
+            connection.execute("DROP TABLE usage_ledger")
+            connection.execute("ALTER TABLE usage_ledger_task8 RENAME TO usage_ledger")
+        elif usage_columns != task8_usage_columns:
+            legacy_columns = {"id", "recovery_id", "category", "amount", "recorded_at"}
+            if usage_columns != legacy_columns:
+                raise RuntimeError("Unsupported usage ledger schema")
+            legacy_rows = connection.execute(
+                "SELECT recovery_id, category, amount, recorded_at FROM usage_ledger"
+            ).fetchall()
+            connection.execute("DROP TABLE IF EXISTS usage_ledger_task8")
+            connection.execute(
+                """
+                CREATE TABLE usage_ledger_task8 (
+                    identity_kind TEXT NOT NULL CHECK (
+                        identity_kind IN ('session', 'ip', 'global', 'legacy')
+                    ),
+                    identity_hash TEXT NOT NULL,
+                    usage_day TEXT NOT NULL,
+                    amount INTEGER NOT NULL DEFAULT 0 CHECK (amount >= 0),
+                    last_admitted_at TEXT,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (identity_kind, identity_hash, usage_day)
+                )
+                """
+            )
+            for row in legacy_rows:
+                recorded_at = cast(str, row["recorded_at"])
+                try:
+                    recorded = datetime.fromisoformat(recorded_at)
+                except ValueError as error:
+                    raise RuntimeError("Legacy usage timestamp is invalid") from error
+                if recorded.tzinfo is None:
+                    recorded = recorded.replace(tzinfo=UTC)
+                else:
+                    recorded = recorded.astimezone(UTC)
+                identity_hash = "sha256:" + hashlib.sha256(
+                    (
+                        f"legacy\0{cast(str, row['recovery_id'])}\0"
+                        f"{cast(str, row['category'])}"
+                    ).encode()
+                ).hexdigest()
+                connection.execute(
+                    """
+                    INSERT INTO usage_ledger_task8 (
+                        identity_kind, identity_hash, usage_day, amount,
+                        last_admitted_at, updated_at
+                    ) VALUES ('legacy', ?, ?, ?, NULL, ?)
+                    ON CONFLICT(identity_kind, identity_hash, usage_day) DO UPDATE SET
+                        amount = amount + excluded.amount,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        identity_hash,
+                        recorded.date().isoformat(),
+                        max(cast(int, row["amount"]), 0),
+                        recorded.isoformat(),
+                    ),
+                )
+            connection.execute("DROP TABLE usage_ledger")
+            connection.execute("ALTER TABLE usage_ledger_task8 RENAME TO usage_ledger")
+
+        connection.execute(
+            """
+            INSERT INTO public_live_cooldowns (
+                identity_kind, identity_hash, last_admitted_at, updated_at
+            )
+            SELECT identity_kind, identity_hash, MAX(last_admitted_at), MAX(updated_at)
+            FROM usage_ledger
+            WHERE identity_kind IN ('session', 'ip')
+              AND last_admitted_at IS NOT NULL
+            GROUP BY identity_kind, identity_hash
+            ON CONFLICT(identity_kind, identity_hash) DO UPDATE SET
+                last_admitted_at = MAX(
+                    public_live_cooldowns.last_admitted_at,
+                    excluded.last_admitted_at
+                ),
+                updated_at = MAX(public_live_cooldowns.updated_at, excluded.updated_at)
+            """
+        )
+
+        session_columns = {
+            cast(str, row["name"])
+            for row in connection.execute("PRAGMA table_info(demo_sessions)").fetchall()
+        }
+        task8_session_columns = {
+            "session_hash",
+            "created_at",
+            "last_seen_at",
+            "expires_at",
+        }
+        if session_columns != task8_session_columns:
+            legacy_session_columns = {"id", "created_at", "expires_at"}
+            if session_columns != legacy_session_columns:
+                raise RuntimeError("Unsupported demo session schema")
+            connection.execute("DROP TABLE IF EXISTS demo_sessions_task8")
+            connection.execute(
+                """
+                CREATE TABLE demo_sessions_task8 (
+                    session_hash TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL
+                )
+                """
+            )
+            # Legacy rows contain attacker-supplied plaintext identifiers. Invalidate
+            # them; aggregate usage was migrated independently above.
+            connection.execute("DROP TABLE demo_sessions")
+            connection.execute("ALTER TABLE demo_sessions_task8 RENAME TO demo_sessions")
+        violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise RuntimeError("Public-control migration violated foreign keys")
 
     @staticmethod
     def _migrate_task3_pending_approvals(connection: sqlite3.Connection) -> None:
@@ -1076,6 +1312,22 @@ class SQLiteStore:
         if recovery_mode is ExecutionMode.REPLAY_FIXTURE:
             if phase != "sealed":
                 raise ReceiptTransitionError("Replay receipts cannot enter SDK finalization")
+            terminal_count = cast(
+                int,
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM events
+                    WHERE recovery_id = ? AND terminal = 1
+                    """,
+                    (receipt.recovery_id,),
+                ).fetchone()[0],
+            )
+            if (
+                cast(str, recovery["status"]) != RecoveryStatus.COMPLETED.value
+                or receipt.status != RecoveryStatus.COMPLETED.value
+                or terminal_count != 1
+            ):
+                raise ReceiptTransitionError("Stored replay receipt is not terminal")
             return
 
         pending_rows = connection.execute(
@@ -1346,6 +1598,9 @@ class SQLiteStore:
             if not isinstance(raw, dict):
                 raise ReceiptTransitionError("Stored receipt provenance is invalid")
             if recovery_mode is ExecutionMode.REPLAY_FIXTURE:
+                legacy_status = raw.get("status") == "simulated_completed"
+                if legacy_status:
+                    raw["status"] = RecoveryStatus.COMPLETED.value
                 try:
                     receipt = RecoveryReceipt.model_validate(raw)
                 except (TypeError, ValueError):
@@ -1359,6 +1614,14 @@ class SQLiteStore:
                     receipt,
                     phase="sealed",
                 )
+                if legacy_status:
+                    connection.execute(
+                        "UPDATE receipts SET receipt_json = ? WHERE recovery_id = ?",
+                        (
+                            receipt.model_dump_json(by_alias=True),
+                            recovery_id,
+                        ),
+                    )
                 continue
 
             pending_rows = connection.execute(
@@ -1929,6 +2192,123 @@ class SQLiteStore:
                 ) VALUES (?, 1, 'recovery.created', 0, ?, ?)
                 """,
                 (recovery_id, created_data, now.isoformat()),
+            )
+        return self.get_recovery(recovery_id)
+
+    def create_replay_recovery(
+        self,
+        *,
+        recovery_id: str,
+        scenario: ReplayScenarioDefinition,
+    ) -> RecoverySnapshot:
+        """Persist one complete replay graph atomically or leave no trace."""
+
+        if (
+            scenario.initial_step != 0
+            or len(scenario.events) != 6
+            or [event.current_step for event in scenario.events] != list(range(6))
+            or any(
+                event.status is not RecoveryStatus.IN_PROGRESS
+                for event in scenario.events[:-1]
+            )
+            or scenario.events[-1].status is not RecoveryStatus.COMPLETED
+            or scenario.receipt is None
+        ):
+            raise ReceiptTransitionError(
+                "Replay fixtures require six ordered steps and terminal receipt evidence"
+            )
+        receipt = RecoveryReceipt(
+            recoveryId=recovery_id,
+            executionMode=ExecutionMode.REPLAY_FIXTURE,
+            **scenario.receipt.model_dump(),
+        )
+        now = self._now()
+        created_data = json.dumps(
+            {
+                "scenarioId": scenario.id.value,
+                "executionMode": ExecutionMode.REPLAY_FIXTURE.value,
+                "summary": "Recovery created for the selected execution mode.",
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                INSERT INTO recoveries (
+                    id, scenario_id, execution_mode, status, current_step,
+                    current_step_summary, created_at, updated_at
+                ) VALUES (?, ?, 'replay_fixture', 'in_progress', ?, ?, ?, ?)
+                """,
+                (
+                    recovery_id,
+                    scenario.id.value,
+                    scenario.initial_step,
+                    scenario.initial_summary,
+                    now.isoformat(),
+                    now.isoformat(),
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO events (
+                    recovery_id, seq, type, terminal, data_json, created_at
+                ) VALUES (?, 1, 'recovery.created', 0, ?, ?)
+                """,
+                (recovery_id, created_data, now.isoformat()),
+            )
+            for sequence, event in enumerate(scenario.events, start=2):
+                event_json = json.dumps(
+                    event.data,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                connection.execute(
+                    """
+                    UPDATE recoveries
+                    SET status = ?, current_step = ?, current_step_summary = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        event.status.value,
+                        event.current_step,
+                        event.summary,
+                        now.isoformat(),
+                        recovery_id,
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO events (
+                        recovery_id, seq, type, terminal, data_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        recovery_id,
+                        sequence,
+                        event.type,
+                        int(event.status is RecoveryStatus.COMPLETED),
+                        event_json,
+                        now.isoformat(),
+                    ),
+                )
+            connection.execute(
+                """
+                INSERT INTO receipts (recovery_id, receipt_json, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (
+                    recovery_id,
+                    receipt.model_dump_json(by_alias=True, exclude_none=True),
+                    now.isoformat(),
+                ),
+            )
+            self._validate_durable_receipt_evidence(
+                connection,
+                receipt,
+                phase="sealed",
             )
         return self.get_recovery(recovery_id)
 
@@ -3254,6 +3634,306 @@ class SQLiteStore:
                 connection.execute("SELECT COUNT(*) FROM recoveries").fetchone()[0],
             )
 
+    @staticmethod
+    def _require_public_identity_hash(value: str) -> None:
+        digest = value.removeprefix(HASH_PREFIX)
+        if (
+            not value.startswith(HASH_PREFIX)
+            or len(digest) != 64
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        ):
+            raise ValueError("Public identity must be an HMAC-SHA256 digest")
+
+    def is_demo_session_active(
+        self,
+        *,
+        session_hash: str,
+        now: datetime,
+    ) -> bool:
+        """Recognize an unexpired admitted session without mutating durable state."""
+
+        self._require_public_identity_hash(session_hash)
+        if now.tzinfo is None or now.utcoffset() != timedelta(0):
+            raise ValueError("Session time must be timezone-aware UTC")
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT expires_at FROM demo_sessions WHERE session_hash = ?",
+                (session_hash,),
+            ).fetchone()
+            if row is None:
+                return False
+            try:
+                stored_expiry = datetime.fromisoformat(cast(str, row["expires_at"]))
+            except ValueError as error:
+                raise RuntimeError("Stored demo session expiry is invalid") from error
+            return stored_expiry > now
+
+    def claim_public_live_admission(
+        self,
+        *,
+        session_hash: str,
+        ip_hash: str,
+        cooldown: timedelta,
+        daily_budget: int,
+        session_ttl: timedelta | None = None,
+        now: datetime | None = None,
+        session_expires_at: datetime | None = None,
+    ) -> None:
+        """Atomically charge one live start against both durable identities."""
+
+        self._require_public_identity_hash(session_hash)
+        self._require_public_identity_hash(ip_hash)
+        if cooldown < timedelta(0):
+            raise ValueError("Cooldown cannot be negative")
+        if daily_budget < 0:
+            raise ValueError("Daily budget cannot be negative")
+        if session_ttl is not None and session_ttl <= timedelta(0):
+            raise ValueError("Session TTL must be positive")
+        if session_ttl is None and session_expires_at is None:
+            raise ValueError("Session TTL or expiry is required")
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            admission_now = self._now() if now is None else now
+            if admission_now.tzinfo is None or admission_now.utcoffset() != timedelta(0):
+                raise ValueError("Admission time must be timezone-aware UTC")
+            resolved_expiry = (
+                admission_now + session_ttl
+                if session_ttl is not None
+                else session_expires_at
+            )
+            assert resolved_expiry is not None
+            if (
+                resolved_expiry.tzinfo is None
+                or resolved_expiry.utcoffset() != timedelta(0)
+            ):
+                raise ValueError("Session expiry must be timezone-aware UTC")
+            if resolved_expiry <= admission_now:
+                raise ValueError("Session expiry must be after admission")
+            usage_day = admission_now.date().isoformat()
+            identities = (
+                ("session", session_hash),
+                ("ip", ip_hash),
+                ("global", "public-live-global"),
+            )
+            rows: dict[tuple[str, str], sqlite3.Row] = {}
+            for identity_kind, identity_hash in identities:
+                row = connection.execute(
+                    """
+                    SELECT amount, last_admitted_at
+                    FROM usage_ledger
+                    WHERE identity_kind = ? AND identity_hash = ? AND usage_day = ?
+                    """,
+                    (identity_kind, identity_hash, usage_day),
+                ).fetchone()
+                if row is not None:
+                    rows[(identity_kind, identity_hash)] = row
+            for identity in identities[:2]:
+                row = connection.execute(
+                    """
+                    SELECT last_admitted_at
+                    FROM public_live_cooldowns
+                    WHERE identity_kind = ? AND identity_hash = ?
+                    """,
+                    identity,
+                ).fetchone()
+                if row is None:
+                    continue
+                last_admitted_at = cast(str, row["last_admitted_at"])
+                try:
+                    last_admitted = datetime.fromisoformat(last_admitted_at)
+                except ValueError as error:
+                    raise RuntimeError(
+                        "Stored admission timestamp is invalid"
+                    ) from error
+                if admission_now < last_admitted + cooldown:
+                    retry_after_seconds = max(
+                        1,
+                        math.ceil(
+                            (
+                                last_admitted
+                                + cooldown
+                                - admission_now
+                            ).total_seconds()
+                        ),
+                    )
+                    raise PublicLiveAdmissionError(
+                        "live_cooldown",
+                        retry_after_seconds=retry_after_seconds,
+                    )
+            if any(cast(int, row["amount"]) >= daily_budget for row in rows.values()):
+                raise PublicLiveAdmissionError("live_daily_budget_exceeded")
+            if daily_budget == 0:
+                raise PublicLiveAdmissionError("live_daily_budget_exceeded")
+
+            connection.execute(
+                """
+                INSERT INTO demo_sessions (
+                    session_hash, created_at, last_seen_at, expires_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(session_hash) DO UPDATE SET
+                    last_seen_at = excluded.last_seen_at,
+                    expires_at = excluded.expires_at
+                """,
+                (
+                    session_hash,
+                    admission_now.isoformat(),
+                    admission_now.isoformat(),
+                    resolved_expiry.isoformat(),
+                ),
+            )
+            for identity_kind, identity_hash in identities:
+                connection.execute(
+                    """
+                    INSERT INTO usage_ledger (
+                        identity_kind, identity_hash, usage_day, amount,
+                        last_admitted_at, updated_at
+                    ) VALUES (?, ?, ?, 1, ?, ?)
+                    ON CONFLICT(identity_kind, identity_hash, usage_day) DO UPDATE SET
+                        amount = usage_ledger.amount + 1,
+                        last_admitted_at = excluded.last_admitted_at,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        identity_kind,
+                        identity_hash,
+                        usage_day,
+                        admission_now.isoformat(),
+                        admission_now.isoformat(),
+                    ),
+                )
+            for identity_kind, identity_hash in identities[:2]:
+                connection.execute(
+                    """
+                    INSERT INTO public_live_cooldowns (
+                        identity_kind, identity_hash, last_admitted_at, updated_at
+                    ) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(identity_kind, identity_hash) DO UPDATE SET
+                        last_admitted_at = excluded.last_admitted_at,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        identity_kind,
+                        identity_hash,
+                        admission_now.isoformat(),
+                        admission_now.isoformat(),
+                    ),
+                )
+
+    def public_live_usage(
+        self,
+        *,
+        identity_kind: Literal["session", "ip", "global"],
+        identity_hash: str,
+        usage_day: str,
+    ) -> int:
+        if identity_kind == "global":
+            if identity_hash != "public-live-global":
+                raise ValueError("Global public-live usage uses one fixed aggregate key")
+        else:
+            self._require_public_identity_hash(identity_hash)
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT amount FROM usage_ledger
+                WHERE identity_kind = ? AND identity_hash = ? AND usage_day = ?
+                """,
+                (identity_kind, identity_hash, usage_day),
+            ).fetchone()
+        return 0 if row is None else cast(int, row["amount"])
+
+    def count_public_live_usage_rows(self) -> int:
+        with self._lock, self._connect() as connection:
+            return cast(
+                int,
+                connection.execute(
+                    "SELECT COUNT(*) FROM usage_ledger WHERE identity_kind IN ('session', 'ip')"
+                ).fetchone()[0],
+            )
+
+    def count_demo_sessions(self) -> int:
+        with self._lock, self._connect() as connection:
+            return cast(
+                int,
+                connection.execute("SELECT COUNT(*) FROM demo_sessions").fetchone()[0],
+            )
+
+    def cleanup_terminal_recoveries(
+        self,
+        *,
+        cutoff: datetime,
+        batch_size: int,
+    ) -> int:
+        """Delete at most one bounded batch of old terminal recovery graphs."""
+
+        if cutoff.tzinfo is None or cutoff.utcoffset() != timedelta(0):
+            raise ValueError("Cleanup cutoff must be timezone-aware UTC")
+        if batch_size < 1:
+            raise ValueError("Cleanup batch size must be positive")
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """
+                SELECT id FROM recoveries
+                WHERE status IN ('completed', 'closed_without_action', 'outcome_unknown')
+                  AND updated_at < ?
+                ORDER BY updated_at ASC, id ASC
+                LIMIT ?
+                """,
+                (cutoff.isoformat(), batch_size),
+            ).fetchall()
+            recovery_ids = [cast(str, row["id"]) for row in rows]
+            for recovery_id in recovery_ids:
+                deleted = connection.execute(
+                    """
+                    DELETE FROM recoveries
+                    WHERE id = ?
+                      AND status IN (
+                          'completed', 'closed_without_action', 'outcome_unknown'
+                      )
+                      AND updated_at < ?
+                    """,
+                    (recovery_id, cutoff.isoformat()),
+                )
+                if deleted.rowcount != 1:
+                    raise RuntimeError("Cleanup lost its terminal recovery candidate")
+        return len(recovery_ids)
+
+    def cleanup_expired_demo_sessions(
+        self,
+        *,
+        cutoff: datetime,
+        batch_size: int,
+    ) -> int:
+        """Delete only expired session hashes; durable usage and cooldowns remain."""
+
+        if cutoff.tzinfo is None or cutoff.utcoffset() != timedelta(0):
+            raise ValueError("Session cleanup cutoff must be timezone-aware UTC")
+        if batch_size < 1:
+            raise ValueError("Session cleanup batch size must be positive")
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """
+                SELECT session_hash FROM demo_sessions
+                WHERE expires_at <= ?
+                ORDER BY expires_at ASC, session_hash ASC
+                LIMIT ?
+                """,
+                (cutoff.isoformat(), batch_size),
+            ).fetchall()
+            session_hashes = [cast(str, row["session_hash"]) for row in rows]
+            for session_hash in session_hashes:
+                deleted = connection.execute(
+                    """
+                    DELETE FROM demo_sessions
+                    WHERE session_hash = ? AND expires_at <= ?
+                    """,
+                    (session_hash, cutoff.isoformat()),
+                )
+                if deleted.rowcount != 1:
+                    raise RuntimeError("Session cleanup lost its expired candidate")
+        return len(session_hashes)
+
     def get_pending_approval(self, recovery_id: str) -> PendingApprovalEnvelope:
         """Load the opaque SDK state envelope without exposing it through public models."""
 
@@ -3900,7 +4580,6 @@ class SQLiteStore:
     def reset(self) -> None:
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            connection.execute("DELETE FROM demo_sessions")
             connection.execute("DELETE FROM recoveries")
 
     def close(self) -> None:

@@ -235,7 +235,13 @@ def test_openai_live_creation_without_key_returns_stable_unavailable_code(
     )
 
     assert response.status_code == 503
-    assert response.json() == {"detail": {"code": "live_unavailable"}}
+    error = response.json()["error"]
+    assert error["code"] == "live_unavailable"
+    assert error["fallback"] == {
+        "kind": "show_replay_fixture",
+        "scenarioId": "hotel",
+        "executionMode": "replay_fixture",
+    }
     assert store.count_recoveries() == 0
     assert provider.dispatch_count == 0
 
@@ -270,7 +276,7 @@ def test_same_decision_id_with_changed_tuple_is_conflict(sdk_client) -> None:
     )
 
     assert conflict.status_code == 409
-    assert conflict.json()["detail"]["code"] == "decision_id_conflict"
+    assert conflict.json()["error"]["code"] == "decision_id_conflict"
     assert provider.dispatch_count == 1
     assert store.count_executions(recovery_id) == 1
 
@@ -291,7 +297,7 @@ def test_different_decision_after_winner_is_already_decided(sdk_client) -> None:
     )
 
     assert loser.status_code == 409
-    assert loser.json()["detail"]["code"] == "already_decided"
+    assert loser.json()["error"]["code"] == "already_decided"
     assert provider.dispatch_count == 1
     assert store.count_executions(recovery_id) == 1
 
@@ -318,7 +324,7 @@ def test_exact_identity_mismatches_fail_closed(
     response = client.post(f"/api/recoveries/{recovery_id}/decisions", json=payload)
 
     assert response.status_code == 422
-    assert response.json()["detail"]["code"] == code
+    assert response.json()["error"]["code"] == code
     assert provider.dispatch_count == 0
     assert store.count_executions(recovery_id) == 0
     assert store.count_decisions(recovery_id) == 0
@@ -339,7 +345,7 @@ def test_digest_from_another_recovery_fails_closed(sdk_client) -> None:
     response = client.post(f"/api/recoveries/{first_id}/decisions", json=payload)
 
     assert response.status_code == 422
-    assert response.json()["detail"]["code"] == "remedy_digest_mismatch"
+    assert response.json()["error"]["code"] == "remedy_digest_mismatch"
     assert provider.dispatch_count == 0
     assert store.count_executions(first_id) == 0
 

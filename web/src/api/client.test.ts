@@ -1,11 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  createRecovery,
+  getHealth,
   getReceipt,
   getRecovery,
   HttpStatusError,
   isRecoverySnapshot,
   postDecision,
+  PublicApiError,
 } from "./client";
 
 const recoveryId = "11111111-2222-4333-8444-555555555555";
@@ -16,6 +19,28 @@ function jsonResponse(body: unknown): Response {
     status: 200,
     headers: { "Content-Type": "application/json" },
   });
+}
+
+function publicErrorResponse(
+  code: string,
+  message: string,
+  status = 429,
+  fallback: object | null = null,
+  errorRecoveryId: string | null = null,
+): Response {
+  return new Response(
+    JSON.stringify({
+      error: {
+        code,
+        message,
+        requestId: "req_11111111111111111111111111111111",
+        recoveryId: errorRecoveryId,
+        retryAfterSeconds: status === 429 ? 12 : null,
+        fallback,
+      },
+    }),
+    { status, headers: { "Content-Type": "application/json" } },
+  );
 }
 
 function cancellationReceipt(executionCount = 0) {
@@ -49,6 +74,54 @@ function cancellationReceipt(executionCount = 0) {
     exactInterruptionRejected: true,
     permissionRevoked: true,
     scopeClosed: true,
+    approvedRemedyDigest: null,
+  };
+}
+
+function replayRecoverySnapshot(activeRecoveryId = recoveryId) {
+  return {
+    recoveryId: activeRecoveryId,
+    scenarioId: "hotel",
+    executionMode: "replay_fixture",
+    status: "completed",
+    currentStep: 5,
+    currentStepSummary: "Bundled replay completed.",
+    createdAt: "2026-07-18T20:00:00Z",
+    updatedAt: "2026-07-18T20:00:03Z",
+    pendingApproval: null,
+    rootTraceId: null,
+    modelIds: [],
+    sdkVersion: null,
+    protocolVersion: null,
+    agentGraphVersion: null,
+    promptToolSchemaHash: null,
+  };
+}
+
+function replayRecoveryReceipt() {
+  return {
+    recoveryId,
+    executionMode: "replay_fixture",
+    status: "completed",
+    simulated: true,
+    providerExecution: false,
+    modelIds: [],
+    rootTraceId: null,
+    sdkVersion: null,
+    protocolVersion: null,
+    agentGraphVersion: null,
+    promptToolSchemaHash: null,
+    boundary: "Recorded simulated replay; no model call or provider execution.",
+    providerResult: "No provider dispatch — recorded fixture outcome only.",
+    authorizationSource: "Recorded fixture.",
+    verificationResults: ["Recorded fixture verified."],
+    decision: null,
+    decisionRemedyDigest: null,
+    executionCount: 0,
+    providerDispatchStarted: false,
+    exactInterruptionRejected: false,
+    permissionRevoked: false,
+    scopeClosed: false,
     approvedRemedyDigest: null,
   };
 }
@@ -94,18 +167,273 @@ describe("decision and receipt contracts", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue(
-        new Response(JSON.stringify({ detail: "Not found" }), {
-          status: 404,
-          headers: { "Content-Type": "application/json" },
-        }),
+        publicErrorResponse(
+          "not_found",
+          "The requested resource was not found.",
+          404,
+          null,
+          recoveryId,
+        ),
       ),
     );
 
     const failure = await getRecovery(recoveryId).catch((error: unknown) => error);
 
     expect(failure).toBeInstanceOf(HttpStatusError);
-    expect(failure).toMatchObject({ status: 404 });
-    expect((failure as Error).message).toBe("Recovery request failed with status 404");
+    expect(failure).toBeInstanceOf(PublicApiError);
+    expect(failure).toMatchObject({ status: 404, code: "not_found" });
+    expect((failure as Error).message).toBe(
+      "The requested resource was not found.",
+    );
+  });
+
+  it("rejects null or mismatched recovery correlation on resource failures", async () => {
+    const request = {
+      decision: "decline" as const,
+      clientDecisionId: "decision-error-correlation",
+      remedyId: "remedy-error-correlation",
+      remedyDigest: digest,
+      toolCallId: "call-error-correlation",
+    };
+    const resourceCalls: ReadonlyArray<() => Promise<unknown>> = [
+      () => getRecovery(recoveryId),
+      () => postDecision(recoveryId, request),
+      () => getReceipt(recoveryId),
+    ];
+
+    for (const errorRecoveryId of [
+      null,
+      "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    ]) {
+      for (const resourceCall of resourceCalls) {
+        vi.stubGlobal(
+          "fetch",
+          vi.fn().mockResolvedValue(
+            publicErrorResponse(
+              "not_found",
+              "The requested resource was not found.",
+              404,
+              null,
+              errorRecoveryId,
+            ),
+          ),
+        );
+
+        const failure = await resourceCall().catch((error: unknown) => error);
+
+        expect(failure).toBeInstanceOf(PublicApiError);
+        expect(failure).toMatchObject({
+          code: "unexpected_response",
+          status: 404,
+          recoveryId: null,
+        });
+      }
+    }
+  });
+
+  it("rejects successful recovery and receipt substitution by recovery ID", async () => {
+    const substitutedRecoveryId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    for (const [request, body] of [
+      [
+        () => getRecovery(recoveryId),
+        replayRecoverySnapshot(substitutedRecoveryId),
+      ],
+      [
+        () => getReceipt(recoveryId),
+        { ...cancellationReceipt(), recoveryId: substitutedRecoveryId },
+      ],
+    ] as const) {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(body)));
+
+      const failure = await request().catch((error: unknown) => error);
+
+      expect(failure).toBeInstanceOf(PublicApiError);
+      expect(failure).toMatchObject({
+        code: "unexpected_response",
+        status: 200,
+        recoveryId: null,
+      });
+    }
+  });
+
+  it("binds a successful decision acknowledgement to the exact submitted claim", async () => {
+    const request = {
+      decision: "decline" as const,
+      clientDecisionId: "decision-success-correlation",
+      remedyId: "remedy-success-correlation",
+      remedyDigest: digest,
+      toolCallId: "call-success-correlation",
+    };
+    const valid = {
+      clientDecisionId: request.clientDecisionId,
+      recoveryId,
+      decision: "decline",
+      status: "closed_without_action",
+      decisionRemedyDigest: digest,
+      executionStarted: false,
+    };
+    const substitutions = [
+      {
+        ...valid,
+        recoveryId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      },
+      { ...valid, clientDecisionId: "decision-substituted" },
+      { ...valid, decisionRemedyDigest: `sha256:${"f".repeat(64)}` },
+      {
+        clientDecisionId: request.clientDecisionId,
+        recoveryId,
+        decision: "approve",
+        status: "completed",
+        approvedRemedyDigest: digest,
+        executionStarted: true,
+      },
+    ];
+
+    for (const body of substitutions) {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(body)));
+
+      const failure = await postDecision(recoveryId, request).catch(
+        (error: unknown) => error,
+      );
+
+      expect(failure).toBeInstanceOf(PublicApiError);
+      expect(failure).toMatchObject({
+        code: "unexpected_response",
+        status: 200,
+        recoveryId: null,
+      });
+    }
+  });
+
+  it("accepts only the exact typed live-start fallback envelope", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        publicErrorResponse(
+          "live_cooldown",
+          "Live mode is cooling down for this demo identity.",
+          429,
+          {
+            kind: "show_replay_fixture",
+            scenarioId: "hotel",
+            executionMode: "replay_fixture",
+          },
+        ),
+      ),
+    );
+
+    const failure = await createRecovery("hotel", "openai_live").catch(
+      (error: unknown) => error,
+    );
+
+    expect(failure).toBeInstanceOf(PublicApiError);
+    expect(failure).toMatchObject({
+      code: "live_cooldown",
+      retryAfterSeconds: 12,
+      fallback: {
+        kind: "show_replay_fixture",
+        scenarioId: "hotel",
+        executionMode: "replay_fixture",
+      },
+    });
+  });
+
+  it("turns an unrecognized error body into a local generic error without canaries", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            error: {
+              code: "prompt-canary-code",
+              message: "prompt-canary-message",
+              requestId: "attacker-request-id",
+              recoveryId: null,
+              retryAfterSeconds: null,
+              fallback: null,
+              payload: "tool-payload-canary",
+            },
+          }),
+          { status: 500, headers: { "Content-Type": "application/json" } },
+        ),
+      ),
+    );
+
+    const failure = await getRecovery(recoveryId).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(PublicApiError);
+    expect(failure).toMatchObject({ code: "unexpected_response", status: 500 });
+    expect((failure as Error).message).toBe("The server returned an unexpected response.");
+    expect(JSON.stringify(failure)).not.toContain("canary");
+    expect((failure as Error).stack).not.toContain("canary");
+  });
+
+  it("normalizes malformed successful JSON without exposing response canaries", async () => {
+    const decision = {
+      decision: "decline" as const,
+      clientDecisionId: "decision-malformed-success",
+      remedyId: "remedy-malformed-success",
+      remedyDigest: digest,
+      toolCallId: "call-malformed-success",
+    };
+    const requests: ReadonlyArray<() => Promise<unknown>> = [
+      () => getHealth(),
+      () => getRecovery(recoveryId),
+      () => postDecision(recoveryId, decision),
+      () => getReceipt(recoveryId),
+    ];
+
+    for (const request of requests) {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(
+          new Response("2xx-json-response-canary{", {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        ),
+      );
+
+      const failure = await request().catch((error: unknown) => error);
+
+      expect(failure).toBeInstanceOf(PublicApiError);
+      expect(failure).toMatchObject({ code: "unexpected_response", status: 200 });
+      expect((failure as Error).message).toBe(
+        "The server returned an unexpected response.",
+      );
+      expect(JSON.stringify(failure)).not.toContain("canary");
+      expect((failure as Error).stack).not.toContain("canary");
+    }
+  });
+
+  it("rejects a recovery snapshot that silently changes the requested mode", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          recoveryId,
+          scenarioId: "hotel",
+          executionMode: "replay_fixture",
+          status: "completed",
+          currentStep: 5,
+          currentStepSummary: "Bundled replay completed.",
+          createdAt: "2026-07-18T20:00:00Z",
+          updatedAt: "2026-07-18T20:00:03Z",
+          pendingApproval: null,
+          rootTraceId: null,
+          modelIds: [],
+          sdkVersion: null,
+          protocolVersion: null,
+          agentGraphVersion: null,
+          promptToolSchemaHash: null,
+        }),
+      ),
+    );
+
+    await expect(createRecovery("hotel", "openai_live")).rejects.toMatchObject({
+      code: "unexpected_response",
+      status: 200,
+    });
   });
 
   it("posts an explicit decline discriminator and accepts only the decline union", async () => {
@@ -159,7 +487,7 @@ describe("decision and receipt contracts", () => {
         remedyDigest: digest,
         toolCallId: "call-contract",
       }),
-    ).rejects.toThrow("terminal action contract");
+    ).rejects.toMatchObject({ code: "unexpected_response", status: 200 });
   });
 
   it("loads a concrete cancellation receipt from the server", async () => {
@@ -179,9 +507,43 @@ describe("decision and receipt contracts", () => {
       vi.fn().mockResolvedValue(jsonResponse(cancellationReceipt(1))),
     );
 
-    await expect(getReceipt(recoveryId)).rejects.toThrow(
-      "terminal evidence contract",
+    await expect(getReceipt(recoveryId)).rejects.toMatchObject({
+      code: "unexpected_response",
+      status: 200,
+    });
+  });
+
+  it.each([
+    { status: "closed_without_action" },
+    { simulated: false },
+    { providerExecution: true },
+    { modelIds: ["impossible-replay-model"] },
+    { rootTraceId: "trace_11111111111111111111111111111111" },
+    { sdkVersion: "0.18.3" },
+    { protocolVersion: "backchannel.approval.v1" },
+    { agentGraphVersion: "backchannel.hotel-agent.v1" },
+    { promptToolSchemaHash: "b".repeat(64) },
+    { decision: "approved" },
+    { decisionRemedyDigest: digest },
+    { executionCount: 1 },
+    { providerDispatchStarted: true },
+    { exactInterruptionRejected: true },
+    { permissionRevoked: true },
+    { scopeClosed: true },
+    { approvedRemedyDigest: digest },
+  ])("rejects impossible replay receipt evidence %#", async (invalidUpdate) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({ ...replayRecoveryReceipt(), ...invalidUpdate }),
+      ),
     );
+
+    await expect(getReceipt(recoveryId)).rejects.toMatchObject({
+      code: "unexpected_response",
+      status: 200,
+      recoveryId: null,
+    });
   });
 
   it.each([
@@ -200,9 +562,10 @@ describe("decision and receipt contracts", () => {
       ),
     );
 
-    await expect(getReceipt(recoveryId)).rejects.toThrow(
-      "terminal evidence contract",
-    );
+    await expect(getReceipt(recoveryId)).rejects.toMatchObject({
+      code: "unexpected_response",
+      status: 200,
+    });
   });
 
   it("recognizes both terminal snapshot statuses without accepting pending consent", () => {

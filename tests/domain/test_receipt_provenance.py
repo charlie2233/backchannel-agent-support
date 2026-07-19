@@ -39,9 +39,23 @@ def receipt_payload(execution_mode: ExecutionMode) -> dict[str, object]:
 @pytest.mark.parametrize(
     "invalid_update",
     [
+        {"status": "closed_without_action"},
         {"simulated": False},
         {"providerExecution": True},
         {"modelIds": ["impossible-replay-model"]},
+        {"rootTraceId": "trace_11111111111111111111111111111111"},
+        {"sdkVersion": "0.18.3"},
+        {"protocolVersion": "backchannel.approval.v1"},
+        {"agentGraphVersion": "backchannel.hotel-agent.v1"},
+        {"promptToolSchemaHash": "b" * 64},
+        {"decision": "approved"},
+        {"decisionRemedyDigest": DECISION_DIGEST},
+        {"executionCount": 1},
+        {"providerDispatchStarted": True},
+        {"exactInterruptionRejected": True},
+        {"permissionRevoked": True},
+        {"scopeClosed": True},
+        {"approvedRemedyDigest": DECISION_DIGEST},
     ],
 )
 def test_replay_receipt_rejects_impossible_provenance(

@@ -54,6 +54,7 @@ from server.agents.versioning import (
     remedy_action_digest,
 )
 from server.digest import remedy_consent_digest
+from server.logging import safe_recovery_log_id
 from server.models import (
     ApprovalDecisionRequest,
     ApprovalDecisionResponse,
@@ -265,15 +266,15 @@ class RecoveryOrchestrator:
                 resume_generation=resume_generation,
             )
         except Exception:
-            logger.exception(
+            logger.error(
                 "Failed to release reconciliation lease for recovery_id=%s",
-                claim.recovery_id,
+                safe_recovery_log_id(claim.recovery_id),
             )
             return
         if not released:
             logger.warning(
                 "Reconciliation lease was already lost for recovery_id=%s",
-                claim.recovery_id,
+                safe_recovery_log_id(claim.recovery_id),
             )
 
     def _reconcile_completed_executions(self) -> datetime | None:
@@ -312,9 +313,9 @@ class RecoveryOrchestrator:
                     resume_generation=lease.resume_generation,
                 )
             except Exception:
-                logger.exception(
+                logger.error(
                     "Failed to reconcile committed execution for recovery_id=%s",
-                    execution.recovery_id,
+                    safe_recovery_log_id(execution.recovery_id),
                 )
                 self._release_failed_reconciliation_lease(
                     claim,
@@ -377,9 +378,9 @@ class RecoveryOrchestrator:
                     resume_generation=lease.resume_generation,
                 )
             except Exception:
-                logger.exception(
+                logger.error(
                     "Failed to reconcile claimed decision for recovery_id=%s",
-                    claim.recovery_id,
+                    safe_recovery_log_id(claim.recovery_id),
                 )
                 self._release_failed_reconciliation_lease(
                     claim,
@@ -423,7 +424,7 @@ class RecoveryOrchestrator:
             try:
                 retry_at = self._reconcile_startup_once()
             except Exception:
-                logger.exception(
+                logger.error(
                     "Failed deferred startup reconciliation; retrying in %.2f seconds",
                     failure_backoff,
                 )
@@ -478,7 +479,7 @@ class RecoveryOrchestrator:
     def _raise_incompatible(recovery_id: str, marker: str) -> NoReturn:
         logger.error(
             "Serialized approval resume incompatible recovery_id=%s marker=%s",
-            recovery_id,
+            safe_recovery_log_id(recovery_id),
             marker,
         )
         raise ResumeIncompatibleError(recovery_id)
@@ -1217,7 +1218,7 @@ class RecoveryOrchestrator:
         except Exception:
             logger.error(
                 "Agents SDK state restore failed recovery_id=%s",
-                recovery_id,
+                safe_recovery_log_id(recovery_id),
             )
             raise ResumeIncompatibleError(recovery_id) from None
         interruptions = state.get_interruptions()

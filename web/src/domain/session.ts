@@ -1,6 +1,8 @@
 import type { DecisionRequest } from "./recovery";
+import type { ExecutionMode } from "./runtime";
 
 export const ACTIVE_HOTEL_RECOVERY_KEY = "backchannel.hotelRecovery.v1";
+export const ACTIVE_HOTEL_RECOVERY_MODE_KEY = "backchannel.hotelRecoveryMode.v1";
 export const PENDING_DECISION_KEY = "backchannel.pendingDecision.v1";
 
 export interface StoredDecisionClaim {
@@ -75,6 +77,7 @@ export function readActiveHotelRecovery(): string | null {
     if (!isRecoveryId(value)) {
       clearPendingDecisionForRecovery(value);
       target?.removeItem(ACTIVE_HOTEL_RECOVERY_KEY);
+      target?.removeItem(ACTIVE_HOTEL_RECOVERY_MODE_KEY);
       return null;
     }
     return value;
@@ -83,13 +86,40 @@ export function readActiveHotelRecovery(): string | null {
   }
 }
 
-export function persistActiveHotelRecovery(recoveryId: string): boolean {
+export function readActiveHotelRecoveryMode(): ExecutionMode | null {
+  try {
+    const target = storage();
+    const activeRecoveryId = target?.getItem(ACTIVE_HOTEL_RECOVERY_KEY);
+    const value = target?.getItem(ACTIVE_HOTEL_RECOVERY_MODE_KEY);
+    if (!isRecoveryId(activeRecoveryId)) {
+      target?.removeItem(ACTIVE_HOTEL_RECOVERY_MODE_KEY);
+      return null;
+    }
+    if (
+      value === "openai_live" ||
+      value === "sdk_stub" ||
+      value === "replay_fixture"
+    ) {
+      return value;
+    }
+    target?.removeItem(ACTIVE_HOTEL_RECOVERY_MODE_KEY);
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function persistActiveHotelRecovery(
+  recoveryId: string,
+  executionMode: ExecutionMode,
+): boolean {
   try {
     const target = storage();
     if (target === null || !isRecoveryId(recoveryId)) {
       return false;
     }
     target.setItem(ACTIVE_HOTEL_RECOVERY_KEY, recoveryId);
+    target.setItem(ACTIVE_HOTEL_RECOVERY_MODE_KEY, executionMode);
     return true;
   } catch {
     return false;
@@ -106,6 +136,7 @@ export function clearActiveHotelRecovery(recoveryId: string): boolean {
       return false;
     }
     target.removeItem(ACTIVE_HOTEL_RECOVERY_KEY);
+    target.removeItem(ACTIVE_HOTEL_RECOVERY_MODE_KEY);
     return true;
   } catch {
     return false;

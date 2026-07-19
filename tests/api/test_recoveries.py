@@ -9,9 +9,7 @@ from fastapi.testclient import TestClient
 from server.config import RuntimeSettings
 from server.events import stream_recovery_events
 from server.main import create_app
-from server.models import ExecutionMode, RecoveryEvent, RecoveryStatus
-from server.replay.engine import ReplayEngine
-from server.replay.loader import ScenarioLoader
+from server.models import ExecutionMode, RecoveryEvent, RecoveryStatus, ScenarioId
 from server.store import SQLiteStore
 
 
@@ -48,27 +46,69 @@ def test_create_recovery_validates_scenario_and_execution_mode(
     assert client.post("/api/recoveries", json=payload).status_code == expected_status
 
 
-def test_replay_recovery_snapshot_and_receipt_are_durable(client: TestClient) -> None:
+@pytest.mark.parametrize("scenario_id", ["hotel", "api-quota"])
+def test_replay_recovery_snapshot_and_receipt_are_terminal_and_durable(
+    client: TestClient,
+    scenario_id: str,
+) -> None:
     created = client.post(
         "/api/recoveries",
-        json={"scenarioId": "api-quota", "executionMode": "replay_fixture"},
+        json={"scenarioId": scenario_id, "executionMode": "replay_fixture"},
     )
 
     assert created.status_code == 201
     snapshot = created.json()
     recovery_id = snapshot["recoveryId"]
     assert snapshot["status"] == "completed"
+    assert snapshot["currentStep"] == 5
     assert snapshot["executionMode"] == "replay_fixture"
+    assert snapshot["pendingApproval"] is None
+    assert snapshot["rootTraceId"] is None
+    assert snapshot["modelIds"] == []
+    assert snapshot["sdkVersion"] is None
+    assert snapshot["protocolVersion"] is None
+    assert snapshot["agentGraphVersion"] is None
+    assert snapshot["promptToolSchemaHash"] is None
     assert client.get(f"/api/recoveries/{recovery_id}").json() == snapshot
+
+    events = client.app.state.recovery_store.list_events(recovery_id)
+    assert len(events) == 7
+    assert [event.seq for event in events] == [1, 2, 3, 4, 5, 6, 7]
+    assert [event.terminal for event in events] == [
+        False,
+        False,
+        False,
+        False,
+        False,
+        False,
+        True,
+    ]
+    assert events[0].type == "recovery.created"
+    assert len(events[1:]) == 6
+    assert events[-1].type == "receipt.simulation_sealed"
 
     receipt_response = client.get(f"/api/recoveries/{recovery_id}/receipt")
     assert receipt_response.status_code == 200
     receipt = receipt_response.json()
     assert receipt["recoveryId"] == recovery_id
     assert receipt["executionMode"] == "replay_fixture"
+    assert receipt["status"] == "completed"
     assert receipt["simulated"] is True
     assert receipt["providerExecution"] is False
     assert receipt["modelIds"] == []
+    assert receipt["rootTraceId"] is None
+    assert receipt["sdkVersion"] is None
+    assert receipt["protocolVersion"] is None
+    assert receipt["agentGraphVersion"] is None
+    assert receipt["promptToolSchemaHash"] is None
+    assert receipt["decision"] is None
+    assert receipt["decisionRemedyDigest"] is None
+    assert receipt["executionCount"] == 0
+    assert receipt["providerDispatchStarted"] is False
+    assert receipt["exactInterruptionRejected"] is False
+    assert receipt["permissionRevoked"] is False
+    assert receipt["scopeClosed"] is False
+    assert receipt["approvedRemedyDigest"] is None
     assert "simulated" in json.dumps(receipt).lower()
     assert "no model call or provider execution" in receipt["boundary"].lower()
 
@@ -106,10 +146,10 @@ def test_demo_reset_is_forbidden_by_default_without_deleting_recovery(
     )
     recovery_id = created.json()["recoveryId"]
 
-    reset = client.post("/api/demo/reset")
+    reset = client.post("/api/demo/reset", json={})
 
     assert reset.status_code == 403
-    assert reset.json() == {"detail": "Forbidden"}
+    assert reset.json()["error"]["code"] == "invalid_request"
     assert client.get(f"/api/recoveries/{recovery_id}").status_code == 200
 
 
@@ -123,7 +163,7 @@ def test_demo_reset_deletes_recovery_only_when_explicitly_enabled(tmp_path) -> N
         )
         recovery_id = created.json()["recoveryId"]
 
-        reset = client.post("/api/demo/reset")
+        reset = client.post("/api/demo/reset", json={})
 
         assert reset.status_code == 200
         assert reset.json() == {"reset": True}
@@ -146,6 +186,9 @@ def test_last_event_id_replays_only_newer_persisted_events(client: TestClient) -
     assert response.headers["content-type"].startswith("text/event-stream")
     assert response.headers["cache-control"] == "no-cache"
     assert response.headers["x-accel-buffering"] == "no"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["x-frame-options"] == "DENY"
+    assert response.headers["referrer-policy"] == "no-referrer"
     streamed_ids = [
         int(line.removeprefix("id: "))
         for line in response.text.splitlines()
@@ -176,8 +219,20 @@ def test_terminal_transition_after_event_read_is_emitted_before_stream_end(
     tmp_path, monkeypatch
 ) -> None:
     store = SQLiteStore(tmp_path / "terminal-race.sqlite3")
-    recovery = ReplayEngine(store, ScenarioLoader()).start(
-        "hotel", execution_mode=ExecutionMode.REPLAY_FIXTURE
+    recovery = store.create_recovery(
+        recovery_id="terminal-race-replay",
+        scenario_id=ScenarioId.HOTEL,
+        execution_mode=ExecutionMode.REPLAY_FIXTURE,
+        current_step=0,
+        current_step_summary="Replay race fixture created.",
+    )
+    recovery = store.record_transition(
+        recovery.recovery_id,
+        status=RecoveryStatus.IN_PROGRESS,
+        current_step=3,
+        current_step_summary="Replay race fixture reached its boundary.",
+        event_type="authorization.boundary_recorded",
+        event_data={"providerExecution": False},
     )
     cursor = store.list_events(recovery.recovery_id)[-1].seq
     original_read = store.read_event_batch

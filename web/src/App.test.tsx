@@ -33,12 +33,43 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-function healthResponse(): Response {
+function healthResponse(liveReady = false, sdkStubReady = true): Response {
   return jsonResponse({
-    backend: "stub",
-    liveReady: false,
+    backend: liveReady ? "openai" : "stub",
+    liveReady,
+    sdkStubReady,
     providerBoundary: "demo_adapter_only",
   });
+}
+
+function publicErrorResponse(
+  code:
+    | "live_unavailable"
+    | "live_capacity_reached"
+    | "live_cooldown"
+    | "live_daily_budget_exceeded",
+  message: string,
+  status: 429 | 503,
+  recoveryId: string | null = null,
+  fallback: object | null = {
+    kind: "show_replay_fixture",
+    scenarioId: "hotel",
+    executionMode: "replay_fixture",
+  },
+): Response {
+  return jsonResponse(
+    {
+      error: {
+        code,
+        message,
+        requestId: "req_11111111111111111111111111111111",
+        recoveryId,
+        retryAfterSeconds: status === 429 ? 1 : null,
+        fallback,
+      },
+    },
+    status,
+  );
 }
 
 function pendingSnapshot(pendingApproval: object | null = {
@@ -90,6 +121,64 @@ function terminalSnapshot(status: "closed_without_action" | "outcome_unknown") {
         ? "Declined remedy closed without provider action."
         : "Provider outcome requires manual reconciliation.",
     updatedAt: "2026-07-18T20:00:03Z",
+  };
+}
+
+function replaySnapshot(activeRecoveryId = "77777777-2222-4333-8444-555555555555") {
+  return {
+    recoveryId: activeRecoveryId,
+    scenarioId: "hotel",
+    executionMode: "replay_fixture",
+    status: "completed",
+    currentStep: 5,
+    currentStepSummary: "Bundled deterministic replay completed.",
+    createdAt: "2026-07-18T20:00:00Z",
+    updatedAt: "2026-07-18T20:00:03Z",
+    pendingApproval: null,
+    rootTraceId: null,
+    modelIds: [],
+    sdkVersion: null,
+    protocolVersion: null,
+    agentGraphVersion: null,
+    promptToolSchemaHash: null,
+  };
+}
+
+function replayReceipt(activeRecoveryId = "77777777-2222-4333-8444-555555555555") {
+  return {
+    recoveryId: activeRecoveryId,
+    executionMode: "replay_fixture",
+    status: "completed",
+    simulated: true,
+    providerExecution: false,
+    modelIds: [],
+    rootTraceId: null,
+    sdkVersion: null,
+    protocolVersion: null,
+    agentGraphVersion: null,
+    promptToolSchemaHash: null,
+    boundary: "Bundled replay; no model call or provider execution.",
+    providerResult: "No provider dispatch.",
+    authorizationSource: "Bundled deterministic fixture.",
+    verificationResults: ["Fixture loaded."],
+    decision: null,
+    decisionRemedyDigest: null,
+    executionCount: 0,
+    providerDispatchStarted: false,
+    exactInterruptionRejected: false,
+    permissionRevoked: false,
+    scopeClosed: false,
+    approvedRemedyDigest: null,
+  };
+}
+
+function livePendingSnapshot(activeRecoveryId = recoveryId) {
+  return {
+    ...pendingSnapshot(undefined, activeRecoveryId),
+    executionMode: "openai_live",
+    rootTraceId: "trace_11111111111111111111111111111111",
+    modelIds: ["gpt-5.6-luna-returned", "gpt-5.6-terra-returned"],
+    agentGraphVersion: "backchannel.hotel-live-agent.v1",
   };
 }
 
@@ -164,9 +253,8 @@ function stubHealthWithUnavailableRecovery() {
 
 describe("Backchannel console", () => {
   it.each([404, 422])(
-    "replaces a stored recovery after definitive status %s exactly once and clears its matching claim",
+    "does not replace a stored recovery or matching claim after status %s",
     async (status) => {
-      const replacementRecoveryId = "99999999-8888-4777-8666-555555555555";
       const storedRequest = {
         decision: "decline",
         clientDecisionId: `decision-stale-${status}`,
@@ -185,12 +273,27 @@ describe("Backchannel console", () => {
           return Promise.resolve(healthResponse());
         }
         if (url === `/api/recoveries/${recoveryId}`) {
-          return Promise.resolve(jsonResponse({ detail: "Stored recovery unavailable" }, status));
+          return Promise.resolve(
+            jsonResponse(
+              {
+                error: {
+                  code: status === 404 ? "not_found" : "invalid_request",
+                  message:
+                    status === 404
+                      ? "The requested resource was not found."
+                      : "The request is invalid.",
+                  requestId: "req_11111111111111111111111111111111",
+                  recoveryId,
+                  retryAfterSeconds: null,
+                  fallback: null,
+                },
+              },
+              status,
+            ),
+          );
         }
         if (url === "/api/recoveries") {
-          return Promise.resolve(
-            jsonResponse(pendingSnapshot(undefined, replacementRecoveryId), 201),
-          );
+          throw new Error("Stored durable identity must not be replaced");
         }
         throw new Error(`Unexpected request: ${url}`);
       });
@@ -199,19 +302,11 @@ describe("Backchannel console", () => {
       render(<App />);
 
       await waitFor(() => {
-        expect(sessionStorage.getItem("backchannel.hotelRecovery.v1")).toBe(
-          replacementRecoveryId,
-        );
-      }, { timeout: 5_000 });
-      expect(
-        await screen.findByRole(
-          "heading",
-          { name: "Approve exact remedy" },
-          { timeout: 5_000 },
-        ),
-      ).toBeVisible();
-      await waitFor(() => {
-        expect(sessionStorage.getItem("backchannel.pendingDecision.v1")).toBeNull();
+        expect(
+          fetchMock.mock.calls.filter(
+            ([input]) => String(input) === `/api/recoveries/${recoveryId}`,
+          ),
+        ).toHaveLength(1);
       }, { timeout: 5_000 });
 
       await act(async () => {
@@ -220,12 +315,11 @@ describe("Backchannel console", () => {
       });
       expect(
         fetchMock.mock.calls.filter(([input]) => String(input) === "/api/recoveries"),
-      ).toHaveLength(1);
-      expect(
-        fetchMock.mock.calls.filter(
-          ([input]) => String(input) === `/api/recoveries/${recoveryId}`,
-        ),
-      ).toHaveLength(1);
+      ).toHaveLength(0);
+      expect(sessionStorage.getItem("backchannel.hotelRecovery.v1")).toBe(recoveryId);
+      expect(sessionStorage.getItem("backchannel.pendingDecision.v1")).toBe(
+        JSON.stringify({ recoveryId, request: storedRequest }),
+      );
     },
     15_000,
   );
@@ -265,7 +359,8 @@ describe("Backchannel console", () => {
 
       render(<App />);
 
-      expect(await screen.findByText("Replay fixture")).toBeVisible();
+      expect(await screen.findByText("Runtime pending")).toBeVisible();
+      expect(screen.queryByText("Replay fixture")).not.toBeInTheDocument();
       await waitFor(() => {
         expect(
           fetchMock.mock.calls.filter(
@@ -620,7 +715,169 @@ describe("Backchannel console", () => {
     ).toHaveLength(0);
   });
 
-  it("renders exactly two approved scenarios and the ordered lifecycle", async () => {
+  it("keeps persisted mode claims neutral until authoritative recovery evidence arrives", async () => {
+    sessionStorage.setItem("backchannel.hotelRecovery.v1", recoveryId);
+    sessionStorage.setItem("backchannel.hotelRecoveryMode.v1", "openai_live");
+    let resolveRecovery: ((response: Response) => void) | undefined;
+    const fetchMock = vi.fn().mockImplementation((input: string | URL | Request) => {
+      const url = String(input);
+      if (url === "/health") {
+        return Promise.resolve(healthResponse(true));
+      }
+      if (url === `/api/recoveries/${recoveryId}`) {
+        return new Promise<Response>((resolve) => {
+          resolveRecovery = resolve;
+        });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+
+    expect(screen.getByText("Runtime pending")).toBeVisible();
+    expect(screen.getByText("Loading authoritative recovery…")).toBeVisible();
+    expect(screen.getByText("Checking runtime")).toBeVisible();
+    expect(screen.queryByText("OpenAI live workspace")).not.toBeInTheDocument();
+    expect(screen.queryByText("OpenAI live")).not.toBeInTheDocument();
+    expect(screen.queryByText("Replay workspace")).not.toBeInTheDocument();
+    expect(screen.queryByText("Bundled fixture snapshot")).not.toBeInTheDocument();
+    expect(screen.queryByText("replay_fixture")).not.toBeInTheDocument();
+
+    await act(async () => {
+      resolveRecovery?.(jsonResponse(livePendingSnapshot()));
+      await Promise.resolve();
+    });
+    expect(await screen.findByText("OpenAI live")).toBeVisible();
+    expect(screen.getByText("OpenAI live workspace")).toBeVisible();
+    expect(screen.queryByText("Replay workspace")).not.toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.filter(([input]) => String(input) === "/api/recoveries"),
+    ).toHaveLength(0);
+  });
+
+  it("does not abandon a nonterminal recovery when another mode is requested", async () => {
+    const createBodies: Array<Record<string, unknown>> = [];
+    const fetchMock = vi.fn().mockImplementation(
+      (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/health") {
+          return Promise.resolve(healthResponse(true));
+        }
+        if (url === "/api/recoveries") {
+          const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          createBodies.push(body);
+          return Promise.resolve(jsonResponse(pendingSnapshot(), 201));
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+
+    const live = await screen.findByRole("button", { name: "Run live recovery" });
+    expect(live).toBeDisabled();
+    expect(
+      screen.getByText("Finish or decline the active recovery before switching modes."),
+    ).toBeVisible();
+    fireEvent.click(live);
+    expect(
+      createBodies.filter(({ executionMode }) => executionMode === "openai_live"),
+    ).toHaveLength(0);
+  });
+
+  it("does not switch away from a persisted recovery after a transient load failure", async () => {
+    sessionStorage.setItem("backchannel.hotelRecovery.v1", recoveryId);
+    sessionStorage.setItem("backchannel.hotelRecoveryMode.v1", "sdk_stub");
+    const fetchMock = vi.fn().mockImplementation((input: string | URL | Request) => {
+      const url = String(input);
+      if (url === "/health") {
+        return Promise.resolve(healthResponse(true));
+      }
+      if (url === `/api/recoveries/${recoveryId}`) {
+        return Promise.resolve(
+          jsonResponse(
+            {
+              error: {
+                code: "internal_error",
+                message: "The request could not be completed.",
+                requestId: "req_11111111111111111111111111111111",
+                recoveryId,
+                retryAfterSeconds: null,
+                fallback: null,
+              },
+            },
+            500,
+          ),
+        );
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+
+    expect(
+      await screen.findByText("The request could not be completed."),
+    ).toBeVisible();
+    const live = screen.getByRole("button", { name: "Run live recovery" });
+    expect(live).toBeDisabled();
+    fireEvent.click(live);
+    expect(
+      fetchMock.mock.calls.filter(([input]) => String(input) === "/api/recoveries"),
+    ).toHaveLength(0);
+  });
+
+  it("issues only one live start for rapid repeated clicks", async () => {
+    let resolveLive: ((response: Response) => void) | undefined;
+    const createBodies: Array<Record<string, unknown>> = [];
+    const fetchMock = vi.fn().mockImplementation(
+      (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/health") {
+          return Promise.resolve(healthResponse(true));
+        }
+        if (url === "/api/recoveries") {
+          const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          createBodies.push(body);
+          if (body.executionMode === "sdk_stub") {
+            return Promise.resolve(
+              jsonResponse(terminalSnapshot("closed_without_action"), 201),
+            );
+          }
+          return new Promise<Response>((resolve) => {
+            resolveLive = resolve;
+          });
+        }
+        if (url === `/api/recoveries/${recoveryId}/receipt`) {
+          return Promise.resolve(
+            jsonResponse(declinedReceipt("closed_without_action")),
+          );
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+    const live = await screen.findByRole("button", { name: "Run live recovery" });
+    await waitFor(() => expect(live).toBeEnabled());
+    fireEvent.click(live);
+    fireEvent.click(live);
+
+    await waitFor(() => {
+      expect(
+        createBodies.filter(({ executionMode }) => executionMode === "openai_live"),
+      ).toHaveLength(1);
+    });
+    await act(async () => {
+      resolveLive?.(jsonResponse(livePendingSnapshot(), 201));
+      await Promise.resolve();
+    });
+  });
+
+  it("renders exactly two approved scenarios and the ordered replay lifecycle", async () => {
     stubHealthWithUnavailableRecovery();
 
     render(<App />);
@@ -633,6 +890,10 @@ describe("Backchannel console", () => {
     expect(
       within(scenarioList).getByRole("button", { name: /API quota recovery/i }),
     ).toBeInTheDocument();
+
+    fireEvent.click(
+      within(scenarioList).getByRole("button", { name: /API quota recovery/i }),
+    );
 
     const lifecycle = screen.getByRole("list", { name: "Recovery lifecycle" });
     expect(within(lifecycle).getAllByRole("listitem")).toHaveLength(6);
@@ -657,5 +918,232 @@ describe("Backchannel console", () => {
 
     const lifecycle = screen.getByRole("list", { name: "Recovery lifecycle" });
     expect(within(lifecycle).getAllByText("Recorded")).toHaveLength(6);
+  });
+
+  it.each([
+    ["live_unavailable", "Live mode is unavailable on this server.", 503],
+    ["live_capacity_reached", "The live demo is currently at capacity.", 429],
+    ["live_cooldown", "Live mode is cooling down for this demo identity.", 429],
+    [
+      "live_daily_budget_exceeded",
+      "The live demo budget is exhausted for today.",
+      429,
+    ],
+  ] as const)(
+    "requires an explicit replay click after live start code %s",
+    async (code, message, status) => {
+      const replayRecoveryId = "77777777-2222-4333-8444-555555555555";
+      const createBodies: Array<Record<string, unknown>> = [];
+      const fetchMock = vi.fn().mockImplementation(
+        (input: string | URL | Request, init?: RequestInit) => {
+          const url = String(input);
+          if (url === "/health") {
+            return Promise.resolve(healthResponse(true));
+          }
+          if (url === "/api/recoveries") {
+            const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+            createBodies.push(body);
+            if (body.executionMode === "sdk_stub") {
+              return Promise.resolve(
+                jsonResponse(terminalSnapshot("closed_without_action"), 201),
+              );
+            }
+            if (body.executionMode === "openai_live") {
+              return Promise.resolve(
+                publicErrorResponse(code, message, status, null),
+              );
+            }
+            if (body.executionMode === "replay_fixture") {
+              return Promise.resolve(
+                jsonResponse(replaySnapshot(replayRecoveryId), 201),
+              );
+            }
+          }
+          if (url === `/api/recoveries/${recoveryId}/receipt`) {
+            return Promise.resolve(
+              jsonResponse(declinedReceipt("closed_without_action")),
+            );
+          }
+          if (url === `/api/recoveries/${replayRecoveryId}/receipt`) {
+            return Promise.resolve(jsonResponse(replayReceipt(replayRecoveryId)));
+          }
+          throw new Error(`Unexpected request: ${url}`);
+        },
+      );
+      vi.stubGlobal("fetch", fetchMock);
+
+      render(<App />);
+      const live = await screen.findByRole("button", {
+        name: "Run live recovery",
+      });
+      await waitFor(() => expect(live).toBeEnabled());
+      fireEvent.click(live);
+
+      expect(await screen.findByRole("alert")).toHaveTextContent(message);
+      expect(
+        createBodies.filter(({ executionMode }) => executionMode === "replay_fixture"),
+      ).toHaveLength(0);
+      const fallback = screen.getByRole("button", { name: "Run replay fixture" });
+      fireEvent.click(fallback);
+      fireEvent.click(fallback);
+
+      await waitFor(() => {
+        expect(
+          createBodies.filter(({ executionMode }) => executionMode === "replay_fixture"),
+        ).toHaveLength(1);
+      });
+      expect(
+        createBodies.filter(({ executionMode }) => executionMode === "openai_live"),
+      ).toHaveLength(1);
+      expect(
+        await screen.findByRole("heading", { name: "Completed replay receipt" }),
+      ).toBeVisible();
+      expect(screen.getByText("Simulated replay only.")).toBeVisible();
+      expect(screen.getByText("No model call or provider dispatch occurred.")).toBeVisible();
+      const scenarioList = screen.getByRole("list", { name: "Recovery scenarios" });
+      expect(scenarioList).toHaveTextContent("completed recorded hotel replay");
+      expect(scenarioList).not.toHaveTextContent("paused at operator authorization");
+      expect(screen.queryByText("Not started.")).not.toBeInTheDocument();
+      expect(
+        screen.queryByText("Waiting for an execution outcome."),
+      ).not.toBeInTheDocument();
+      expect(screen.queryByText("Authorization not submitted")).not.toBeInTheDocument();
+      fireEvent.click(
+        within(scenarioList).getByRole("button", { name: /API quota recovery/i }),
+      );
+      expect(scenarioList).toHaveTextContent("completed recorded hotel replay");
+      expect(scenarioList).not.toHaveTextContent("paused at operator authorization");
+    },
+  );
+
+  it("offers replay when health says live is unavailable without running it automatically", async () => {
+    const createBodies: Array<Record<string, unknown>> = [];
+    const fetchMock = vi.fn().mockImplementation(
+      (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/health") {
+          return Promise.resolve(healthResponse(false));
+        }
+        if (url === "/api/recoveries") {
+          const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          createBodies.push(body);
+          return Promise.resolve(
+            body.executionMode === "sdk_stub"
+              ? jsonResponse(terminalSnapshot("closed_without_action"), 201)
+              : jsonResponse(replaySnapshot(), 201),
+          );
+        }
+        if (url === `/api/recoveries/${recoveryId}/receipt`) {
+          return Promise.resolve(
+            jsonResponse(declinedReceipt("closed_without_action")),
+          );
+        }
+        if (url.endsWith("/receipt")) {
+          return Promise.resolve(jsonResponse(replayReceipt()));
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+
+    expect(
+      await screen.findByText("Live mode is unavailable on this server."),
+    ).toBeVisible();
+    expect(
+      createBodies.filter(({ executionMode }) => executionMode === "replay_fixture"),
+    ).toHaveLength(0);
+    const replay = screen.getByRole("button", { name: "Run replay fixture" });
+    await waitFor(() => expect(replay).toBeEnabled());
+    fireEvent.click(replay);
+    await waitFor(() => {
+      expect(
+        createBodies.filter(({ executionMode }) => executionMode === "replay_fixture"),
+      ).toHaveLength(1);
+    });
+  });
+
+  it("does not auto-start the local SDK lane when health marks it unavailable", async () => {
+    const createBodies: Array<Record<string, unknown>> = [];
+    const fetchMock = vi.fn().mockImplementation(
+      (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/health") {
+          return Promise.resolve(healthResponse(false, false));
+        }
+        if (url === "/api/recoveries") {
+          const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          createBodies.push(body);
+          return Promise.resolve(jsonResponse(replaySnapshot(), 201));
+        }
+        if (url.endsWith("/receipt")) {
+          return Promise.resolve(jsonResponse(replayReceipt()));
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+
+    expect(
+      await screen.findByText("Live mode is unavailable on this server."),
+    ).toBeVisible();
+    expect(
+      createBodies.filter(({ executionMode }) => executionMode === "sdk_stub"),
+    ).toHaveLength(0);
+    const replay = screen.getByRole("button", { name: "Run replay fixture" });
+    await waitFor(() => expect(replay).toBeEnabled());
+    fireEvent.click(replay);
+    await waitFor(() => {
+      expect(
+        createBodies.filter(({ executionMode }) => executionMode === "replay_fixture"),
+      ).toHaveLength(1);
+    });
+    expect(
+      await screen.findByRole("heading", { name: "Completed replay receipt" }),
+    ).toBeVisible();
+  });
+
+  it("offers an explicit replay attempt when health cannot be verified", async () => {
+    const createBodies: Array<Record<string, unknown>> = [];
+    const fetchMock = vi.fn().mockImplementation(
+      (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/health") {
+          return Promise.reject(new Error("health-response-canary"));
+        }
+        if (url === "/api/recoveries") {
+          const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          createBodies.push(body);
+          if (body.executionMode === "sdk_stub") {
+            return Promise.resolve(new Response(null, { status: 503 }));
+          }
+          return Promise.resolve(jsonResponse(replaySnapshot(), 201));
+        }
+        if (url.endsWith("/receipt")) {
+          return Promise.resolve(jsonResponse(replayReceipt()));
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+
+    expect(await screen.findByText("Runtime unavailable")).toBeVisible();
+    expect(
+      createBodies.filter(({ executionMode }) => executionMode === "replay_fixture"),
+    ).toHaveLength(0);
+    const replay = screen.getByRole("button", { name: "Run replay fixture" });
+    await waitFor(() => expect(replay).toBeEnabled());
+    fireEvent.click(replay);
+    await waitFor(() => {
+      expect(
+        createBodies.filter(({ executionMode }) => executionMode === "replay_fixture"),
+      ).toHaveLength(1);
+    });
+    expect(screen.queryByText("health-response-canary")).not.toBeInTheDocument();
   });
 });
