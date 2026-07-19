@@ -97,3 +97,19 @@ class RecoveryOrchestrator:
             sdk_result=result,
             original_root_agent=original_root_agent,
         )
+
+    async def resume_approved(self, pending: PendingSdkApproval) -> RunResult:
+        """Approve the exact SDK interruption and resume with per-run tracing disabled."""
+
+        if len(pending.sdk_result.interruptions) != 1:
+            raise RuntimeError("SDK approval resume requires exactly one interruption")
+        interruption = pending.sdk_result.interruptions[0]
+        if interruption.tool_name != "commit_remedy":
+            raise RuntimeError("SDK approval resume received an unexpected tool")
+        state = pending.sdk_result.to_state()
+        state.approve(interruption)
+        return await Runner.run(
+            pending.original_root_agent,
+            state,
+            run_config=configure_sdk_stub_tracing(),
+        )

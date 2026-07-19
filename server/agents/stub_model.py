@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 
 from agents.agent_output import AgentOutputSchemaBase
 from agents.handoffs import Handoff
@@ -31,7 +31,22 @@ class DeterministicApprovalModel(Model):
     def __init__(self, *, arguments: CommitRemedyArguments, call_id: str) -> None:
         self._arguments = arguments
         self._call_id = call_id
-        self._response_number = 0
+
+    def _has_matching_function_output(
+        self, model_input: str | list[TResponseInputItem]
+    ) -> bool:
+        if not isinstance(model_input, list):
+            return False
+        for item in model_input:
+            if isinstance(item, Mapping):
+                item_type = item.get("type")
+                call_id = item.get("call_id")
+            else:
+                item_type = getattr(item, "type", None)
+                call_id = getattr(item, "call_id", None)
+            if item_type == "function_call_output" and call_id == self._call_id:
+                return True
+        return False
 
     async def get_response(
         self,
@@ -47,6 +62,7 @@ class DeterministicApprovalModel(Model):
         conversation_id: str | None,
         prompt: ResponsePromptParam | None,
     ) -> ModelResponse:
+        commit_completed = self._has_matching_function_output(input)
         del (
             system_instructions,
             input,
@@ -61,8 +77,7 @@ class DeterministicApprovalModel(Model):
         if [tool.name for tool in tools] != ["commit_remedy"]:
             raise RuntimeError("Deterministic model requires exactly the commit_remedy tool")
 
-        self._response_number += 1
-        if self._response_number == 1:
+        if not commit_completed:
             return ModelResponse(
                 output=[
                     ResponseFunctionToolCall(

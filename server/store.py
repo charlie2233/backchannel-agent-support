@@ -106,6 +106,10 @@ class RecoveryNotFoundError(LookupError):
     """Raised when a durable recovery or receipt does not exist."""
 
 
+class ReceiptTransitionError(ValueError):
+    """Raised when receipt provenance does not match its terminal transition."""
+
+
 class SQLiteStore:
     """Small connection-per-transaction store safe for FastAPI worker threads."""
 
@@ -309,10 +313,24 @@ class SQLiteStore:
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
-                "SELECT id FROM recoveries WHERE id = ?", (recovery_id,)
+                "SELECT id, execution_mode FROM recoveries WHERE id = ?", (recovery_id,)
             ).fetchone()
             if existing is None:
                 raise RecoveryNotFoundError("Recovery not found")
+            if receipt is not None:
+                if status is not RecoveryStatus.COMPLETED:
+                    raise ReceiptTransitionError(
+                        "Receipt requires a completed terminal transition"
+                    )
+                if receipt.recovery_id != recovery_id:
+                    raise ReceiptTransitionError(
+                        "Receipt recovery ID does not match the transition"
+                    )
+                existing_mode = ExecutionMode(cast(str, existing["execution_mode"]))
+                if receipt.execution_mode is not existing_mode:
+                    raise ReceiptTransitionError(
+                        "Receipt execution mode does not match the recovery"
+                    )
             next_sequence = cast(
                 int,
                 connection.execute(

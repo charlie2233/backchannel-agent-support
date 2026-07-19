@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from threading import RLock
 from typing import Literal
 
@@ -26,13 +28,27 @@ class HotelDispatchResult(BaseModel):
     provider_result: str
 
 
+class IdempotencyConflictError(ValueError):
+    """Raised when one idempotency key is reused for a different request."""
+
+
 class HotelSimulator:
     """Record at most one simulated provider dispatch per idempotency key."""
 
     def __init__(self) -> None:
         self._lock = RLock()
-        self._results: dict[str, HotelDispatchResult] = {}
+        self._results: dict[str, tuple[str, HotelDispatchResult]] = {}
         self._dispatch_count = 0
+
+    @staticmethod
+    def _request_fingerprint(request: HotelDispatchRequest) -> str:
+        canonical_request = json.dumps(
+            request.model_dump(mode="json"),
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        return hashlib.sha256(canonical_request).hexdigest()
 
     @property
     def dispatch_count(self) -> int:
@@ -50,10 +66,16 @@ class HotelSimulator:
         if not idempotency_key.strip():
             raise ValueError("idempotency_key must not be empty")
 
+        request_fingerprint = self._request_fingerprint(request)
         with self._lock:
             stored = self._results.get(idempotency_key)
             if stored is not None:
-                return stored
+                stored_fingerprint, stored_result = stored
+                if stored_fingerprint != request_fingerprint:
+                    raise IdempotencyConflictError(
+                        "Idempotency key was already used for a different request"
+                    )
+                return stored_result
 
             self._dispatch_count += 1
             result = HotelDispatchResult(
@@ -65,5 +87,5 @@ class HotelSimulator:
                     "no real booking or payment was changed."
                 ),
             )
-            self._results[idempotency_key] = result
+            self._results[idempotency_key] = (request_fingerprint, result)
             return result

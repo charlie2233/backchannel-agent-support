@@ -21,8 +21,6 @@ from server.models import (
     RuntimeBackend,
     ScenarioResponse,
 )
-from server.orchestrator import RecoveryOrchestrator, UnsupportedOrchestrationError
-from server.providers.hotel_simulator import HotelSimulator
 from server.replay.engine import ReplayEngine, UnsupportedExecutionModeError
 from server.replay.loader import ScenarioLoader, ScenarioNotFoundError
 from server.store import RecoveryNotFoundError, SQLiteStore
@@ -32,21 +30,13 @@ def create_app(
     settings: RuntimeSettings | None = None,
     *,
     store: SQLiteStore | None = None,
-    hotel_provider: HotelSimulator | None = None,
 ) -> FastAPI:
     runtime_settings = settings or RuntimeSettings.from_environment()
     recovery_store = store or SQLiteStore(runtime_settings.database_path)
     scenario_loader = ScenarioLoader()
     replay_engine = ReplayEngine(recovery_store, scenario_loader)
-    demo_hotel_provider = hotel_provider or HotelSimulator()
-    recovery_orchestrator = RecoveryOrchestrator(
-        store=recovery_store,
-        hotel_provider=demo_hotel_provider,
-    )
     application = FastAPI(title="Backchannel API", version="0.3.0")
     application.state.recovery_store = recovery_store
-    application.state.hotel_provider = demo_hotel_provider
-    application.state.recovery_orchestrator = recovery_orchestrator
     application.add_middleware(
         CORSMiddleware,
         allow_origins=list(runtime_settings.development_cors_origins),
@@ -85,27 +75,18 @@ def create_app(
         response_model=RecoverySnapshot,
         status_code=status.HTTP_201_CREATED,
     )
-    async def create_recovery(payload: CreateRecoveryRequest) -> RecoverySnapshot:
-        try:
-            if payload.execution_mode is ExecutionMode.REPLAY_FIXTURE:
-                return replay_engine.start(
-                    payload.scenario_id,
-                    execution_mode=payload.execution_mode,
-                )
-            if payload.execution_mode is ExecutionMode.SDK_STUB:
-                pending = await recovery_orchestrator.start(
-                    payload.scenario_id,
-                    execution_mode=payload.execution_mode,
-                )
-                return pending.recovery
-            raise UnsupportedOrchestrationError(
-                "openai_live is not available in the Task 3 runtime"
+    def create_recovery(payload: CreateRecoveryRequest) -> RecoverySnapshot:
+        if payload.execution_mode is not ExecutionMode.REPLAY_FIXTURE:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Public recovery creation supports replay_fixture only",
             )
-        except (
-            ScenarioNotFoundError,
-            UnsupportedExecutionModeError,
-            UnsupportedOrchestrationError,
-        ) as error:
+        try:
+            return replay_engine.start(
+                payload.scenario_id,
+                execution_mode=payload.execution_mode,
+            )
+        except (ScenarioNotFoundError, UnsupportedExecutionModeError) as error:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=str(error),

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sqlite3
 from uuid import uuid4
 
 import pytest
@@ -9,7 +10,6 @@ from server.config import RuntimeSettings
 from server.events import stream_recovery_events
 from server.main import create_app
 from server.models import ExecutionMode, RecoveryEvent, RecoveryStatus
-from server.providers.hotel_simulator import HotelSimulator
 from server.replay.engine import ReplayEngine
 from server.replay.loader import ScenarioLoader
 from server.store import SQLiteStore
@@ -75,14 +75,13 @@ def test_replay_recovery_snapshot_and_receipt_are_durable(client: TestClient) ->
     assert client.get(f"/api/recoveries/{uuid4()}/receipt").status_code == 404
 
 
-def test_sdk_stub_hotel_reaches_pending_approval_without_dispatch(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "api-sdk-stub.sqlite3")
-    provider = HotelSimulator()
+def test_sdk_stub_hotel_is_rejected_without_creating_a_recovery(tmp_path) -> None:
+    database_path = tmp_path / "api-sdk-stub.sqlite3"
+    store = SQLiteStore(database_path)
     with TestClient(
         create_app(
             RuntimeSettings(live_ready=False),
             store=store,
-            hotel_provider=provider,
         )
     ) as client:
         response = client.post(
@@ -90,10 +89,9 @@ def test_sdk_stub_hotel_reaches_pending_approval_without_dispatch(tmp_path) -> N
             json={"scenarioId": "hotel", "executionMode": "sdk_stub"},
         )
 
-    assert response.status_code == 201
-    assert response.json()["status"] == "pending_approval"
-    assert response.json()["executionMode"] == "sdk_stub"
-    assert provider.dispatch_count == 0
+    assert response.status_code == 422
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM recoveries").fetchone() == (0,)
 
 
 def test_demo_reset_is_forbidden_by_default_without_deleting_recovery(

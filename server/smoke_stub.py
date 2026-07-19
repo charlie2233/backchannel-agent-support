@@ -9,7 +9,6 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
 
-from agents import Runner
 from fastapi.testclient import TestClient
 
 from server.config import RuntimeSettings
@@ -66,11 +65,7 @@ def main() -> None:
             assert interruption.tool_name == "commit_remedy"
             assert hotel_provider.dispatch_count == 0
 
-            state = pending.sdk_result.to_state()
-            state.approve(interruption)
-            completed_result = asyncio.run(
-                Runner.run(pending.original_root_agent, state)
-            )
+            completed_result = asyncio.run(orchestrator.resume_approved(pending))
             assert completed_result.interruptions == []
             assert hotel_provider.dispatch_count == 1
             sdk_receipt = store.get_receipt(pending.recovery.recovery_id)
@@ -84,6 +79,7 @@ def main() -> None:
                         "runtimeMode": "stub_keyless",
                         "replayMode": "replay_fixture",
                         "replayProviderDispatchCount": 0,
+                        "sdkProofLane": "internal_orchestrator",
                         "sdkMode": "sdk_stub",
                         "sdkApprovalCount": 1,
                         "sdkPreapprovalDispatchCount": 0,
