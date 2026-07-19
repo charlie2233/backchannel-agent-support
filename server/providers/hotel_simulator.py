@@ -5,11 +5,15 @@ from __future__ import annotations
 import hashlib
 import json
 from threading import RLock
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict
 
 from server.agents.schemas import BrokerRemedy
+from server.store import ExecutionConflictError
+
+if TYPE_CHECKING:
+    from server.store import SQLiteStore
 
 
 class HotelDispatchRequest(BaseModel):
@@ -35,10 +39,19 @@ class IdempotencyConflictError(ValueError):
 class HotelSimulator:
     """Record at most one simulated provider dispatch per idempotency key."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, store: SQLiteStore | None = None) -> None:
         self._lock = RLock()
         self._results: dict[str, tuple[str, HotelDispatchResult]] = {}
         self._dispatch_count = 0
+        self._store = store
+
+    def bind_store(self, store: SQLiteStore) -> None:
+        """Attach the process-local adapter to the durable execution ledger."""
+
+        with self._lock:
+            if self._store is not None and self._store is not store:
+                raise ValueError("Hotel simulator is already bound to another store")
+            self._store = store
 
     @staticmethod
     def _request_fingerprint(request: HotelDispatchRequest) -> str:
@@ -60,6 +73,8 @@ class HotelSimulator:
         request: HotelDispatchRequest,
         *,
         idempotency_key: str,
+        tool_call_id: str | None = None,
+        remedy_digest: str | None = None,
     ) -> HotelDispatchResult:
         """Return the stored result when the same dispatch is retried."""
 
@@ -68,6 +83,42 @@ class HotelSimulator:
 
         request_fingerprint = self._request_fingerprint(request)
         with self._lock:
+            if self._store is not None:
+                if not tool_call_id or not remedy_digest:
+                    raise ValueError(
+                        "Durable dispatch requires exact tool call and remedy digests"
+                    )
+                dispatch_hash = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()
+                candidate = HotelDispatchResult(
+                    dispatch_id=f"demo-hotel-dispatch-{dispatch_hash[:16]}",
+                    status="confirmed",
+                    simulated=True,
+                    provider_result=(
+                        "Demo hotel adapter confirmed the replacement room; "
+                        "no real booking or payment was changed."
+                    ),
+                )
+                try:
+                    execution, dispatched = self._store.record_completed_execution(
+                        execution_id=f"execution-{dispatch_hash}",
+                        recovery_id=request.recovery_id,
+                        idempotency_key=idempotency_key,
+                        request_digest=request_fingerprint,
+                        tool_call_id=tool_call_id,
+                        remedy_digest=remedy_digest,
+                        result_json=candidate.model_dump(mode="json"),
+                    )
+                except ExecutionConflictError as error:
+                    raise IdempotencyConflictError(
+                        "Idempotency key was already used for a different request"
+                    ) from error
+                if execution.result_json is None:
+                    raise RuntimeError("Completed execution is missing its provider result")
+                result = HotelDispatchResult.model_validate(execution.result_json)
+                if dispatched:
+                    self._dispatch_count += 1
+                return result
+
             stored = self._results.get(idempotency_key)
             if stored is not None:
                 stored_fingerprint, stored_result = stored

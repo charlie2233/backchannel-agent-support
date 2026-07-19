@@ -14,6 +14,11 @@ from server.agents.schemas import (
     ProviderProof,
 )
 from server.agents.stub_model import DeterministicApprovalModel
+from server.agents.versioning import (
+    HOTEL_AGENT_INSTRUCTIONS,
+    HOTEL_AGENT_NAME,
+    broker_remedy_action_digest,
+)
 from server.models import ExecutionMode, RecoveryReceipt, RecoveryStatus
 from server.providers.hotel_simulator import HotelDispatchRequest, HotelSimulator
 from server.store import SQLiteStore
@@ -24,6 +29,7 @@ class HotelAgentContext:
     recovery_id: str
     store: SQLiteStore
     hotel_provider: HotelSimulator
+    remedy_digest: str | None = None
 
 
 def build_hotel_agent(
@@ -45,14 +51,19 @@ def build_hotel_agent(
         if consumer_proof.booking_id != provider_proof.booking_id:
             raise ValueError("Consumer and provider proofs identify different bookings")
 
+        remedy_digest = (
+            tool_context.context.remedy_digest or broker_remedy_action_digest(remedy)
+        )
+        idempotency_key = f"{tool_context.context.recovery_id}:{tool_context.tool_call_id}"
+        idempotency_key = f"{idempotency_key}:{remedy_digest}"
         dispatch = tool_context.context.hotel_provider.dispatch(
             HotelDispatchRequest(
                 recovery_id=tool_context.context.recovery_id,
                 remedy=remedy,
             ),
-            idempotency_key=(
-                f"{tool_context.context.recovery_id}:{tool_context.tool_call_id}"
-            ),
+            idempotency_key=idempotency_key,
+            tool_call_id=tool_context.tool_call_id,
+            remedy_digest=remedy_digest,
         )
         receipt = RecoveryReceipt(
             recoveryId=tool_context.context.recovery_id,
@@ -92,10 +103,8 @@ def build_hotel_agent(
         call_id=f"commit-remedy-{context.recovery_id}",
     )
     return Agent[HotelAgentContext](
-        name="Backchannel hotel recovery",
-        instructions=(
-            "Use the supplied typed evidence and request approval before commit_remedy."
-        ),
+        name=HOTEL_AGENT_NAME,
+        instructions=HOTEL_AGENT_INSTRUCTIONS,
         model=model,
         tools=[commit_remedy],
     )

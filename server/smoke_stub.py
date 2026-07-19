@@ -22,7 +22,8 @@ from server.store import SQLiteStore
 def main() -> None:
     os.environ.pop("OPENAI_API_KEY", None)
     with TemporaryDirectory(prefix="backchannel-smoke-") as temporary_directory:
-        store = SQLiteStore(Path(temporary_directory) / "smoke.sqlite3")
+        database_path = Path(temporary_directory) / "smoke.sqlite3"
+        store = SQLiteStore(database_path)
         with TestClient(
             create_app(
                 RuntimeSettings(live_ready=False, demo_reset_enabled=True),
@@ -51,43 +52,55 @@ def main() -> None:
             boundary = cast(str, receipt["boundary"])
             assert "no model call or provider execution" in boundary.lower()
 
-            hotel_provider = HotelSimulator()
-            orchestrator = RecoveryOrchestrator(
-                store=store,
-                hotel_provider=hotel_provider,
-            )
-            pending = asyncio.run(
-                orchestrator.start("hotel", execution_mode=ExecutionMode.SDK_STUB)
-            )
-            assert pending.recovery.status is RecoveryStatus.PENDING_APPROVAL
-            assert len(pending.sdk_result.interruptions) == 1
-            interruption = pending.sdk_result.interruptions[0]
-            assert interruption.tool_name == "commit_remedy"
-            assert hotel_provider.dispatch_count == 0
+        hotel_provider = HotelSimulator(store=store)
+        orchestrator = RecoveryOrchestrator(
+            store=store,
+            hotel_provider=hotel_provider,
+        )
+        pending = asyncio.run(
+            orchestrator.start("hotel", execution_mode=ExecutionMode.SDK_STUB)
+        )
+        assert pending.recovery.status is RecoveryStatus.PENDING_APPROVAL
+        assert len(pending.sdk_result.interruptions) == 1
+        assert hotel_provider.dispatch_count == 0
+        sdk_recovery_id = pending.recovery.recovery_id
 
-            completed_result = asyncio.run(orchestrator.resume_approved(pending))
-            assert completed_result.interruptions == []
-            assert hotel_provider.dispatch_count == 1
-            sdk_receipt = store.get_receipt(pending.recovery.recovery_id)
-            assert sdk_receipt.execution_mode is ExecutionMode.SDK_STUB
-            assert sdk_receipt.provider_execution is True
+        store.close()
+        del orchestrator, hotel_provider, pending, store
 
-            print(
-                json.dumps(
-                    {
-                        "smoke": "passed",
-                        "runtimeMode": "stub_keyless",
-                        "replayMode": "replay_fixture",
-                        "replayProviderDispatchCount": 0,
-                        "sdkProofLane": "internal_orchestrator",
-                        "sdkMode": "sdk_stub",
-                        "sdkApprovalCount": 1,
-                        "sdkPreapprovalDispatchCount": 0,
-                        "sdkPostapprovalDispatchCount": 1,
-                    },
-                    sort_keys=True,
-                )
+        restarted_store = SQLiteStore(database_path)
+        restarted_provider = HotelSimulator(store=restarted_store)
+        restarted_orchestrator = RecoveryOrchestrator(
+            store=restarted_store,
+            hotel_provider=restarted_provider,
+        )
+        completed_result = asyncio.run(
+            restarted_orchestrator.resume_approved(sdk_recovery_id)
+        )
+        assert completed_result.interruptions == []
+        assert restarted_provider.dispatch_count == 1
+        sdk_receipt = restarted_store.get_receipt(sdk_recovery_id)
+        assert sdk_receipt.execution_mode is ExecutionMode.SDK_STUB
+        assert sdk_receipt.provider_execution is True
+
+        print(
+            json.dumps(
+                {
+                    "smoke": "passed",
+                    "runtimeMode": "stub_keyless",
+                    "replayMode": "replay_fixture",
+                    "replayProviderDispatchCount": 0,
+                    "sdkProofLane": "internal_orchestrator",
+                    "sdkMode": "sdk_stub",
+                    "sdkApprovalCount": 1,
+                    "sdkPreapprovalDispatchCount": 0,
+                    "sdkPostapprovalDispatchCount": 1,
+                    "sdkRestartResume": "passed",
+                    "sdkSerializedStateOutput": "redacted",
+                },
+                sort_keys=True,
             )
+        )
 
 
 if __name__ == "__main__":

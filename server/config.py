@@ -11,6 +11,10 @@ DEVELOPMENT_CORS_ORIGINS = (
     "http://127.0.0.1:5173",
 )
 
+# Serialized SDK approvals are intentionally bound to these application contracts.
+APPROVAL_PROTOCOL_VERSION = "backchannel.approval.v1"
+HOTEL_AGENT_GRAPH_VERSION = "backchannel.hotel-agent.v1"
+
 
 @dataclass(frozen=True, slots=True)
 class RuntimeSettings:
