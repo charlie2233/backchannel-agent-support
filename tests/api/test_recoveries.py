@@ -221,3 +221,48 @@ def test_terminal_transition_after_event_read_is_emitted_before_stream_end(
     assert len(chunks) == 1
     assert f"id: {cursor + 1}" in chunks[0]
     assert '"terminal":true' in chunks[0]
+
+
+@pytest.mark.parametrize(
+    "terminal_status",
+    [
+        RecoveryStatus.COMPLETED,
+        RecoveryStatus.CLOSED_WITHOUT_ACTION,
+        RecoveryStatus.OUTCOME_UNKNOWN,
+    ],
+)
+def test_event_stream_closes_for_every_terminal_recovery_status(
+    tmp_path, monkeypatch, terminal_status: RecoveryStatus
+) -> None:
+    store = SQLiteStore(tmp_path / f"stream-{terminal_status.value}.sqlite3")
+
+    def read_terminal_batch(
+        recovery_id: str, *, after_seq: int
+    ) -> tuple[list[RecoveryEvent], RecoveryStatus]:
+        del recovery_id, after_seq
+        return [], terminal_status
+
+    monkeypatch.setattr(store, "read_event_batch", read_terminal_batch)
+    disconnection_checks = 0
+
+    async def connected() -> bool:
+        nonlocal disconnection_checks
+        disconnection_checks += 1
+        return False
+
+    async def collect() -> list[str]:
+        return [
+            chunk
+            async for chunk in stream_recovery_events(
+                store,
+                "terminal-recovery",
+                after_seq=0,
+                is_disconnected=connected,
+                poll_interval_seconds=0,
+            )
+        ]
+
+    chunks = asyncio.run(asyncio.wait_for(collect(), timeout=0.1))
+
+    assert chunks == []
+    assert disconnection_checks == 0

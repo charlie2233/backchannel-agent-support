@@ -30,6 +30,7 @@ def decision_payload(
     approval = snapshot["pendingApproval"]
     assert isinstance(approval, dict)
     return {
+        "decision": "approve",
         "clientDecisionId": client_decision_id,
         "remedyId": str(approval["remedyId"]),
         "remedyDigest": str(approval["remedyDigest"]),
@@ -203,6 +204,7 @@ def test_public_sdk_stub_creation_and_typed_approval_complete_once(
     assert body == {
         "clientDecisionId": "decision-001",
         "recoveryId": recovery_id,
+        "decision": "approve",
         "status": "completed",
         "approvedRemedyDigest": payload["remedyDigest"],
         "executionStarted": True,

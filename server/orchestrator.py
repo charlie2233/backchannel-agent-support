@@ -9,9 +9,11 @@ from typing import Any, NoReturn
 from uuid import uuid4
 
 from agents import Agent, RunContextWrapper, Runner, RunResult, RunState
+from agents.exceptions import UserError
 
 from server.agents.factory import HotelAgentContext, build_hotel_agent
 from server.agents.schemas import CommitRemedyArguments, deterministic_hotel_arguments
+from server.agents.stub_model import CLOSED_WITHOUT_ACTION_MESSAGE, DECLINE_MESSAGE
 from server.agents.tracing import configure_sdk_stub_tracing
 from server.agents.versioning import (
     HOTEL_START_PROMPT,
@@ -25,6 +27,8 @@ from server.digest import remedy_consent_digest
 from server.models import (
     ApprovalDecisionRequest,
     ApprovalDecisionResponse,
+    DecisionResponse,
+    DeclineDecisionResponse,
     ExecutionMode,
     RecoveryReceipt,
     RecoverySnapshot,
@@ -117,7 +121,15 @@ class RecoveryOrchestrator:
             verificationResults=[
                 "Demo provider dispatch returned confirmed.",
                 "Provider result stored under one idempotency key.",
+                "Temporary permission revoked after terminal completion.",
             ],
+            decision="approved",
+            decisionRemedyDigest=execution.remedy_digest,
+            executionCount=1,
+            providerDispatchStarted=True,
+            exactInterruptionRejected=False,
+            permissionRevoked=True,
+            scopeClosed=True,
             approvedRemedyDigest=(
                 execution.remedy_digest
                 if execution.remedy_digest is not None
@@ -128,9 +140,12 @@ class RecoveryOrchestrator:
 
     @staticmethod
     def _decision_response(claim: ApprovalDecisionClaim) -> ApprovalDecisionResponse:
+        if claim.request.decision != "approve":
+            raise TypeError("Approval response requires an approval claim")
         return ApprovalDecisionResponse(
             clientDecisionId=claim.request.client_decision_id,
             recoveryId=claim.recovery_id,
+            decision="approve",
             status="completed",
             approvedRemedyDigest=claim.request.remedy_digest,
             executionStarted=True,
@@ -156,6 +171,19 @@ class RecoveryOrchestrator:
         """Complete claimed responses whose durable dispatch already committed."""
 
         for claim in self._store.list_claimed_decisions():
+            if claim.request.decision == "decline":
+                try:
+                    pending = self._store.get_pending_approval(claim.recovery_id)
+                except (RecoveryNotFoundError, ValueError):
+                    continue
+                if pending.status == "rejected":
+                    self._store.finalize_declined_decision(
+                        claim,
+                        exact_interruption_rejected=True,
+                    )
+                continue
+            if claim.request.decision != "approve":
+                continue
             execution = self._store.get_completed_execution(claim.recovery_id)
             if execution is None:
                 continue
@@ -322,8 +350,12 @@ class RecoveryOrchestrator:
     ) -> ApprovalDecisionResponse:
         """Claim, resume, and durably replay one exact approval decision."""
 
-        claim = self._store.claim_approval_decision(recovery_id, request)
+        if request.decision != "approve":
+            raise ValueError("approve_decision requires decision=approve")
+        claim = self._store.claim_decision(recovery_id, request)
         if claim.response is not None:
+            if not isinstance(claim.response, ApprovalDecisionResponse):
+                raise TypeError("Approval request replayed a decline response")
             return claim.response
         execution = self._store.get_completed_execution(recovery_id)
         if execution is not None:
@@ -335,14 +367,67 @@ class RecoveryOrchestrator:
             if execution is None:
                 raise
             return self._complete_committed_claim(claim, execution)
-        if completed is None:
-            replayed = self._store.claim_approval_decision(recovery_id, request)
+        except UserError as sdk_error:
+            replayed = self._store.claim_decision(recovery_id, request)
             if replayed.response is not None:
+                if not isinstance(replayed.response, ApprovalDecisionResponse):
+                    raise TypeError("Approval request replayed a decline response")
+                return replayed.response
+            try:
+                self._store.get_receipt(recovery_id)
+            except RecoveryNotFoundError:
+                raise sdk_error
+            execution = self._store.get_completed_execution(recovery_id)
+            if execution is None:
+                raise
+            return self._complete_committed_claim(claim, execution)
+        if completed is None:
+            replayed = self._store.claim_decision(recovery_id, request)
+            if replayed.response is not None:
+                if not isinstance(replayed.response, ApprovalDecisionResponse):
+                    raise TypeError("Approval request replayed a decline response")
                 return replayed.response
         execution = self._store.get_completed_execution(recovery_id)
         if execution is None:
             raise RuntimeError("Approved SDK run completed without a durable execution")
         return self._complete_committed_claim(claim, execution)
+
+    async def decline_decision(
+        self,
+        recovery_id: str,
+        request: ApprovalDecisionRequest,
+    ) -> DeclineDecisionResponse:
+        """Reject the exact SDK interruption, then atomically seal closure evidence."""
+
+        if request.decision != "decline":
+            raise ValueError("decline_decision requires decision=decline")
+        claim = self._store.claim_decision(recovery_id, request)
+        if claim.response is not None:
+            if not isinstance(claim.response, DeclineDecisionResponse):
+                raise TypeError("Decline request replayed an approval response")
+            return claim.response
+        pending = self._store.get_pending_approval(recovery_id)
+        if pending.status == "rejected":
+            return self._store.finalize_declined_decision(
+                claim,
+                exact_interruption_rejected=True,
+            )
+        await self._resume_claimed_decline(claim)
+        return self._store.finalize_declined_decision(
+            claim,
+            exact_interruption_rejected=True,
+        )
+
+    async def decide(
+        self,
+        recovery_id: str,
+        request: ApprovalDecisionRequest,
+    ) -> DecisionResponse:
+        """Dispatch one required, durable approve-or-decline decision."""
+
+        if request.decision == "approve":
+            return await self.approve_decision(recovery_id, request)
+        return await self.decline_decision(recovery_id, request)
 
     async def _resume_claimed_approval(
         self,
@@ -350,7 +435,28 @@ class RecoveryOrchestrator:
     ) -> RunResult | None:
         """Restore and approve only after a durable exact-consent claim."""
 
+        return await self._resume_claimed_decision(claim, approve=True)
+
+    async def _resume_claimed_decline(
+        self,
+        claim: ApprovalDecisionClaim,
+    ) -> RunResult | None:
+        """Restore and reject only the exact interruption bound to the claim."""
+
+        return await self._resume_claimed_decision(claim, approve=False)
+
+    async def _resume_claimed_decision(
+        self,
+        claim: ApprovalDecisionClaim,
+        *,
+        approve: bool,
+    ) -> RunResult | None:
+        """Restore and consent-bind one exact SDK approval interruption."""
+
         recovery_id = claim.recovery_id
+        expected_decision = "approve" if approve else "decline"
+        if claim.request.decision != expected_decision:
+            raise ValueError("Decision claim action does not match resume path")
         arguments = deterministic_hotel_arguments()
         expected_action_digest = remedy_action_digest(arguments)
         fresh_context = HotelAgentContext(
@@ -398,7 +504,10 @@ class RecoveryOrchestrator:
             self._raise_incompatible(recovery_id, "recovery_status")
         if recovery.scenario_id is not ScenarioId.HOTEL:
             self._raise_incompatible(recovery_id, "scenario_id")
-        if envelope.status not in {"pending", "approved"}:
+        allowed_envelope_statuses = (
+            {"pending", "approved"} if approve else {"pending", "declined"}
+        )
+        if envelope.status not in allowed_envelope_statuses:
             self._raise_incompatible(recovery_id, "approval_status")
         if not is_valid_qa_trace_id(envelope.root_trace_id):
             self._raise_incompatible(recovery_id, "root_trace_id")
@@ -419,24 +528,25 @@ class RecoveryOrchestrator:
             self._raise_incompatible(recovery_id, "consent_digest_recomputed")
         if exact_hotel_terms(consent.evidence) != consent.terms:
             self._raise_incompatible(recovery_id, "consent_terms_evidence")
-        policy_result = evaluate_hotel_policy(
-            consent.evidence,
-            DETERMINISTIC_HOTEL_AUTHORITY,
-        )
-        if (
-            policy_result.hard_constraint_satisfied
-            != consent.hard_constraint_satisfied
-        ):
-            self._raise_incompatible(recovery_id, "hard_constraint_result")
-        if not policy_result.hard_constraint_satisfied:
-            self._raise_incompatible(recovery_id, "hard_constraint_denied")
-        if (
-            policy_result.delegated_authority_satisfied
-            != consent.delegated_authority_satisfied
-        ):
-            self._raise_incompatible(recovery_id, "authority_result")
-        if not policy_result.delegated_authority_satisfied:
-            self._raise_incompatible(recovery_id, "authority_denied")
+        if approve:
+            policy_result = evaluate_hotel_policy(
+                consent.evidence,
+                DETERMINISTIC_HOTEL_AUTHORITY,
+            )
+            if (
+                policy_result.hard_constraint_satisfied
+                != consent.hard_constraint_satisfied
+            ):
+                self._raise_incompatible(recovery_id, "hard_constraint_result")
+            if not policy_result.hard_constraint_satisfied:
+                self._raise_incompatible(recovery_id, "hard_constraint_denied")
+            if (
+                policy_result.delegated_authority_satisfied
+                != consent.delegated_authority_satisfied
+            ):
+                self._raise_incompatible(recovery_id, "authority_result")
+            if not policy_result.delegated_authority_satisfied:
+                self._raise_incompatible(recovery_id, "authority_denied")
 
         try:
             state = await RunState.from_json(
@@ -493,11 +603,24 @@ class RecoveryOrchestrator:
         validated_claim = self._store.validate_claimed_decision(claim)
         if validated_claim.response is not None:
             return None
-        state.approve(interruption)
-        self._store.update_pending_approval_status(recovery_id, status="approved")
+        execution_count_before = self._store.count_executions(recovery_id)
+        if approve:
+            state.approve(interruption)
+        else:
+            state.reject(
+                interruption,
+                always_reject=False,
+                rejection_message=DECLINE_MESSAGE,
+            )
         completed = await Runner.run(
             fresh_agent,
             state,
             run_config=configure_sdk_stub_tracing(),
         )
+        if not approve:
+            if self._store.count_executions(recovery_id) != execution_count_before:
+                raise RuntimeError("SDK rejection unexpectedly changed execution evidence")
+            if completed.final_output != CLOSED_WITHOUT_ACTION_MESSAGE:
+                raise RuntimeError("Deterministic rejection did not close without action")
+            self._store.record_exact_interruption_rejected(claim)
         return completed

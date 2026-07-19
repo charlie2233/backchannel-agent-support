@@ -1,20 +1,33 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { postDecision } from "../api/client";
-import type { RecoveryScenario, RecoverySnapshot } from "../domain/recovery";
+import type {
+  DecisionAction,
+  DecisionRequest,
+  DecisionResponse,
+  PendingApproval,
+  RecoveryReceipt,
+  RecoveryScenario,
+  RecoverySnapshot,
+} from "../domain/recovery";
+import {
+  persistPendingDecision,
+  readPendingDecision,
+} from "../domain/session";
 
 interface EvidenceInspectorProps {
   scenario: RecoveryScenario;
   snapshot?: RecoverySnapshot | null;
-  onServerSuccess?: () => void | Promise<void>;
-  clientDecisionIdFactory?: () => string;
+  receipt?: RecoveryReceipt | null;
+  onDecisionAccepted?: (response: DecisionResponse) => void;
+  clientDecisionIdFactory?: (action: DecisionAction) => string;
 }
 
-function defaultDecisionId(): string {
+function defaultDecisionId(action: DecisionAction): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return `decision-${crypto.randomUUID()}`;
+    return `decision-${action}-${crypto.randomUUID()}`;
   }
-  return `decision-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  return `decision-${action}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
 function visibleDigest(digest: string): string {
@@ -34,17 +47,194 @@ function formatMinorUsd(minorUnits: number): string {
   })} USD`;
 }
 
+function requestMatchesApproval(
+  request: DecisionRequest,
+  approval: PendingApproval,
+): boolean {
+  return (
+    request.remedyId === approval.remedyId &&
+    request.remedyDigest === approval.remedyDigest &&
+    request.toolCallId === approval.toolCallId
+  );
+}
+
+function responseMatchesRequest(
+  response: DecisionResponse,
+  request: DecisionRequest,
+  recoveryId: string,
+): boolean {
+  if (
+    response.clientDecisionId !== request.clientDecisionId ||
+    response.recoveryId !== recoveryId ||
+    response.decision !== request.decision
+  ) {
+    return false;
+  }
+  return response.decision === "approve"
+    ? response.approvedRemedyDigest === request.remedyDigest
+    : response.decisionRemedyDigest === request.remedyDigest;
+}
+
+function ReceiptInspector({ receipt }: { receipt: RecoveryReceipt }) {
+  if (receipt.status === "closed_without_action") {
+    const closureProof = [
+      "Human consent requested.",
+      "Remedy declined by operator.",
+      "Exact interruption rejected.",
+      "No replacement action selected.",
+      "Temporary permission revoked.",
+      "Cancellation receipt sealed.",
+    ];
+    const fixedVerification = new Set(closureProof);
+    return (
+      <aside className="evidence-inspector receipt-inspector" aria-labelledby="closed-heading">
+        <div className="inspector-heading">
+          <p className="eyebrow">Authoritative server receipt</p>
+          <h2 id="closed-heading">Closed without action</h2>
+          <p>The exact remedy was declined and its permission scope is closed.</p>
+        </div>
+        <div className="receipt-verdict receipt-verdict--closed">
+          <strong>Provider dispatch did not begin.</strong>
+          <p>This is cancellation evidence for the exact rejected interruption.</p>
+        </div>
+        <ul className="receipt-checks" aria-label="Closure verification">
+          {closureProof.map((result) => <li key={result}>{result}</li>)}
+          <li>executionCount = {receipt.executionCount}</li>
+          {receipt.verificationResults
+            .filter((result) => !fixedVerification.has(result))
+            .map((result) => <li key={result}>{result}</li>)}
+        </ul>
+        <dl className="evidence-list">
+          <div>
+            <dt>Decision remedy digest</dt>
+            <dd className="mono">{receipt.decisionRemedyDigest}</dd>
+          </div>
+          <div>
+            <dt>Authorization source</dt>
+            <dd>{receipt.authorizationSource}</dd>
+          </div>
+          <div>
+            <dt>Boundary</dt>
+            <dd>{receipt.boundary}</dd>
+          </div>
+        </dl>
+      </aside>
+    );
+  }
+
+  if (receipt.status === "outcome_unknown") {
+    const reconciliationResults = receipt.verificationResults.filter(
+      (result) => result !== "Manual reconciliation required.",
+    );
+    return (
+      <aside className="evidence-inspector receipt-inspector" aria-labelledby="unknown-heading">
+        <div className="inspector-heading">
+          <p className="eyebrow">Authoritative server receipt</p>
+          <h2 id="unknown-heading">Outcome unknown</h2>
+          <p>Execution evidence exists, so cancellation cannot be claimed.</p>
+        </div>
+        <div className="receipt-verdict receipt-verdict--unknown">
+          <strong>Manual reconciliation required.</strong>
+          <p>{receipt.providerResult}</p>
+        </div>
+        <ul className="receipt-checks" aria-label="Reconciliation evidence">
+          {reconciliationResults.map((result) => <li key={result}>{result}</li>)}
+        </ul>
+        <dl className="evidence-list">
+          <div>
+            <dt>Execution count</dt>
+            <dd>{receipt.executionCount}</dd>
+          </div>
+          <div>
+            <dt>Provider dispatch started</dt>
+            <dd>{receipt.providerDispatchStarted ? "Yes" : "No"}</dd>
+          </div>
+          <div>
+            <dt>Decision remedy digest</dt>
+            <dd className="mono">{receipt.decisionRemedyDigest}</dd>
+          </div>
+        </dl>
+      </aside>
+    );
+  }
+
+  return (
+    <aside className="evidence-inspector receipt-inspector" aria-labelledby="completed-heading">
+      <div className="inspector-heading">
+        <p className="eyebrow">Authoritative server receipt</p>
+        <h2 id="completed-heading">Completed receipt</h2>
+        <p>{receipt.providerResult}</p>
+      </div>
+      <dl className="evidence-list">
+        <div>
+          <dt>Recovery ID</dt>
+          <dd className="mono">{receipt.recoveryId}</dd>
+        </div>
+        <div>
+          <dt>Execution count</dt>
+          <dd>{receipt.executionCount}</dd>
+        </div>
+        <div>
+          <dt>Approved remedy digest</dt>
+          <dd className="mono">{receipt.approvedRemedyDigest}</dd>
+        </div>
+      </dl>
+    </aside>
+  );
+}
+
 export function EvidenceInspector({
   scenario,
   snapshot = null,
-  onServerSuccess,
+  receipt = null,
+  onDecisionAccepted,
   clientDecisionIdFactory = defaultDecisionId,
 }: EvidenceInspectorProps) {
-  const [submitting, setSubmitting] = useState(false);
+  const [submittingAction, setSubmittingAction] = useState<DecisionAction | null>(null);
+  const [lockedAction, setLockedAction] = useState<DecisionAction | null>(null);
+  const [acceptedAction, setAcceptedAction] = useState<DecisionAction | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
-  const decisionId = useRef<string | null>(null);
+  const decisionIds = useRef<Partial<Record<DecisionAction, string>>>({});
+  const activeRequest = useRef<DecisionRequest | null>(null);
   const approval = snapshot?.pendingApproval ?? null;
+
+  useEffect(() => {
+    activeRequest.current = null;
+    decisionIds.current = {};
+    setSubmittingAction(null);
+    setLockedAction(null);
+    setAcceptedAction(null);
+    setError(null);
+    setStatusMessage(null);
+    if (snapshot === null || approval === null) {
+      return;
+    }
+    const stored = readPendingDecision();
+    if (
+      stored !== null &&
+      stored.recoveryId === snapshot.recoveryId &&
+      requestMatchesApproval(stored.request, approval)
+    ) {
+      activeRequest.current = stored.request;
+      decisionIds.current[stored.request.decision] = stored.request.clientDecisionId;
+      setLockedAction(stored.request.decision);
+    }
+  }, [
+    approval?.remedyDigest,
+    approval?.remedyId,
+    approval?.toolCallId,
+    snapshot?.recoveryId,
+  ]);
+
+  if (
+    snapshot !== null &&
+    receipt !== null &&
+    snapshot.recoveryId === receipt.recoveryId &&
+    snapshot.status === receipt.status
+  ) {
+    return <ReceiptInspector receipt={receipt} />;
+  }
 
   if (snapshot !== null && approval !== null) {
     const terms = approval.terms;
@@ -59,35 +249,65 @@ export function EvidenceInspector({
       }
     };
 
-    const approve = async () => {
-      if (submitting) {
+    const submitDecision = async (action: DecisionAction) => {
+      if (
+        submittingAction !== null ||
+        acceptedAction !== null ||
+        (lockedAction !== null && lockedAction !== action)
+      ) {
         return;
       }
-      const stableDecisionId = decisionId.current ?? clientDecisionIdFactory();
-      decisionId.current = stableDecisionId;
-      setSubmitting(true);
+      const existingRequest = activeRequest.current;
+      const stableDecisionId =
+        existingRequest?.decision === action
+          ? existingRequest.clientDecisionId
+          : decisionIds.current[action] ?? clientDecisionIdFactory(action);
+      decisionIds.current[action] = stableDecisionId;
+      const request: DecisionRequest =
+        existingRequest?.decision === action && requestMatchesApproval(existingRequest, approval)
+          ? existingRequest
+          : {
+              decision: action,
+              clientDecisionId: stableDecisionId,
+              remedyId: approval.remedyId,
+              remedyDigest: approval.remedyDigest,
+              toolCallId: approval.toolCallId,
+            };
+      if (
+        !persistPendingDecision({ recoveryId: snapshot.recoveryId, request })
+      ) {
+        setError("Decision could not be saved for safe retry. No request was sent.");
+        return;
+      }
+      activeRequest.current = request;
+      setLockedAction(action);
+      setSubmittingAction(action);
       setError(null);
       setStatusMessage(null);
       try {
-        await postDecision(snapshot.recoveryId, {
-          clientDecisionId: stableDecisionId,
-          remedyId: approval.remedyId,
-          remedyDigest: approval.remedyDigest,
-          toolCallId: approval.toolCallId,
-        });
-        setStatusMessage("Decision accepted by the server. Refreshing recovery evidence.");
-        try {
-          await onServerSuccess?.();
-        } catch {
-          setError("Decision accepted, but refreshed recovery evidence is unavailable.");
+        const response = await postDecision(snapshot.recoveryId, request);
+        if (!responseMatchesRequest(response, request, snapshot.recoveryId)) {
+          throw new Error("Decision acknowledgement did not match the durable request");
         }
+        setAcceptedAction(action);
+        setStatusMessage(
+          action === "approve"
+            ? "Approval accepted. Waiting for terminal evidence."
+            : "Decline accepted. Waiting for terminal evidence.",
+        );
+        onDecisionAccepted?.(response);
       } catch {
-        setError("Approval could not be recorded. Try again with the same decision.");
+        setError(
+          action === "approve"
+            ? "Approval could not be recorded. Retry the same decision."
+            : "Decline could not be recorded. Retry the same decision.",
+        );
       } finally {
-        setSubmitting(false);
+        setSubmittingAction(null);
       }
     };
 
+    const actionsDisabled = submittingAction !== null || acceptedAction !== null;
     return (
       <aside className="evidence-inspector" aria-labelledby="approval-heading">
         <div className="inspector-heading">
@@ -184,8 +404,21 @@ export function EvidenceInspector({
           {statusMessage}
         </p>
         <div className="consent-actions">
-          <button type="button" disabled={submitting} onClick={() => void approve()}>
-            {submitting ? "Submitting…" : "Approve remedy"}
+          <button
+            className="consent-action consent-action--decline"
+            type="button"
+            disabled={actionsDisabled || (lockedAction !== null && lockedAction !== "decline")}
+            onClick={() => void submitDecision("decline")}
+          >
+            {submittingAction === "decline" ? "Declining…" : "Decline"}
+          </button>
+          <button
+            className="consent-action consent-action--approve"
+            type="button"
+            disabled={actionsDisabled || (lockedAction !== null && lockedAction !== "approve")}
+            onClick={() => void submitDecision("approve")}
+          >
+            {submittingAction === "approve" ? "Approving…" : "Approve remedy"}
           </button>
         </div>
       </aside>
@@ -216,7 +449,7 @@ export function EvidenceInspector({
         </dl>
         <div className="execution-boundary">
           <strong>Awaiting the durable execution outcome.</strong>
-          <p>The claimed decision cannot be replaced by another approval.</p>
+          <p>The claimed decision cannot be replaced by another decision.</p>
         </div>
       </aside>
     );

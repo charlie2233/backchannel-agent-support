@@ -23,6 +23,7 @@ def _decision_payload(snapshot: dict[str, object], decision_id: str) -> dict[str
     approval = snapshot["pendingApproval"]
     assert isinstance(approval, dict)
     return {
+        "decision": "approve",
         "clientDecisionId": decision_id,
         "remedyId": str(approval["remedyId"]),
         "remedyDigest": str(approval["remedyDigest"]),
@@ -213,6 +214,7 @@ def test_task4_pending_rows_are_preserved_but_marked_incompatible(tmp_path) -> N
         orchestrator.approve_decision(
             current.recovery.recovery_id,
             ApprovalDecisionRequest(
+                decision="approve",
                 clientDecisionId="post-task4-migration",
                 remedyId=approval.remedy_id,
                 remedyDigest=approval.remedy_digest,
@@ -591,6 +593,7 @@ def test_same_claim_resumes_after_process_loss_before_sdk_restore(
     approval = pending.recovery.pending_approval
     assert approval is not None
     request = ApprovalDecisionRequest(
+        decision="approve",
         clientDecisionId="restartable-claim",
         remedyId=approval.remedy_id,
         remedyDigest=approval.remedy_digest,

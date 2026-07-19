@@ -586,6 +586,9 @@ a:focus-visible {
 }
 
 .consent-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
+  gap: 10px;
   margin-top: 16px;
 }
 
@@ -603,8 +606,67 @@ a:focus-visible {
 }
 
 .consent-actions button:disabled {
-  cursor: wait;
+  cursor: not-allowed;
   opacity: 0.65;
+}
+
+.consent-actions .consent-action--decline {
+  border-color: #fda29b;
+  background: white;
+  color: var(--danger);
+}
+
+.receipt-verdict {
+  margin-bottom: 18px;
+  border-left: 3px solid var(--success);
+  background: #ecfdf3;
+  padding: 14px;
+}
+
+.receipt-verdict--unknown {
+  border-left-color: var(--warning);
+  background: #fffaeb;
+}
+
+.receipt-verdict strong {
+  font-size: 13px;
+}
+
+.receipt-verdict p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.receipt-checks {
+  display: grid;
+  gap: 9px;
+  margin: 0 0 8px;
+  padding: 0;
+  list-style: none;
+}
+
+.receipt-checks li {
+  position: relative;
+  padding-left: 20px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.receipt-checks li::before {
+  position: absolute;
+  top: 0;
+  left: 0;
+  color: var(--success);
+  content: "✓";
+}
+
+.receipt-verdict--unknown + .receipt-checks li::before {
+  color: var(--warning);
+  content: "•";
 }
 
 @media (max-width: 1120px) {

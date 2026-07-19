@@ -11,7 +11,18 @@ export const lifecycleSteps = [
 
 export type LifecycleStep = (typeof lifecycleSteps)[number];
 export type ScenarioId = "hotel" | "api-quota";
-export type RecoveryStatus = "in_progress" | "pending_approval" | "completed";
+export type RecoveryStatus =
+  | "in_progress"
+  | "pending_approval"
+  | "completed"
+  | "closed_without_action"
+  | "outcome_unknown";
+
+export type TerminalRecoveryStatus = Extract<
+  RecoveryStatus,
+  "completed" | "closed_without_action" | "outcome_unknown"
+>;
+export type DecisionAction = "approve" | "decline";
 
 export interface HotelRemedyTerms {
   bookingId: string;
@@ -53,7 +64,8 @@ export interface RecoverySnapshot {
   pendingApproval: PendingApproval | null;
 }
 
-export interface ApprovalDecisionRequest {
+export interface DecisionRequest {
+  decision: DecisionAction;
   clientDecisionId: string;
   remedyId: string;
   remedyDigest: `sha256:${string}`;
@@ -63,9 +75,54 @@ export interface ApprovalDecisionRequest {
 export interface ApprovalDecisionResponse {
   clientDecisionId: string;
   recoveryId: string;
+  decision: "approve";
   status: "completed";
   approvedRemedyDigest: `sha256:${string}`;
   executionStarted: true;
+}
+
+export interface DeclineDecisionResponse {
+  clientDecisionId: string;
+  recoveryId: string;
+  decision: "decline";
+  status: "closed_without_action" | "outcome_unknown";
+  decisionRemedyDigest: `sha256:${string}`;
+  executionStarted: boolean;
+}
+
+export type DecisionResponse =
+  | ApprovalDecisionResponse
+  | DeclineDecisionResponse;
+
+export interface RecoveryReceipt {
+  recoveryId: string;
+  executionMode: ExecutionMode;
+  status: TerminalRecoveryStatus;
+  simulated: boolean;
+  providerExecution: boolean;
+  modelIds: string[];
+  boundary: string;
+  providerResult: string;
+  authorizationSource: string;
+  verificationResults: string[];
+  decision: "approved" | "declined" | null;
+  decisionRemedyDigest: `sha256:${string}` | null;
+  executionCount: number;
+  providerDispatchStarted: boolean;
+  exactInterruptionRejected: boolean;
+  permissionRevoked: boolean;
+  scopeClosed: boolean;
+  approvedRemedyDigest: `sha256:${string}` | null;
+}
+
+export function isTerminalRecoveryStatus(
+  status: RecoveryStatus,
+): status is TerminalRecoveryStatus {
+  return (
+    status === "completed" ||
+    status === "closed_without_action" ||
+    status === "outcome_unknown"
+  );
 }
 
 export interface EvidenceEntry {

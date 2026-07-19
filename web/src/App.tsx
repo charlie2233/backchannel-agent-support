@@ -1,19 +1,78 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
-import { createRecovery, getHealth, getRecovery } from "./api/client";
+import { createRecovery, getHealth, postDecision } from "./api/client";
 import { EvidenceInspector } from "./components/EvidenceInspector";
 import { Lifecycle } from "./components/Lifecycle";
 import { ProvenanceStrip } from "./components/ProvenanceStrip";
 import { ScenarioRail } from "./components/ScenarioRail";
+import {
+  isTerminalRecoveryStatus,
+  type DecisionRequest,
+  type PendingApproval,
+  type RecoveryScenario,
+  type RecoverySnapshot,
+  type ScenarioId,
+} from "./domain/recovery";
 import { deriveRuntimePresentation, type HealthStatus } from "./domain/runtime";
-import type { RecoveryScenario, RecoverySnapshot, ScenarioId } from "./domain/recovery";
+import {
+  clearPendingDecision,
+  persistActiveHotelRecovery,
+  readActiveHotelRecovery,
+  readPendingDecision,
+} from "./domain/session";
 import { recoveryScenarios } from "./fixtures/recoveries";
+import { useRecovery } from "./hooks/useRecovery";
+
+let activeHotelCreation: Promise<RecoverySnapshot> | null = null;
+
+function createHotelRecoveryOnce(): Promise<RecoverySnapshot> {
+  if (activeHotelCreation === null) {
+    activeHotelCreation = createRecovery("hotel", "sdk_stub");
+  }
+  return activeHotelCreation;
+}
+
+function requestMatchesApproval(
+  request: DecisionRequest,
+  approval: PendingApproval,
+): boolean {
+  return (
+    request.remedyId === approval.remedyId &&
+    request.remedyDigest === approval.remedyDigest &&
+    request.toolCallId === approval.toolCallId
+  );
+}
+
+function recoveryStateLabel(snapshot: RecoverySnapshot | null, scenario: RecoveryScenario): string {
+  if (snapshot === null) {
+    return scenario.status === "completed" ? "Completed fixture" : "Awaiting boundary";
+  }
+  if (snapshot.status === "completed") {
+    return "Completed";
+  }
+  if (snapshot.status === "closed_without_action") {
+    return "Closed without action";
+  }
+  if (snapshot.status === "outcome_unknown") {
+    return "Outcome unknown";
+  }
+  return snapshot.pendingApproval === null ? "Decision in progress" : "Awaiting approval";
+}
 
 export default function App() {
   const [activeId, setActiveId] = useState<ScenarioId>("hotel");
   const [health, setHealth] = useState<HealthStatus | null>(null);
   const [healthError, setHealthError] = useState(false);
-  const [hotelSnapshot, setHotelSnapshot] = useState<RecoverySnapshot | null>(null);
+  const [hotelRecoveryId, setHotelRecoveryId] = useState<string | null>(() =>
+    readActiveHotelRecovery(),
+  );
+  const [createdSnapshot, setCreatedSnapshot] = useState<RecoverySnapshot | null>(null);
+  const retriedClaims = useRef(new Set<string>());
+
+  const recovery = useRecovery(hotelRecoveryId, {
+    initialSnapshot:
+      createdSnapshot?.recoveryId === hotelRecoveryId ? createdSnapshot : null,
+  });
 
   const activeScenario =
     recoveryScenarios.find((scenario) => scenario.id === activeId) ?? recoveryScenarios[0];
@@ -36,21 +95,82 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const controller = new AbortController();
-
-    void createRecovery("hotel", "sdk_stub", controller.signal)
-      .then(setHotelSnapshot)
-      .catch((error: unknown) => {
-        if (error instanceof DOMException && error.name === "AbortError") {
+    if (hotelRecoveryId !== null) {
+      return;
+    }
+    let disposed = false;
+    const creation = createHotelRecoveryOnce();
+    void creation
+      .then((snapshot) => {
+        if (disposed) {
           return;
         }
-        setHotelSnapshot(null);
+        persistActiveHotelRecovery(snapshot.recoveryId);
+        setCreatedSnapshot(snapshot);
+        setHotelRecoveryId(snapshot.recoveryId);
+        if (activeHotelCreation === creation) {
+          activeHotelCreation = null;
+        }
+      })
+      .catch(() => {
+        if (activeHotelCreation === creation) {
+          activeHotelCreation = null;
+        }
+        if (!disposed) {
+          setCreatedSnapshot(null);
+        }
       });
+    return () => {
+      disposed = true;
+    };
+  }, [hotelRecoveryId]);
 
-    return () => controller.abort();
-  }, []);
+  useEffect(() => {
+    const snapshot = recovery.snapshot;
+    if (
+      hotelRecoveryId === null ||
+      snapshot === null ||
+      snapshot.recoveryId !== hotelRecoveryId ||
+      snapshot.status !== "pending_approval"
+    ) {
+      return;
+    }
+    const stored = readPendingDecision();
+    if (stored === null || stored.recoveryId !== hotelRecoveryId) {
+      return;
+    }
+    if (
+      snapshot.pendingApproval !== null &&
+      !requestMatchesApproval(stored.request, snapshot.pendingApproval)
+    ) {
+      return;
+    }
+    const retryKey = `${hotelRecoveryId}:${JSON.stringify(stored.request)}`;
+    if (retriedClaims.current.has(retryKey)) {
+      return;
+    }
+    retriedClaims.current.add(retryKey);
+    void postDecision(hotelRecoveryId, stored.request).catch(() => {
+      // Preserve the exact claim for a same-ID retry on the next reload.
+    });
+  }, [hotelRecoveryId, recovery.snapshot]);
 
-  const activeSnapshot = activeId === "hotel" ? hotelSnapshot : null;
+  useEffect(() => {
+    const snapshot = recovery.snapshot;
+    const receipt = recovery.receipt;
+    if (
+      snapshot !== null &&
+      receipt !== null &&
+      snapshot.recoveryId === receipt.recoveryId &&
+      snapshot.status === receipt.status &&
+      isTerminalRecoveryStatus(snapshot.status)
+    ) {
+      clearPendingDecision();
+    }
+  }, [recovery.receipt, recovery.snapshot]);
+
+  const activeSnapshot = activeId === "hotel" ? recovery.snapshot : null;
+  const activeReceipt = activeId === "hotel" ? recovery.receipt : null;
   const activeScenarioView = useMemo<RecoveryScenario>(
     () =>
       activeSnapshot === null
@@ -64,13 +184,6 @@ export default function App() {
           },
     [activeScenario, activeSnapshot],
   );
-
-  const refreshHotelSnapshot = useCallback(async () => {
-    if (hotelSnapshot === null) {
-      return;
-    }
-    setHotelSnapshot(await getRecovery(hotelSnapshot.recoveryId));
-  }, [hotelSnapshot]);
 
   const presentation = useMemo(
     () => (health === null ? null : deriveRuntimePresentation(health, activeScenarioView)),
@@ -110,15 +223,7 @@ export default function App() {
               <h1 id="recovery-title">{activeScenarioView.title}</h1>
             </div>
             <span className="recovery-state">
-              {activeSnapshot !== null
-                ? activeScenarioView.status === "completed"
-                  ? "Completed"
-                  : activeSnapshot.pendingApproval === null
-                    ? "Decision in progress"
-                    : "Awaiting approval"
-                : activeScenarioView.status === "completed"
-                  ? "Completed fixture"
-                  : "Awaiting boundary"}
+              {recoveryStateLabel(activeSnapshot, activeScenarioView)}
             </span>
           </section>
           <Lifecycle scenario={activeScenarioView} />
@@ -127,7 +232,7 @@ export default function App() {
         <EvidenceInspector
           scenario={activeScenarioView}
           snapshot={activeSnapshot}
-          onServerSuccess={refreshHotelSnapshot}
+          receipt={activeReceipt}
         />
       </div>
     </div>

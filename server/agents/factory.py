@@ -85,7 +85,15 @@ def build_hotel_agent(
             verificationResults=[
                 "Demo provider dispatch returned confirmed.",
                 "Provider result stored under one idempotency key.",
+                "Temporary permission revoked after terminal completion.",
             ],
+            decision="approved",
+            decisionRemedyDigest=remedy_digest,
+            executionCount=1,
+            providerDispatchStarted=True,
+            exactInterruptionRejected=False,
+            permissionRevoked=True,
+            scopeClosed=True,
             approvedRemedyDigest=remedy_digest,
         )
         execution = tool_context.context.store.get_completed_execution(

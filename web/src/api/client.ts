@@ -1,10 +1,13 @@
 import type { HealthStatus } from "../domain/runtime";
 import type { ExecutionMode } from "../domain/runtime";
 import type {
-  ApprovalDecisionRequest,
   ApprovalDecisionResponse,
+  DecisionRequest,
+  DecisionResponse,
+  DeclineDecisionResponse,
   HotelRemedyTerms,
   PendingApproval,
+  RecoveryReceipt,
   RecoverySnapshot,
   ScenarioId,
 } from "../domain/recovery";
@@ -21,6 +24,10 @@ function hasExactKeys(value: Record<string, unknown>, keys: ReadonlyArray<string
 
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function isSha256Digest(value: unknown): value is `sha256:${string}` {
+  return typeof value === "string" && /^sha256:[0-9a-f]{64}$/.test(value);
 }
 
 function isUtcTimestamp(value: unknown): value is string {
@@ -75,8 +82,7 @@ function isPendingApproval(value: unknown): value is PendingApproval {
   const providerCommitments = value.providerCommitments;
   return (
     typeof value.remedyId === "string" &&
-    typeof value.remedyDigest === "string" &&
-    /^sha256:[0-9a-f]{64}$/.test(value.remedyDigest) &&
+    isSha256Digest(value.remedyDigest) &&
     isHotelRemedyTerms(value.terms) &&
     Number.isInteger(value.costDeltaMinor) &&
     isStringArray(changedFields) &&
@@ -146,7 +152,9 @@ export function isRecoverySnapshot(value: unknown): value is RecoverySnapshot {
   const statusIsValid =
     value.status === "in_progress" ||
     value.status === "pending_approval" ||
-    value.status === "completed";
+    value.status === "completed" ||
+    value.status === "closed_without_action" ||
+    value.status === "outcome_unknown";
   const approvalIsValid =
     value.pendingApproval === null || isPendingApproval(value.pendingApproval);
   return (
@@ -209,30 +217,60 @@ export async function createRecovery(
   return readRecovery(response);
 }
 
-function isDecisionResponse(value: unknown): value is ApprovalDecisionResponse {
+function isApprovalDecisionResponse(
+  value: Record<string, unknown>,
+): value is Record<string, unknown> & ApprovalDecisionResponse {
   return (
-    isRecord(value) &&
     hasExactKeys(value, [
       "clientDecisionId",
       "recoveryId",
+      "decision",
       "status",
       "approvedRemedyDigest",
       "executionStarted",
     ]) &&
     typeof value.clientDecisionId === "string" &&
     typeof value.recoveryId === "string" &&
+    value.decision === "approve" &&
     value.status === "completed" &&
-    typeof value.approvedRemedyDigest === "string" &&
-    /^sha256:[0-9a-f]{64}$/.test(value.approvedRemedyDigest) &&
+    isSha256Digest(value.approvedRemedyDigest) &&
     value.executionStarted === true
+  );
+}
+
+function isDeclineDecisionResponse(
+  value: Record<string, unknown>,
+): value is Record<string, unknown> & DeclineDecisionResponse {
+  return (
+    hasExactKeys(value, [
+      "clientDecisionId",
+      "recoveryId",
+      "decision",
+      "status",
+      "decisionRemedyDigest",
+      "executionStarted",
+    ]) &&
+    typeof value.clientDecisionId === "string" &&
+    typeof value.recoveryId === "string" &&
+    value.decision === "decline" &&
+    (value.status === "closed_without_action" || value.status === "outcome_unknown") &&
+    isSha256Digest(value.decisionRemedyDigest) &&
+    typeof value.executionStarted === "boolean"
+  );
+}
+
+function isDecisionResponse(value: unknown): value is DecisionResponse {
+  return (
+    isRecord(value) &&
+    (isApprovalDecisionResponse(value) || isDeclineDecisionResponse(value))
   );
 }
 
 export async function postDecision(
   recoveryId: string,
-  decision: ApprovalDecisionRequest,
+  decision: DecisionRequest,
   signal?: AbortSignal,
-): Promise<ApprovalDecisionResponse> {
+): Promise<DecisionResponse> {
   const response = await fetch(
     `/api/recoveries/${encodeURIComponent(recoveryId)}/decisions`,
     {
@@ -250,7 +288,123 @@ export async function postDecision(
   }
   const body: unknown = await response.json();
   if (!isDecisionResponse(body)) {
-    throw new Error("Decision response did not match the approval contract");
+    throw new Error("Decision response did not match the terminal action contract");
+  }
+  return body;
+}
+
+function nullableDigest(value: unknown): value is `sha256:${string}` | null {
+  return value === null || isSha256Digest(value);
+}
+
+function isRecoveryReceipt(value: unknown): value is RecoveryReceipt {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, [
+      "recoveryId",
+      "executionMode",
+      "status",
+      "simulated",
+      "providerExecution",
+      "modelIds",
+      "boundary",
+      "providerResult",
+      "authorizationSource",
+      "verificationResults",
+      "decision",
+      "decisionRemedyDigest",
+      "executionCount",
+      "providerDispatchStarted",
+      "exactInterruptionRejected",
+      "permissionRevoked",
+      "scopeClosed",
+      "approvedRemedyDigest",
+    ])
+  ) {
+    return false;
+  }
+  const executionModeIsValid =
+    value.executionMode === "openai_live" ||
+    value.executionMode === "sdk_stub" ||
+    value.executionMode === "replay_fixture";
+  const statusIsTerminal =
+    value.status === "completed" ||
+    value.status === "closed_without_action" ||
+    value.status === "outcome_unknown";
+  const commonFieldsAreValid =
+    typeof value.recoveryId === "string" &&
+    executionModeIsValid &&
+    statusIsTerminal &&
+    typeof value.simulated === "boolean" &&
+    typeof value.providerExecution === "boolean" &&
+    isStringArray(value.modelIds) &&
+    typeof value.boundary === "string" &&
+    typeof value.providerResult === "string" &&
+    typeof value.authorizationSource === "string" &&
+    isStringArray(value.verificationResults) &&
+    (value.decision === "approved" || value.decision === "declined" || value.decision === null) &&
+    nullableDigest(value.decisionRemedyDigest) &&
+    typeof value.executionCount === "number" &&
+    Number.isInteger(value.executionCount) &&
+    Number(value.executionCount) >= 0 &&
+    typeof value.providerDispatchStarted === "boolean" &&
+    typeof value.exactInterruptionRejected === "boolean" &&
+    typeof value.permissionRevoked === "boolean" &&
+    typeof value.scopeClosed === "boolean" &&
+    nullableDigest(value.approvedRemedyDigest);
+  if (!commonFieldsAreValid) {
+    return false;
+  }
+
+  if (value.executionMode !== "sdk_stub") {
+    return true;
+  }
+  if (!value.permissionRevoked || !value.scopeClosed || value.decisionRemedyDigest === null) {
+    return false;
+  }
+  if (value.status === "completed") {
+    return (
+      value.decision === "approved" &&
+      value.providerExecution === true &&
+      value.executionCount === 1 &&
+      value.providerDispatchStarted === true &&
+      value.exactInterruptionRejected === false &&
+      value.approvedRemedyDigest === value.decisionRemedyDigest
+    );
+  }
+  if (value.status === "closed_without_action") {
+    return (
+      value.decision === "declined" &&
+      value.providerExecution === false &&
+      value.executionCount === 0 &&
+      value.providerDispatchStarted === false &&
+      value.exactInterruptionRejected === true &&
+      value.approvedRemedyDigest === null
+    );
+  }
+  return (
+    value.decision === "declined" &&
+    Number(value.executionCount) >= 1 &&
+    value.providerDispatchStarted === true &&
+    value.exactInterruptionRejected === true &&
+    value.approvedRemedyDigest === null
+  );
+}
+
+export async function getReceipt(
+  recoveryId: string,
+  signal?: AbortSignal,
+): Promise<RecoveryReceipt> {
+  const response = await fetch(
+    `/api/recoveries/${encodeURIComponent(recoveryId)}/receipt`,
+    { headers: { Accept: "application/json" }, signal },
+  );
+  if (!response.ok) {
+    throw new Error(`Receipt request failed with status ${response.status}`);
+  }
+  const body: unknown = await response.json();
+  if (!isRecoveryReceipt(body)) {
+    throw new Error("Receipt response did not match the terminal evidence contract");
   }
   return body;
 }

@@ -44,6 +44,8 @@ class RecoveryStatus(StrEnum):
     IN_PROGRESS = "in_progress"
     PENDING_APPROVAL = "pending_approval"
     COMPLETED = "completed"
+    CLOSED_WITHOUT_ACTION = "closed_without_action"
+    OUTCOME_UNKNOWN = "outcome_unknown"
 
 
 class HealthResponse(ApiModel):
@@ -165,6 +167,7 @@ class PendingApprovalView(ApiModel):
 class ApprovalDecisionRequest(ApiModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid", frozen=True)
 
+    decision: Literal["approve", "decline"]
     client_decision_id: str = Field(alias="clientDecisionId", min_length=1, max_length=128)
     remedy_id: str = Field(alias="remedyId", min_length=1)
     remedy_digest: str = Field(
@@ -179,12 +182,30 @@ class ApprovalDecisionResponse(ApiModel):
 
     client_decision_id: str = Field(alias="clientDecisionId")
     recovery_id: str = Field(alias="recoveryId")
+    decision: Literal["approve"]
     status: Literal["completed"]
     approved_remedy_digest: str = Field(
         alias="approvedRemedyDigest",
         pattern=r"^sha256:[0-9a-f]{64}$",
     )
     execution_started: Literal[True] = Field(alias="executionStarted")
+
+
+class DeclineDecisionResponse(ApiModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid", frozen=True)
+
+    client_decision_id: str = Field(alias="clientDecisionId")
+    recovery_id: str = Field(alias="recoveryId")
+    decision: Literal["decline"]
+    status: Literal["closed_without_action", "outcome_unknown"]
+    decision_remedy_digest: str = Field(
+        alias="decisionRemedyDigest",
+        pattern=r"^sha256:[0-9a-f]{64}$",
+    )
+    execution_started: bool = Field(alias="executionStarted")
+
+
+DecisionResponse = ApprovalDecisionResponse | DeclineDecisionResponse
 
 
 class RecoverySnapshot(ApiModel):
@@ -221,6 +242,23 @@ class RecoveryReceipt(ApiModel):
     provider_result: str = Field(alias="providerResult")
     authorization_source: str = Field(alias="authorizationSource")
     verification_results: list[str] = Field(alias="verificationResults")
+    decision: Literal["approved", "declined"] | None = None
+    decision_remedy_digest: str | None = Field(
+        default=None,
+        alias="decisionRemedyDigest",
+        pattern=r"^sha256:[0-9a-f]{64}$",
+    )
+    execution_count: int = Field(default=0, alias="executionCount", ge=0)
+    provider_dispatch_started: bool = Field(
+        default=False,
+        alias="providerDispatchStarted",
+    )
+    exact_interruption_rejected: bool = Field(
+        default=False,
+        alias="exactInterruptionRejected",
+    )
+    permission_revoked: bool = Field(default=False, alias="permissionRevoked")
+    scope_closed: bool = Field(default=False, alias="scopeClosed")
     approved_remedy_digest: str | None = Field(
         default=None,
         alias="approvedRemedyDigest",
@@ -230,16 +268,68 @@ class RecoveryReceipt(ApiModel):
     @model_validator(mode="after")
     def enforce_execution_mode_provenance(self) -> Self:
         if self.execution_mode is ExecutionMode.REPLAY_FIXTURE and (
-            not self.simulated or self.provider_execution or self.model_ids
+            not self.simulated
+            or self.provider_execution
+            or self.model_ids
+            or self.execution_count != 0
+            or self.provider_dispatch_started
         ):
             raise ValueError(
                 "Replay receipts require simulated evidence, no provider execution, "
                 "and no model IDs"
             )
-        if self.execution_mode is ExecutionMode.SDK_STUB and (
-            not self.simulated or self.model_ids
-        ):
-            raise ValueError("SDK stub receipts require simulated evidence and no model IDs")
+        if self.execution_mode is ExecutionMode.SDK_STUB:
+            if not self.simulated or self.model_ids:
+                raise ValueError(
+                    "SDK stub receipts require simulated evidence and no model IDs"
+                )
+            if (
+                self.decision is None
+                or self.decision_remedy_digest is None
+                or not self.permission_revoked
+                or not self.scope_closed
+            ):
+                raise ValueError(
+                    "SDK stub terminal receipts require a decision-bound closed scope"
+                )
+            if self.decision == "approved":
+                if (
+                    self.status != RecoveryStatus.COMPLETED.value
+                    or not self.provider_execution
+                    or self.execution_count != 1
+                    or not self.provider_dispatch_started
+                    or self.exact_interruption_rejected
+                    or self.approved_remedy_digest != self.decision_remedy_digest
+                ):
+                    raise ValueError(
+                        "Approved SDK receipts require one dispatched execution and "
+                        "matching approved digest"
+                    )
+            elif self.status == RecoveryStatus.CLOSED_WITHOUT_ACTION.value:
+                if (
+                    self.provider_execution
+                    or self.execution_count != 0
+                    or self.provider_dispatch_started
+                    or not self.exact_interruption_rejected
+                    or self.approved_remedy_digest is not None
+                ):
+                    raise ValueError(
+                        "Closed-without-action receipts require exact rejection and "
+                        "zero dispatch evidence"
+                    )
+            elif self.status == RecoveryStatus.OUTCOME_UNKNOWN.value:
+                if (
+                    self.execution_count < 1
+                    or not self.provider_dispatch_started
+                    or not self.exact_interruption_rejected
+                    or self.approved_remedy_digest is not None
+                ):
+                    raise ValueError(
+                        "Outcome-unknown decline receipts require execution or dispatch "
+                        "evidence and exact rejection"
+                    )
+            else:
+                raise ValueError("Declined SDK receipt has an invalid terminal status")
         return self
 
 

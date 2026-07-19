@@ -10,8 +10,15 @@ from openai.types.responses import ResponseFunctionToolCall, ResponseOutputMessa
 
 from server.agents.schemas import deterministic_hotel_arguments
 from server.agents.stub_model import DeterministicApprovalModel
+from server.providers.hotel_simulator import HotelDispatchResult
 
 CALL_ID = "commit-remedy-focused-model-test"
+APPROVED_OUTPUT = HotelDispatchResult(
+    dispatch_id="demo-hotel-dispatch-model-test",
+    status="confirmed",
+    simulated=True,
+    provider_result="Demo provider confirmed the test remedy.",
+).model_dump_json()
 
 
 @function_tool
@@ -58,7 +65,7 @@ def test_model_finishes_when_matching_function_output_is_in_mapping_history() ->
                 {
                     "type": "function_call_output",
                     "call_id": CALL_ID,
-                    "output": "{}",
+                    "output": APPROVED_OUTPUT,
                 },
             ],
         ),
@@ -72,7 +79,13 @@ def test_model_finishes_when_matching_function_output_is_an_object() -> None:
         make_model(),
         cast(
             list[TResponseInputItem],
-            [SimpleNamespace(type="function_call_output", call_id=CALL_ID, output="{}")],
+            [
+                SimpleNamespace(
+                    type="function_call_output",
+                    call_id=CALL_ID,
+                    output=APPROVED_OUTPUT,
+                )
+            ],
         ),
     )
 

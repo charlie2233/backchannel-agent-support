@@ -11,8 +11,8 @@ from server.config import RuntimeSettings
 from server.events import stream_recovery_events
 from server.models import (
     ApprovalDecisionRequest,
-    ApprovalDecisionResponse,
     CreateRecoveryRequest,
+    DecisionResponse,
     DemoResetResponse,
     ExecutionMode,
     HealthResponse,
@@ -124,15 +124,15 @@ def create_app(
 
     @application.post(
         "/api/recoveries/{recovery_id}/decisions",
-        response_model=ApprovalDecisionResponse,
+        response_model=DecisionResponse,
     )
-    async def approve_recovery(
+    async def decide_recovery(
         recovery_id: UUID,
         payload: ApprovalDecisionRequest,
-    ) -> ApprovalDecisionResponse:
+    ) -> DecisionResponse:
         recovery_key = str(recovery_id)
         try:
-            return await recovery_orchestrator.approve_decision(recovery_key, payload)
+            return await recovery_orchestrator.decide(recovery_key, payload)
         except ApprovalDecisionError as error:
             raise HTTPException(
                 status_code=error.status_code,

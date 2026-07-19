@@ -12,6 +12,13 @@ from server.store import SQLiteStore
 
 HEARTBEAT_SECONDS = 15.0
 POLL_INTERVAL_SECONDS = 0.25
+TERMINAL_RECOVERY_STATUSES = frozenset(
+    {
+        RecoveryStatus.COMPLETED,
+        RecoveryStatus.CLOSED_WITHOUT_ACTION,
+        RecoveryStatus.OUTCOME_UNKNOWN,
+    }
+)
 
 
 def encode_sse_event(event: RecoveryEvent) -> str:
@@ -45,7 +52,7 @@ async def stream_recovery_events(
             cursor = event.seq
             last_emission = monotonic()
 
-        if recovery_status is RecoveryStatus.COMPLETED:
+        if recovery_status in TERMINAL_RECOVERY_STATUSES:
             return
         if await is_disconnected():
             return
