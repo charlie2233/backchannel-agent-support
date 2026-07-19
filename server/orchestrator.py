@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -117,6 +117,10 @@ class LiveUnavailableError(ValueError):
 
 LiveModelProviderFactory = Callable[[ResponseMetadataRecorder], ModelProvider]
 LiveTraceFactory = Callable[..., AbstractContextManager[Any]]
+ReconciliationClock = Callable[[], datetime]
+ReconciliationSleep = Callable[[float], Awaitable[None]]
+RECONCILIATION_FAILURE_BACKOFF_INITIAL_SECONDS = 0.1
+RECONCILIATION_FAILURE_BACKOFF_MAX_SECONDS = 5.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,6 +142,8 @@ class RecoveryOrchestrator:
         live_trace_factory: LiveTraceFactory | None = None,
         decision_lease_duration: timedelta = timedelta(seconds=30),
         decision_wait_interval: float = 0.02,
+        reconciliation_clock: ReconciliationClock | None = None,
+        reconciliation_sleep: ReconciliationSleep = asyncio.sleep,
     ) -> None:
         self._store = store
         self._hotel_provider = hotel_provider
@@ -155,8 +161,12 @@ class RecoveryOrchestrator:
             raise ValueError("Decision wait interval must be positive")
         self._decision_lease_duration = decision_lease_duration
         self._decision_wait_interval = decision_wait_interval
-        self._reconcile_completed_executions()
-        self._reconcile_claimed_decisions()
+        self._reconciliation_clock = reconciliation_clock or (
+            lambda: datetime.now(UTC)
+        )
+        self._reconciliation_sleep = reconciliation_sleep
+        self._reconciliation_task: asyncio.Task[None] | None = None
+        self._startup_retry_at: datetime | None = None
 
     @staticmethod
     def _openai_trace(*, trace_id: str, group_id: str) -> AbstractContextManager[Any]:
@@ -228,9 +238,48 @@ class RecoveryOrchestrator:
             executionStarted=True,
         )
 
-    def _reconcile_completed_executions(self) -> None:
+    @staticmethod
+    def _earliest_retry_at(
+        current: datetime | None,
+        lease: DecisionResumeLease,
+    ) -> datetime | None:
+        if lease.disposition != "wait" or lease.lease_expires_at is None:
+            return current
+        if current is None or lease.lease_expires_at < current:
+            return lease.lease_expires_at
+        return current
+
+    def _release_failed_reconciliation_lease(
+        self,
+        claim: ApprovalDecisionClaim,
+        *,
+        resume_owner_id: str,
+        resume_generation: int,
+    ) -> None:
+        """Best-effort release without masking the reconciliation failure."""
+
+        try:
+            released = self._store.release_decision_resume(
+                claim,
+                resume_owner_id=resume_owner_id,
+                resume_generation=resume_generation,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to release reconciliation lease for recovery_id=%s",
+                claim.recovery_id,
+            )
+            return
+        if not released:
+            logger.warning(
+                "Reconciliation lease was already lost for recovery_id=%s",
+                claim.recovery_id,
+            )
+
+    def _reconcile_completed_executions(self) -> datetime | None:
         """Finalize committed provider results without calling the provider again."""
 
+        retry_at: datetime | None = None
         claims = {
             claim.recovery_id: claim for claim in self._store.list_claimed_decisions()
         }
@@ -244,6 +293,9 @@ class RecoveryOrchestrator:
                 resume_owner_id=owner_id,
                 lease_duration=self._decision_lease_duration,
             )
+            if lease.disposition == "wait":
+                retry_at = self._earliest_retry_at(retry_at, lease)
+                continue
             if lease.disposition != "owner":
                 continue
             try:
@@ -264,11 +316,18 @@ class RecoveryOrchestrator:
                     "Failed to reconcile committed execution for recovery_id=%s",
                     execution.recovery_id,
                 )
+                self._release_failed_reconciliation_lease(
+                    claim,
+                    resume_owner_id=owner_id,
+                    resume_generation=lease.resume_generation,
+                )
                 raise
+        return retry_at
 
-    def _reconcile_claimed_decisions(self) -> None:
+    def _reconcile_claimed_decisions(self) -> datetime | None:
         """Complete claimed responses whose durable dispatch already committed."""
 
+        retry_at: datetime | None = None
         for claim in self._store.list_claimed_decisions():
             if claim.request.decision == "decline":
                 try:
@@ -290,29 +349,130 @@ class RecoveryOrchestrator:
                 resume_owner_id=owner_id,
                 lease_duration=self._decision_lease_duration,
             )
+            if lease.disposition == "wait":
+                retry_at = self._earliest_retry_at(retry_at, lease)
+                continue
             if lease.disposition != "owner":
                 continue
-            if claim.request.decision == "decline":
-                self._store.finalize_declined_decision(
-                    claim,
-                    exact_interruption_rejected=True,
+            try:
+                if claim.request.decision == "decline":
+                    self._store.finalize_declined_decision(
+                        claim,
+                        exact_interruption_rejected=True,
+                        resume_owner_id=owner_id,
+                        resume_generation=lease.resume_generation,
+                    )
+                    continue
+                assert execution is not None
+                self._store.finalize_completed_execution(
+                    execution,
+                    receipt=self._receipt_for_execution(execution),
                     resume_owner_id=owner_id,
                     resume_generation=lease.resume_generation,
                 )
+                self._store.complete_approval_decision(
+                    claim,
+                    self._decision_response(claim),
+                    resume_owner_id=owner_id,
+                    resume_generation=lease.resume_generation,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to reconcile claimed decision for recovery_id=%s",
+                    claim.recovery_id,
+                )
+                self._release_failed_reconciliation_lease(
+                    claim,
+                    resume_owner_id=owner_id,
+                    resume_generation=lease.resume_generation,
+                )
+                raise
+        return retry_at
+
+    def _reconcile_startup_once(self) -> datetime | None:
+        completed_retry = self._reconcile_completed_executions()
+        claimed_retry = self._reconcile_claimed_decisions()
+        if completed_retry is None:
+            return claimed_retry
+        if claimed_retry is None:
+            return completed_retry
+        return min(completed_retry, claimed_retry)
+
+    def _schedule_startup_reconciliation(self) -> None:
+        task = self._reconciliation_task
+        if task is not None and not task.done():
+            return
+        self._reconciliation_task = asyncio.create_task(
+            self._run_startup_reconciliation(),
+            name="backchannel-startup-reconciliation",
+        )
+
+    async def _run_startup_reconciliation(self) -> None:
+        retry_at: datetime | None = None
+        failure_backoff = max(
+            self._decision_wait_interval,
+            RECONCILIATION_FAILURE_BACKOFF_INITIAL_SECONDS,
+        )
+        while True:
+            if retry_at is not None:
+                delay = max(
+                    (retry_at - self._reconciliation_clock()).total_seconds(),
+                    self._decision_wait_interval,
+                )
+                await self._reconciliation_sleep(delay)
+            try:
+                retry_at = self._reconcile_startup_once()
+            except Exception:
+                logger.exception(
+                    "Failed deferred startup reconciliation; retrying in %.2f seconds",
+                    failure_backoff,
+                )
+                retry_at = self._reconciliation_clock() + timedelta(
+                    seconds=failure_backoff
+                )
+                self._startup_retry_at = retry_at
+                failure_backoff = min(
+                    failure_backoff * 2,
+                    RECONCILIATION_FAILURE_BACKOFF_MAX_SECONDS,
+                )
                 continue
-            assert execution is not None
-            self._store.finalize_completed_execution(
-                execution,
-                receipt=self._receipt_for_execution(execution),
-                resume_owner_id=owner_id,
-                resume_generation=lease.resume_generation,
+            failure_backoff = max(
+                self._decision_wait_interval,
+                RECONCILIATION_FAILURE_BACKOFF_INITIAL_SECONDS,
             )
-            self._store.complete_approval_decision(
-                claim,
-                self._decision_response(claim),
-                resume_owner_id=owner_id,
-                resume_generation=lease.resume_generation,
-            )
+            self._startup_retry_at = retry_at
+            if retry_at is None:
+                return
+
+    async def startup(self) -> None:
+        """Attach deferred reconciliation to the active application event loop."""
+
+        task = self._reconciliation_task
+        if task is not None and not task.done():
+            return
+        self._startup_retry_at = None
+        self._schedule_startup_reconciliation()
+
+    async def wait_for_startup_reconciliation(self) -> None:
+        """Wait for the currently scheduled startup repair, when one exists."""
+
+        task = self._reconciliation_task
+        if task is not None:
+            await asyncio.shield(task)
+
+    async def shutdown(self) -> None:
+        """Cancel and join the lifecycle-owned reconciliation retry."""
+
+        task = self._reconciliation_task
+        self._reconciliation_task = None
+        if task is None:
+            return
+        if not task.done():
+            task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     @staticmethod
     def _raise_incompatible(recovery_id: str, marker: str) -> NoReturn:

@@ -605,7 +605,7 @@ def test_concurrent_identical_live_approvals_resume_and_dispatch_once(
             hotel_provider=first_hotel,
             live_ready=True,
             live_model_provider_factory=model_provider.bind,
-            decision_lease_duration=timedelta(milliseconds=90),
+            decision_lease_duration=timedelta(milliseconds=600),
             decision_wait_interval=0.01,
         )
         pending = await first_orchestrator.start(
@@ -619,7 +619,7 @@ def test_concurrent_identical_live_approvals_resume_and_dispatch_once(
             hotel_provider=second_hotel,
             live_ready=True,
             live_model_provider_factory=model_provider.bind,
-            decision_lease_duration=timedelta(milliseconds=90),
+            decision_lease_duration=timedelta(milliseconds=600),
             decision_wait_interval=0.01,
         )
         request = _decision(pending, "approve", "live-duplicate-approval")
@@ -630,7 +630,7 @@ def test_concurrent_identical_live_approvals_resume_and_dispatch_once(
         second = asyncio.create_task(
             second_orchestrator.approve_decision(pending.recovery.recovery_id, request)
         )
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(1.0)
         restores_before_release = restore_count
         restore_release.set()
         first_response, second_response = await asyncio.gather(first, second)

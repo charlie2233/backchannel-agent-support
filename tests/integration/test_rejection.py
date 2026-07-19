@@ -38,6 +38,12 @@ def _decision_request(pending, decision_id: str) -> ApprovalDecisionRequest:
     )
 
 
+async def _run_startup_reconciliation(orchestrator: RecoveryOrchestrator) -> None:
+    await orchestrator.startup()
+    await orchestrator.wait_for_startup_reconciliation()
+    await orchestrator.shutdown()
+
+
 def test_actual_sdk_rejection_message_reaches_model_and_closes_without_execution(
     tmp_path,
     monkeypatch,
@@ -310,6 +316,7 @@ def test_decline_retries_after_runner_before_terminal_finalize(
         store=restarted_store,
         hotel_provider=restarted_provider,
     )
+    asyncio.run(_run_startup_reconciliation(restarted))
     assert restarted_store.get_recovery(recovery_id).status is (
         RecoveryStatus.CLOSED_WITHOUT_ACTION
     )
@@ -364,7 +371,11 @@ def test_rejected_decline_with_dispatch_evidence_reopens_as_outcome_unknown(
 
     reopened_store = SQLiteStore(database_path)
     reopened_provider = HotelSimulator(store=reopened_store)
-    RecoveryOrchestrator(store=reopened_store, hotel_provider=reopened_provider)
+    reopened = RecoveryOrchestrator(
+        store=reopened_store,
+        hotel_provider=reopened_provider,
+    )
+    asyncio.run(_run_startup_reconciliation(reopened))
 
     assert reopened_provider.dispatch_count == 0
     assert reopened_store.get_recovery(recovery_id).status is (
@@ -382,7 +393,11 @@ def test_rejected_decline_with_dispatch_evidence_reopens_as_outcome_unknown(
     reopened_store.close()
     second_store = SQLiteStore(database_path)
     second_provider = HotelSimulator(store=second_store)
-    RecoveryOrchestrator(store=second_store, hotel_provider=second_provider)
+    second = RecoveryOrchestrator(
+        store=second_store,
+        hotel_provider=second_provider,
+    )
+    asyncio.run(_run_startup_reconciliation(second))
     assert second_provider.dispatch_count == 0
     assert second_store.get_receipt(recovery_id) == receipt
     assert len(

@@ -1,5 +1,7 @@
 """FastAPI entry point for truthful replay recovery persistence and streaming."""
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Annotated
 from uuid import UUID
 
@@ -71,7 +73,19 @@ def create_app(
                 live_provider_factory if runtime_settings.live_ready else None
             ),
         )
-    application = FastAPI(title="Backchannel API", version="0.3.0")
+    @asynccontextmanager
+    async def lifespan(_application: FastAPI) -> AsyncIterator[None]:
+        await recovery_orchestrator.startup()
+        try:
+            yield
+        finally:
+            await recovery_orchestrator.shutdown()
+
+    application = FastAPI(
+        title="Backchannel API",
+        version="0.3.0",
+        lifespan=lifespan,
+    )
     application.state.recovery_store = recovery_store
     application.state.recovery_orchestrator = recovery_orchestrator
     application.add_middleware(
