@@ -1799,8 +1799,9 @@ class SQLiteStore:
         recovery_id: str,
         tool_call_id: str,
         remedy_digest: str,
+        action_digest: str,
     ) -> None:
-        """Block direct tool invocation unless the exact durable claim won."""
+        """Block dispatch unless the exact claimed action retains its active scope."""
 
         now = self._now()
         with self._lock, self._connect() as connection:
@@ -1833,15 +1834,20 @@ class SQLiteStore:
                 cast(str, scope["status"]) != "active"
                 or cast(str, scope["tool_call_id"]) != tool_call_id
                 or cast(str, scope["remedy_digest"]) != remedy_digest
+                or cast(str, scope["action_digest"]) != action_digest
             ):
                 raise ApprovalDecisionError(
                     "decision_unavailable", recovery_id, status_code=409
                 )
-            _pending, consent = self._validate_decision_identity(
+            pending, consent = self._validate_decision_identity(
                 connection,
                 recovery_id,
                 claim.request,
             )
+            if pending.action_digest != action_digest:
+                raise ApprovalDecisionError(
+                    "decision_unavailable", recovery_id, status_code=409
+                )
             self._validate_approval_policy(recovery_id, consent, now=now)
 
     def complete_decision(

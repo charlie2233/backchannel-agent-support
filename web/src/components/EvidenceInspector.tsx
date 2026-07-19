@@ -13,6 +13,7 @@ import type {
 import {
   persistPendingDecision,
   readPendingDecision,
+  type StoredDecisionClaim,
 } from "../domain/session";
 
 interface EvidenceInspectorProps {
@@ -74,6 +75,21 @@ function responseMatchesRequest(
   return response.decision === "approve"
     ? response.approvedRemedyDigest === request.remedyDigest
     : response.decisionRemedyDigest === request.remedyDigest;
+}
+
+function matchingStoredClaim(
+  snapshot: RecoverySnapshot | null,
+  approval: PendingApproval | null,
+): StoredDecisionClaim | null {
+  if (snapshot === null || approval === null) {
+    return null;
+  }
+  const stored = readPendingDecision();
+  return stored !== null &&
+    stored.recoveryId === snapshot.recoveryId &&
+    requestMatchesApproval(stored.request, approval)
+    ? stored
+    : null;
 }
 
 function ReceiptInspector({ receipt }: { receipt: RecoveryReceipt }) {
@@ -192,20 +208,52 @@ export function EvidenceInspector({
   onDecisionAccepted,
   clientDecisionIdFactory = defaultDecisionId,
 }: EvidenceInspectorProps) {
+  const approval = snapshot?.pendingApproval ?? null;
+  const synchronousStoredClaim = matchingStoredClaim(snapshot, approval);
   const [submittingAction, setSubmittingAction] = useState<DecisionAction | null>(null);
-  const [lockedAction, setLockedAction] = useState<DecisionAction | null>(null);
+  const [lockedDecision, setLockedDecision] = useState<StoredDecisionClaim | null>(
+    synchronousStoredClaim,
+  );
   const [acceptedAction, setAcceptedAction] = useState<DecisionAction | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
-  const decisionIds = useRef<Partial<Record<DecisionAction, string>>>({});
-  const activeRequest = useRef<DecisionRequest | null>(null);
-  const approval = snapshot?.pendingApproval ?? null;
+  const decisionIds = useRef<Partial<Record<DecisionAction, string>>>(
+    synchronousStoredClaim === null
+      ? {}
+      : {
+          [synchronousStoredClaim.request.decision]:
+            synchronousStoredClaim.request.clientDecisionId,
+        },
+  );
+  const activeRequest = useRef<DecisionRequest | null>(
+    synchronousStoredClaim?.request ?? null,
+  );
+  const stateLockedDecision =
+    lockedDecision !== null &&
+    snapshot !== null &&
+    approval !== null &&
+    lockedDecision.recoveryId === snapshot.recoveryId &&
+    requestMatchesApproval(lockedDecision.request, approval)
+      ? lockedDecision
+      : null;
+  const effectiveLockedDecision = synchronousStoredClaim ?? stateLockedDecision;
+  const lockedAction = effectiveLockedDecision?.request.decision ?? null;
+
+  if (
+    synchronousStoredClaim !== null &&
+    activeRequest.current?.clientDecisionId !==
+      synchronousStoredClaim.request.clientDecisionId
+  ) {
+    activeRequest.current = synchronousStoredClaim.request;
+    decisionIds.current[synchronousStoredClaim.request.decision] =
+      synchronousStoredClaim.request.clientDecisionId;
+  }
 
   useEffect(() => {
     activeRequest.current = null;
     decisionIds.current = {};
     setSubmittingAction(null);
-    setLockedAction(null);
+    setLockedDecision(null);
     setAcceptedAction(null);
     setError(null);
     setStatusMessage(null);
@@ -220,7 +268,7 @@ export function EvidenceInspector({
     ) {
       activeRequest.current = stored.request;
       decisionIds.current[stored.request.decision] = stored.request.clientDecisionId;
-      setLockedAction(stored.request.decision);
+      setLockedDecision(stored);
     }
   }, [
     approval?.remedyDigest,
@@ -284,7 +332,7 @@ export function EvidenceInspector({
         return;
       }
       activeRequest.current = request;
-      setLockedAction(action);
+      setLockedDecision({ recoveryId: snapshot.recoveryId, request });
       setSubmittingAction(action);
       setError(null);
       setStatusMessage(null);

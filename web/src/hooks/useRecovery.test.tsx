@@ -6,6 +6,7 @@ import {
   type RecoveryEvent,
   type RecoveryEventHandlers,
 } from "../api/events";
+import { HttpStatusError } from "../api/client";
 import type { RecoveryReceipt, RecoverySnapshot } from "../domain/recovery";
 import { initialRecoveryState, recoveryReducer, useRecovery } from "./useRecovery";
 
@@ -120,6 +121,23 @@ describe("recoveryReducer", () => {
 });
 
 describe("useRecovery authoritative terminal refresh", () => {
+  it("preserves the typed status and initial-load phase of a recovery lookup failure", async () => {
+    const getRecovery = vi
+      .fn()
+      .mockRejectedValue(new HttpStatusError("Recovery request failed with status 404", 404));
+    const connectEvents = vi.fn(() => vi.fn());
+
+    const { result } = renderHook(() =>
+      useRecovery(recoveryId, { getRecovery, connectEvents }),
+    );
+
+    await waitFor(() => {
+      expect(result.current.error).toBe("Recovery request failed with status 404");
+      expect(result.current.errorStatus).toBe(404);
+      expect(result.current.errorPhase).toBe("initial");
+    });
+  });
+
   it("loads snapshot and receipt together exactly once after duplicate terminal delivery", async () => {
     const initial = snapshot("pending_approval", "Decision claim is durable.");
     const terminal = snapshot("closed_without_action", "Closed without provider action.");

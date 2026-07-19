@@ -4,6 +4,7 @@ import asyncio
 import sqlite3
 
 import pytest
+from agents.exceptions import UserError
 
 from server.models import ApprovalDecisionRequest, ExecutionMode, RecoveryReceipt
 from server.orchestrator import RecoveryOrchestrator
@@ -47,8 +48,99 @@ def test_provider_guard_requires_the_exact_active_permission_scope(tmp_path) -> 
             recovery_id=recovery_id,
             tool_call_id=request.tool_call_id,
             remedy_digest=request.remedy_digest,
+            action_digest=store.get_pending_approval(recovery_id).action_digest,
         )
 
+    assert store.count_executions(recovery_id) == 0
+
+
+def test_provider_guard_receives_the_matching_action_digest(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "provider-matching-action-digest.sqlite3"
+    store = SQLiteStore(database_path)
+    provider = HotelSimulator(store=store)
+    orchestrator = RecoveryOrchestrator(store=store, hotel_provider=provider)
+    pending = asyncio.run(
+        orchestrator.start("hotel", execution_mode=ExecutionMode.SDK_STUB)
+    )
+    recovery_id = pending.recovery.recovery_id
+    approval = pending.recovery.pending_approval
+    assert approval is not None
+    expected_action_digest = store.get_pending_approval(recovery_id).action_digest
+    request = ApprovalDecisionRequest(
+        decision="approve",
+        clientDecisionId=f"matching-action-{recovery_id}",
+        remedyId=approval.remedy_id,
+        remedyDigest=approval.remedy_digest,
+        toolCallId=approval.tool_call_id,
+    )
+    observed_action_digests: list[str | None] = []
+    original_guard = store.assert_provider_dispatch_authorized
+
+    def capture_action_digest(**kwargs) -> None:
+        observed_action_digests.append(kwargs.get("action_digest"))
+        original_guard(**kwargs)
+
+    monkeypatch.setattr(
+        store,
+        "assert_provider_dispatch_authorized",
+        capture_action_digest,
+    )
+
+    response = asyncio.run(orchestrator.approve_decision(recovery_id, request))
+
+    assert response.status == "completed"
+    assert observed_action_digests == [expected_action_digest]
+    assert provider.dispatch_count == 1
+
+
+@pytest.mark.parametrize("tampered_table", ["pending_approvals", "permission_scopes"])
+def test_provider_guard_rejects_action_digest_tampered_after_claim_validation(
+    tmp_path,
+    monkeypatch,
+    tampered_table: str,
+) -> None:
+    database_path = tmp_path / f"provider-tampered-{tampered_table}.sqlite3"
+    store = SQLiteStore(database_path)
+    provider = HotelSimulator(store=store)
+    orchestrator = RecoveryOrchestrator(store=store, hotel_provider=provider)
+    pending = asyncio.run(
+        orchestrator.start("hotel", execution_mode=ExecutionMode.SDK_STUB)
+    )
+    recovery_id = pending.recovery.recovery_id
+    approval = pending.recovery.pending_approval
+    assert approval is not None
+    request = ApprovalDecisionRequest(
+        decision="approve",
+        clientDecisionId=f"tampered-{tampered_table}-{recovery_id}",
+        remedyId=approval.remedy_id,
+        remedyDigest=approval.remedy_digest,
+        toolCallId=approval.tool_call_id,
+    )
+    original_validate = store.validate_claimed_decision
+    tampered = False
+
+    def validate_then_tamper(claim):
+        nonlocal tampered
+        validated = original_validate(claim)
+        if not tampered:
+            with sqlite3.connect(database_path) as connection:
+                connection.execute(
+                    f"UPDATE {tampered_table} SET action_digest = ? "
+                    "WHERE recovery_id = ?",
+                    ("0" * 64, recovery_id),
+                )
+            tampered = True
+        return validated
+
+    monkeypatch.setattr(store, "validate_claimed_decision", validate_then_tamper)
+
+    with pytest.raises(UserError, match="decision_unavailable"):
+        asyncio.run(orchestrator.approve_decision(recovery_id, request))
+
+    assert provider.dispatch_count == 0
     assert store.count_executions(recovery_id) == 0
 
 

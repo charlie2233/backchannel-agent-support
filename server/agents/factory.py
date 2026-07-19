@@ -17,6 +17,7 @@ from server.agents.stub_model import DeterministicApprovalModel
 from server.agents.versioning import (
     HOTEL_AGENT_INSTRUCTIONS,
     HOTEL_AGENT_NAME,
+    broker_remedy_action_digest,
 )
 from server.models import ExecutionMode, RecoveryReceipt
 from server.providers.hotel_simulator import HotelDispatchRequest, HotelSimulator
@@ -53,10 +54,12 @@ def build_hotel_agent(
         remedy_digest = tool_context.context.approved_remedy_digest
         if remedy_digest is None or not remedy_digest.startswith("sha256:"):
             raise ValueError("Exact public consent digest is required before dispatch")
+        action_digest = broker_remedy_action_digest(remedy)
         tool_context.context.store.assert_provider_dispatch_authorized(
             recovery_id=tool_context.context.recovery_id,
             tool_call_id=tool_context.tool_call_id,
             remedy_digest=remedy_digest,
+            action_digest=action_digest,
         )
         idempotency_key = f"{tool_context.context.recovery_id}:{tool_context.tool_call_id}"
         idempotency_key = f"{idempotency_key}:{remedy_digest}"

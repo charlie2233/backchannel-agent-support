@@ -59,9 +59,9 @@ function pendingSnapshot(pendingApproval: object | null = {
   delegatedAuthoritySatisfied: true,
   toolCallId: "server-call",
   executionStarted: false,
-}) {
+}, activeRecoveryId = recoveryId) {
   return {
-    recoveryId,
+    recoveryId: activeRecoveryId,
     scenarioId: "hotel",
     executionMode: "sdk_stub",
     status: "pending_approval",
@@ -152,6 +152,129 @@ function stubHealthWithUnavailableRecovery() {
 }
 
 describe("Backchannel console", () => {
+  it.each([404, 422])(
+    "replaces a stored recovery after definitive status %s exactly once and clears its matching claim",
+    async (status) => {
+      const replacementRecoveryId = "99999999-8888-4777-8666-555555555555";
+      const storedRequest = {
+        decision: "decline",
+        clientDecisionId: `decision-stale-${status}`,
+        remedyId: "server-remedy",
+        remedyDigest: digest,
+        toolCallId: "server-call",
+      };
+      sessionStorage.setItem("backchannel.hotelRecovery.v1", recoveryId);
+      sessionStorage.setItem(
+        "backchannel.pendingDecision.v1",
+        JSON.stringify({ recoveryId, request: storedRequest }),
+      );
+      const fetchMock = vi.fn().mockImplementation((input: string | URL | Request) => {
+        const url = String(input);
+        if (url === "/health") {
+          return Promise.resolve(healthResponse());
+        }
+        if (url === `/api/recoveries/${recoveryId}`) {
+          return Promise.resolve(jsonResponse({ detail: "Stored recovery unavailable" }, status));
+        }
+        if (url === "/api/recoveries") {
+          return Promise.resolve(
+            jsonResponse(pendingSnapshot(undefined, replacementRecoveryId), 201),
+          );
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      render(<App />);
+
+      await waitFor(() => {
+        expect(sessionStorage.getItem("backchannel.hotelRecovery.v1")).toBe(
+          replacementRecoveryId,
+        );
+      }, { timeout: 5_000 });
+      expect(
+        await screen.findByRole(
+          "heading",
+          { name: "Approve exact remedy" },
+          { timeout: 5_000 },
+        ),
+      ).toBeVisible();
+      await waitFor(() => {
+        expect(sessionStorage.getItem("backchannel.pendingDecision.v1")).toBeNull();
+      }, { timeout: 5_000 });
+
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(
+        fetchMock.mock.calls.filter(([input]) => String(input) === "/api/recoveries"),
+      ).toHaveLength(1);
+      expect(
+        fetchMock.mock.calls.filter(
+          ([input]) => String(input) === `/api/recoveries/${recoveryId}`,
+        ),
+      ).toHaveLength(1);
+    },
+    15_000,
+  );
+
+  it.each([
+    { label: "network", failure: new TypeError("Network unavailable") },
+    { label: "server", failure: 503 },
+  ])(
+    "retains the stored recovery and pending claim after a transient $label failure",
+    async ({ failure }) => {
+      const storedRequest = {
+        decision: "decline",
+        clientDecisionId: "decision-transient-retained",
+        remedyId: "server-remedy",
+        remedyDigest: digest,
+        toolCallId: "server-call",
+      };
+      const storedClaim = JSON.stringify({ recoveryId, request: storedRequest });
+      sessionStorage.setItem("backchannel.hotelRecovery.v1", recoveryId);
+      sessionStorage.setItem("backchannel.pendingDecision.v1", storedClaim);
+      const fetchMock = vi.fn().mockImplementation((input: string | URL | Request) => {
+        const url = String(input);
+        if (url === "/health") {
+          return Promise.resolve(healthResponse());
+        }
+        if (url === `/api/recoveries/${recoveryId}`) {
+          return failure instanceof Error
+            ? Promise.reject(failure)
+            : Promise.resolve(jsonResponse({ detail: "Unavailable" }, failure));
+        }
+        if (url === "/api/recoveries") {
+          throw new Error("Transient failure must not create a replacement recovery");
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      render(<App />);
+
+      expect(await screen.findByText("Replay fixture")).toBeVisible();
+      await waitFor(() => {
+        expect(
+          fetchMock.mock.calls.filter(
+            ([input]) => String(input) === `/api/recoveries/${recoveryId}`,
+          ),
+        ).toHaveLength(1);
+      });
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(sessionStorage.getItem("backchannel.hotelRecovery.v1")).toBe(recoveryId);
+      expect(sessionStorage.getItem("backchannel.pendingDecision.v1")).toBe(storedClaim);
+      expect(
+        fetchMock.mock.calls.filter(([input]) => String(input) === "/api/recoveries"),
+      ).toHaveLength(0);
+    },
+  );
+
   it(
     "loads the interactive hotel consent from a real server-shaped SDK snapshot",
     async () => {
@@ -225,13 +348,21 @@ describe("Backchannel console", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     render(<App />);
-    fireEvent.click(await screen.findByRole("button", { name: "Decline" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Decline" }, { timeout: 5_000 }),
+    );
 
     expect(
-      await screen.findByText(/Decline accepted.*terminal evidence/i),
+      await screen.findByText(
+        /Decline accepted.*terminal evidence/i,
+        undefined,
+        { timeout: 5_000 },
+      ),
     ).toBeVisible();
     expect(screen.queryByRole("heading", { name: "Closed without action" })).not.toBeInTheDocument();
-    await waitFor(() => expect(MockEventSource.instances).toHaveLength(1));
+    await waitFor(() => expect(MockEventSource.instances).toHaveLength(1), {
+      timeout: 5_000,
+    });
     MockEventSource.instances[0]?.emit({
       recoveryId,
       seq: 8,
@@ -242,7 +373,11 @@ describe("Backchannel console", () => {
     });
 
     expect(
-      await screen.findByRole("heading", { name: "Closed without action" }),
+      await screen.findByRole(
+        "heading",
+        { name: "Closed without action" },
+        { timeout: 5_000 },
+      ),
     ).toBeVisible();
     expect(screen.getByText("Provider dispatch did not begin.")).toBeVisible();
     expect(screen.getByText("Human consent requested.")).toBeVisible();
@@ -253,9 +388,11 @@ describe("Backchannel console", () => {
     expect(screen.getByText("Cancellation receipt sealed.")).toBeVisible();
     expect(screen.getByText("executionCount = 0")).toBeVisible();
     expect(screen.getByText(digest)).toBeVisible();
-    expect(sessionStorage.getItem("backchannel.pendingDecision.v1")).toBeNull();
+    await waitFor(() => {
+      expect(sessionStorage.getItem("backchannel.pendingDecision.v1")).toBeNull();
+    }, { timeout: 5_000 });
     expect(sessionStorage.getItem("backchannel.hotelRecovery.v1")).toBe(recoveryId);
-  });
+  }, 20_000);
 
   it("retries the same hidden durable decision claim after reload without creating an orphan", async () => {
     const storedRequest = {
@@ -405,6 +542,11 @@ describe("Backchannel console", () => {
       const alternateButton = screen.getByRole("button", { name: alternateLabel });
       expect(submittingButton).toBeDisabled();
       expect(alternateButton).toBeDisabled();
+      await waitFor(() => {
+        expect(
+          fetchMock.mock.calls.filter(([input]) => String(input).endsWith("/decisions")),
+        ).toHaveLength(1);
+      }, { timeout: 5_000 });
       fireEvent.click(submittingButton);
       fireEvent.click(alternateButton);
       expect(
@@ -434,6 +576,7 @@ describe("Backchannel console", () => {
         JSON.stringify({ recoveryId, request: storedRequest }),
       );
     },
+    15_000,
   );
 
   it("renders outcome unknown truthfully from the authoritative receipt on reload", async () => {

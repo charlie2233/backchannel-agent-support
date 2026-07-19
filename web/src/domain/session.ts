@@ -18,6 +18,13 @@ function hasExactKeys(value: Record<string, unknown>, expected: string[]): boole
   return actual.length === keys.length && actual.every((key, index) => key === keys[index]);
 }
 
+function isRecoveryId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value)
+  );
+}
+
 function isDecisionRequest(value: unknown): value is DecisionRequest {
   return (
     isRecord(value) &&
@@ -40,6 +47,16 @@ function isDecisionRequest(value: unknown): value is DecisionRequest {
   );
 }
 
+function isStoredDecisionClaim(value: unknown): value is StoredDecisionClaim {
+  return (
+    isRecord(value) &&
+    hasExactKeys(value, ["recoveryId", "request"]) &&
+    typeof value.recoveryId === "string" &&
+    value.recoveryId.length > 0 &&
+    isDecisionRequest(value.request)
+  );
+}
+
 function storage(): Storage | null {
   try {
     return typeof sessionStorage === "undefined" ? null : sessionStorage;
@@ -50,8 +67,17 @@ function storage(): Storage | null {
 
 export function readActiveHotelRecovery(): string | null {
   try {
-    const value = storage()?.getItem(ACTIVE_HOTEL_RECOVERY_KEY) ?? null;
-    return value !== null && value.length > 0 ? value : null;
+    const target = storage();
+    const value = target?.getItem(ACTIVE_HOTEL_RECOVERY_KEY) ?? null;
+    if (value === null) {
+      return null;
+    }
+    if (!isRecoveryId(value)) {
+      clearPendingDecisionForRecovery(value);
+      target?.removeItem(ACTIVE_HOTEL_RECOVERY_KEY);
+      return null;
+    }
+    return value;
   } catch {
     return null;
   }
@@ -60,10 +86,26 @@ export function readActiveHotelRecovery(): string | null {
 export function persistActiveHotelRecovery(recoveryId: string): boolean {
   try {
     const target = storage();
-    if (target === null || recoveryId.length === 0) {
+    if (target === null || !isRecoveryId(recoveryId)) {
       return false;
     }
     target.setItem(ACTIVE_HOTEL_RECOVERY_KEY, recoveryId);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function clearActiveHotelRecovery(recoveryId: string): boolean {
+  try {
+    const target = storage();
+    if (
+      target === null ||
+      target.getItem(ACTIVE_HOTEL_RECOVERY_KEY) !== recoveryId
+    ) {
+      return false;
+    }
+    target.removeItem(ACTIVE_HOTEL_RECOVERY_KEY);
     return true;
   } catch {
     return false;
@@ -77,13 +119,7 @@ export function readPendingDecision(): StoredDecisionClaim | null {
       return null;
     }
     const value: unknown = JSON.parse(serialized);
-    if (
-      !isRecord(value) ||
-      !hasExactKeys(value, ["recoveryId", "request"]) ||
-      typeof value.recoveryId !== "string" ||
-      value.recoveryId.length === 0 ||
-      !isDecisionRequest(value.request)
-    ) {
+    if (!isStoredDecisionClaim(value)) {
       return null;
     }
     return { recoveryId: value.recoveryId, request: value.request };
@@ -99,6 +135,24 @@ export function persistPendingDecision(claim: StoredDecisionClaim): boolean {
       return false;
     }
     target.setItem(PENDING_DECISION_KEY, JSON.stringify(claim));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function clearPendingDecisionForRecovery(recoveryId: string): boolean {
+  try {
+    const target = storage();
+    const serialized = target?.getItem(PENDING_DECISION_KEY);
+    if (target === null || serialized === null || serialized === undefined) {
+      return false;
+    }
+    const value: unknown = JSON.parse(serialized);
+    if (!isStoredDecisionClaim(value) || value.recoveryId !== recoveryId) {
+      return false;
+    }
+    target.removeItem(PENDING_DECISION_KEY);
     return true;
   } catch {
     return false;

@@ -25,6 +25,7 @@ def approval_request(pending, decision_id: str) -> ApprovalDecisionRequest:
 
 def test_pending_sdk_approval_resumes_after_every_runtime_object_is_recreated(
     tmp_path,
+    monkeypatch,
 ) -> None:
     database_path = tmp_path / "restart-resume.sqlite3"
     store = SQLiteStore(database_path)
@@ -67,10 +68,23 @@ def test_pending_sdk_approval_resumes_after_every_runtime_object_is_recreated(
         store=reopened_store,
         hotel_provider=fresh_provider,
     )
+    observed_action_digests: list[str | None] = []
+    original_guard = reopened_store.assert_provider_dispatch_authorized
+
+    def capture_action_digest(**kwargs) -> None:
+        observed_action_digests.append(kwargs.get("action_digest"))
+        original_guard(**kwargs)
+
+    monkeypatch.setattr(
+        reopened_store,
+        "assert_provider_dispatch_authorized",
+        capture_action_digest,
+    )
 
     completed = asyncio.run(fresh_orchestrator.approve_decision(recovery_id, request))
 
     assert completed.status == "completed"
+    assert observed_action_digests == [envelope.action_digest]
     assert fresh_provider.dispatch_count == 1
     assert reopened_store.get_recovery(recovery_id).status is RecoveryStatus.COMPLETED
     assert reopened_store.get_receipt(recovery_id).provider_execution is True

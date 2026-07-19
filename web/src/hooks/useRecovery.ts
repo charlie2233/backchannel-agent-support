@@ -3,6 +3,7 @@ import { useEffect, useReducer } from "react";
 import {
   getReceipt as getReceiptFromServer,
   getRecovery as getRecoveryFromServer,
+  HttpStatusError,
 } from "../api/client";
 import {
   connectRecoveryEvents,
@@ -22,7 +23,11 @@ export interface RecoveryState {
   lastSeq: number;
   loading: boolean;
   error: string | null;
+  errorStatus: number | null;
+  errorPhase: RecoveryErrorPhase | null;
 }
+
+export type RecoveryErrorPhase = "initial" | "terminal" | "events";
 
 export const initialRecoveryState: RecoveryState = {
   snapshot: null,
@@ -31,6 +36,8 @@ export const initialRecoveryState: RecoveryState = {
   lastSeq: 0,
   loading: false,
   error: null,
+  errorStatus: null,
+  errorPhase: null,
 };
 
 type RecoveryAction =
@@ -42,7 +49,12 @@ type RecoveryAction =
       receipt: RecoveryReceipt;
     }
   | { type: "eventReceived"; event: RecoveryEvent }
-  | { type: "failed"; message: string }
+  | {
+      type: "failed";
+      message: string;
+      status: number | null;
+      phase: RecoveryErrorPhase;
+    }
   | { type: "reset" };
 
 export function recoveryReducer(
@@ -51,7 +63,13 @@ export function recoveryReducer(
 ): RecoveryState {
   switch (action.type) {
     case "loading":
-      return { ...state, loading: true, error: null };
+      return {
+        ...state,
+        loading: true,
+        error: null,
+        errorStatus: null,
+        errorPhase: null,
+      };
     case "snapshotLoaded":
       return {
         ...state,
@@ -59,6 +77,8 @@ export function recoveryReducer(
         receipt: null,
         loading: false,
         error: null,
+        errorStatus: null,
+        errorPhase: null,
       };
     case "terminalLoaded":
       return {
@@ -67,6 +87,8 @@ export function recoveryReducer(
         receipt: action.receipt,
         loading: false,
         error: null,
+        errorStatus: null,
+        errorPhase: null,
       };
     case "eventReceived": {
       if (state.events.some(({ seq }) => seq === action.event.seq)) {
@@ -79,11 +101,24 @@ export function recoveryReducer(
         ...state,
         events,
         lastSeq: Math.max(state.lastSeq, action.event.seq),
-        error: null,
+        error: state.errorPhase === "initial" ? state.error : null,
+        errorStatus:
+          state.errorPhase === "initial" ? state.errorStatus : null,
+        errorPhase:
+          state.errorPhase === "initial" ? state.errorPhase : null,
       };
     }
     case "failed":
-      return { ...state, loading: false, error: action.message };
+      if (state.errorPhase === "initial" && action.phase !== "initial") {
+        return { ...state, loading: false };
+      }
+      return {
+        ...state,
+        loading: false,
+        error: action.message,
+        errorStatus: action.status,
+        errorPhase: action.phase,
+      };
     case "reset":
       return initialRecoveryState;
   }
@@ -120,6 +155,10 @@ function errorMessage(error: unknown): string {
   return "Recovery could not be loaded";
 }
 
+function errorStatus(error: unknown): number | null {
+  return error instanceof HttpStatusError ? error.status : null;
+}
+
 export function useRecovery(
   recoveryId: string | null,
   options: UseRecoveryOptions = {},
@@ -146,11 +185,16 @@ export function useRecovery(
     let terminalRetryTimer: ReturnType<typeof setTimeout> | null = null;
     dispatch({ type: "reset" });
 
-    const fail = (error: unknown) => {
+    const fail = (error: unknown, phase: RecoveryErrorPhase) => {
       if (disposed || (error instanceof DOMException && error.name === "AbortError")) {
         return;
       }
-      dispatch({ type: "failed", message: errorMessage(error) });
+      dispatch({
+        type: "failed",
+        message: errorMessage(error),
+        status: errorStatus(error),
+        phase,
+      });
     };
 
     const commitTerminal = (
@@ -161,14 +205,17 @@ export function useRecovery(
         return;
       }
       if (!terminalPairIsConsistent(activeRecoveryId, snapshot, receipt)) {
-        fail(new Error("Terminal snapshot and receipt did not describe one recovery outcome"));
+        fail(
+          new Error("Terminal snapshot and receipt did not describe one recovery outcome"),
+          "terminal",
+        );
         return;
       }
       dispatch({ type: "terminalLoaded", snapshot, receipt });
     };
 
     const scheduleTerminalRetry = (error: unknown) => {
-      fail(error);
+      fail(error, "terminal");
       terminalRefreshStarted = false;
       if (disposed || terminalRetryTimer !== null) {
         return;
@@ -204,7 +251,7 @@ export function useRecovery(
         return;
       }
       if (snapshot.recoveryId !== activeRecoveryId) {
-        fail(new Error("Recovery snapshot did not belong to the active recovery"));
+        fail(new Error("Recovery snapshot did not belong to the active recovery"), "initial");
         return;
       }
       if (isTerminalRecoveryStatus(snapshot.status)) {
@@ -220,7 +267,7 @@ export function useRecovery(
       dispatch({ type: "loading" });
       void getRecovery(activeRecoveryId, controller.signal)
         .then(acceptInitialSnapshot)
-        .catch(fail);
+        .catch((error: unknown) => fail(error, "initial"));
     }
 
     const disconnect = connectEvents(activeRecoveryId, {
@@ -233,7 +280,7 @@ export function useRecovery(
           refreshTerminal();
         }
       },
-      onError: fail,
+      onError: (error) => fail(error, "events"),
     });
 
     return () => {

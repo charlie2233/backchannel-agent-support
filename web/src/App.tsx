@@ -7,7 +7,6 @@ import { ProvenanceStrip } from "./components/ProvenanceStrip";
 import { ScenarioRail } from "./components/ScenarioRail";
 import {
   isTerminalRecoveryStatus,
-  type DecisionAction,
   type DecisionRequest,
   type PendingApproval,
   type RecoveryScenario,
@@ -16,7 +15,8 @@ import {
 } from "./domain/recovery";
 import { deriveRuntimePresentation, type HealthStatus } from "./domain/runtime";
 import {
-  clearPendingDecision,
+  clearActiveHotelRecovery,
+  clearPendingDecisionForRecovery,
   persistActiveHotelRecovery,
   readActiveHotelRecovery,
   readPendingDecision,
@@ -61,9 +61,26 @@ function recoveryStateLabel(snapshot: RecoverySnapshot | null, scenario: Recover
 }
 
 interface AutomaticDecisionRetry {
-  action: DecisionAction;
   recoveryId: string;
+  request: DecisionRequest;
   retryKey: string;
+}
+
+function storedAutomaticDecisionRetry(
+  recoveryId: string | null,
+): AutomaticDecisionRetry | null {
+  if (recoveryId === null) {
+    return null;
+  }
+  const stored = readPendingDecision();
+  if (stored === null || stored.recoveryId !== recoveryId) {
+    return null;
+  }
+  return {
+    recoveryId,
+    request: stored.request,
+    retryKey: `${recoveryId}:${JSON.stringify(stored.request)}`,
+  };
 }
 
 export default function App() {
@@ -75,8 +92,11 @@ export default function App() {
   );
   const [createdSnapshot, setCreatedSnapshot] = useState<RecoverySnapshot | null>(null);
   const [automaticDecisionRetry, setAutomaticDecisionRetry] =
-    useState<AutomaticDecisionRetry | null>(null);
+    useState<AutomaticDecisionRetry | null>(() =>
+      storedAutomaticDecisionRetry(hotelRecoveryId),
+    );
   const retriedClaims = useRef(new Set<string>());
+  const replacedRecoveries = useRef(new Set<string>());
 
   const recovery = useRecovery(hotelRecoveryId, {
     initialSnapshot:
@@ -135,6 +155,35 @@ export default function App() {
   }, [hotelRecoveryId]);
 
   useEffect(() => {
+    if (
+      hotelRecoveryId === null ||
+      recovery.errorPhase !== "initial" ||
+      (recovery.errorStatus !== 404 && recovery.errorStatus !== 422) ||
+      replacedRecoveries.current.has(hotelRecoveryId)
+    ) {
+      return;
+    }
+
+    const storedRecoveryId = readActiveHotelRecovery();
+    clearPendingDecisionForRecovery(hotelRecoveryId);
+    setAutomaticDecisionRetry((current) =>
+      current?.recoveryId === hotelRecoveryId ? null : current,
+    );
+    if (storedRecoveryId !== null && storedRecoveryId !== hotelRecoveryId) {
+      setCreatedSnapshot(null);
+      setHotelRecoveryId(storedRecoveryId);
+      return;
+    }
+
+    replacedRecoveries.current.add(hotelRecoveryId);
+    clearActiveHotelRecovery(hotelRecoveryId);
+    setCreatedSnapshot(null);
+    setHotelRecoveryId((current) =>
+      current === hotelRecoveryId ? null : current,
+    );
+  }, [hotelRecoveryId, recovery.errorPhase, recovery.errorStatus]);
+
+  useEffect(() => {
     const snapshot = recovery.snapshot;
     if (
       hotelRecoveryId === null ||
@@ -146,12 +195,18 @@ export default function App() {
     }
     const stored = readPendingDecision();
     if (stored === null || stored.recoveryId !== hotelRecoveryId) {
+      setAutomaticDecisionRetry((current) =>
+        current?.recoveryId === hotelRecoveryId ? null : current,
+      );
       return;
     }
     if (
       snapshot.pendingApproval !== null &&
       !requestMatchesApproval(stored.request, snapshot.pendingApproval)
     ) {
+      setAutomaticDecisionRetry((current) =>
+        current?.recoveryId === hotelRecoveryId ? null : current,
+      );
       return;
     }
     const retryKey = `${hotelRecoveryId}:${JSON.stringify(stored.request)}`;
@@ -161,8 +216,8 @@ export default function App() {
     retriedClaims.current.add(retryKey);
     const controller = new AbortController();
     setAutomaticDecisionRetry({
-      action: stored.request.decision,
       recoveryId: hotelRecoveryId,
+      request: stored.request,
       retryKey,
     });
     void postDecision(hotelRecoveryId, stored.request, controller.signal)
@@ -192,12 +247,23 @@ export default function App() {
       snapshot.status === receipt.status &&
       isTerminalRecoveryStatus(snapshot.status)
     ) {
-      clearPendingDecision();
+      clearPendingDecisionForRecovery(snapshot.recoveryId);
     }
   }, [recovery.receipt, recovery.snapshot]);
 
   const activeSnapshot = activeId === "hotel" ? recovery.snapshot : null;
   const activeReceipt = activeId === "hotel" ? recovery.receipt : null;
+  const automaticSubmittingAction =
+    automaticDecisionRetry !== null &&
+    activeSnapshot?.status === "pending_approval" &&
+    activeSnapshot.pendingApproval !== null &&
+    automaticDecisionRetry.recoveryId === activeSnapshot.recoveryId &&
+    requestMatchesApproval(
+      automaticDecisionRetry.request,
+      activeSnapshot.pendingApproval,
+    )
+      ? automaticDecisionRetry.request.decision
+      : null;
   const activeScenarioView = useMemo<RecoveryScenario>(
     () =>
       activeSnapshot === null
@@ -260,12 +326,7 @@ export default function App() {
           scenario={activeScenarioView}
           snapshot={activeSnapshot}
           receipt={activeReceipt}
-          externalSubmittingAction={
-            automaticDecisionRetry !== null &&
-            automaticDecisionRetry.recoveryId === activeSnapshot?.recoveryId
-              ? automaticDecisionRetry.action
-              : null
-          }
+          externalSubmittingAction={automaticSubmittingAction}
         />
       </div>
     </div>

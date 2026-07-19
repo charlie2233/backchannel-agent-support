@@ -12,6 +12,23 @@ import type {
   ScenarioId,
 } from "../domain/recovery";
 
+export class HttpStatusError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "HttpStatusError";
+    this.status = status;
+  }
+}
+
+function failedRequest(label: string, response: Response): HttpStatusError {
+  return new HttpStatusError(
+    `${label} failed with status ${response.status}`,
+    response.status,
+  );
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -121,7 +138,7 @@ export async function getHealth(signal?: AbortSignal): Promise<HealthStatus> {
   });
 
   if (!response.ok) {
-    throw new Error(`Health request failed with status ${response.status}`);
+    throw failedRequest("Health request", response);
   }
 
   const body: unknown = await response.json();
@@ -192,7 +209,7 @@ export async function getRecovery(
     signal,
   });
   if (!response.ok) {
-    throw new Error(`Recovery request failed with status ${response.status}`);
+    throw failedRequest("Recovery request", response);
   }
   return readRecovery(response);
 }
@@ -212,7 +229,7 @@ export async function createRecovery(
     signal,
   });
   if (!response.ok) {
-    throw new Error(`Recovery creation failed with status ${response.status}`);
+    throw failedRequest("Recovery creation", response);
   }
   return readRecovery(response);
 }
@@ -284,7 +301,7 @@ export async function postDecision(
     },
   );
   if (!response.ok) {
-    throw new Error(`Decision request failed with status ${response.status}`);
+    throw failedRequest("Decision request", response);
   }
   const body: unknown = await response.json();
   if (!isDecisionResponse(body)) {
@@ -400,7 +417,7 @@ export async function getReceipt(
     { headers: { Accept: "application/json" }, signal },
   );
   if (!response.ok) {
-    throw new Error(`Receipt request failed with status ${response.status}`);
+    throw failedRequest("Receipt request", response);
   }
   const body: unknown = await response.json();
   if (!isRecoveryReceipt(body)) {

@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { getReceipt, isRecoverySnapshot, postDecision } from "./client";
+import {
+  getReceipt,
+  getRecovery,
+  HttpStatusError,
+  isRecoverySnapshot,
+  postDecision,
+} from "./client";
 
 const recoveryId = "11111111-2222-4333-8444-555555555555";
 const digest = `sha256:${"a".repeat(64)}` as `sha256:${string}`;
@@ -48,6 +54,24 @@ afterEach(() => {
 });
 
 describe("decision and receipt contracts", () => {
+  it("preserves a non-success recovery HTTP status as typed client evidence", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ detail: "Not found" }), {
+          status: 404,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+
+    const failure = await getRecovery(recoveryId).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(HttpStatusError);
+    expect(failure).toMatchObject({ status: 404 });
+    expect((failure as Error).message).toBe("Recovery request failed with status 404");
+  });
+
   it("posts an explicit decline discriminator and accepts only the decline union", async () => {
     const request = {
       decision: "decline" as const,
