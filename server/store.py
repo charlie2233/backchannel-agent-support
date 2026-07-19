@@ -336,6 +336,7 @@ class SQLiteStore:
             self._migrate_task3_executions(connection)
             self._migrate_task6_approval_decisions(connection)
             self._migrate_task8_usage_ledger(connection)
+            self._migrate_stateless_demo_sessions(connection)
             event_columns = {
                 cast(str, row["name"])
                 for row in connection.execute("PRAGMA table_info(events)").fetchall()
@@ -361,6 +362,12 @@ class SQLiteStore:
                 )
                 """
             )
+
+    @staticmethod
+    def _migrate_stateless_demo_sessions(connection: sqlite3.Connection) -> None:
+        """Clear legacy server-side sessions now replaced by signed cookies."""
+
+        connection.execute("DELETE FROM demo_sessions")
 
     @staticmethod
     def _migrate_task8_usage_ledger(connection: sqlite3.Connection) -> None:

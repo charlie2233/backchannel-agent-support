@@ -35,6 +35,12 @@ if TYPE_CHECKING:
 
 logger = get_safe_logger(__name__)
 
+_SESSION_COOKIE_VERSION = "v1"
+_SESSION_COOKIE_DOMAIN = "backchannel.demo-session-cookie"
+_SESSION_COOKIE_MAX_LENGTH = 160
+_SESSION_NONCE_LENGTH = 43
+_SESSION_SIGNATURE_LENGTH = 64
+
 
 class LiveAdmissionCode(StrEnum):
     LIVE_UNAVAILABLE = "live_unavailable"
@@ -147,6 +153,59 @@ class PublicDemoControls:
             hashlib.sha256,
         ).hexdigest()
 
+    def _session_cookie_signature(self, payload: str) -> str:
+        return hmac.new(
+            self._identity_secret,
+            f"{_SESSION_COOKIE_DOMAIN}:{payload}".encode(),
+            hashlib.sha256,
+        ).hexdigest()
+
+    def _issue_session_cookie(self, current: datetime) -> tuple[str, str]:
+        nonce = secrets.token_urlsafe(32)
+        expires_at = int(current.timestamp()) + self._settings.demo_session_lifetime_seconds
+        payload = f"{_SESSION_COOKIE_VERSION}.{expires_at}.{nonce}"
+        signature = self._session_cookie_signature(payload)
+        return f"{payload}.{signature}", nonce
+
+    def _verified_session_nonce(
+        self,
+        raw_cookie: str,
+        *,
+        current: datetime,
+    ) -> str | None:
+        if not 1 <= len(raw_cookie) <= _SESSION_COOKIE_MAX_LENGTH:
+            return None
+        parts = raw_cookie.split(".")
+        if len(parts) != 4:
+            return None
+        version, expiry_text, nonce, supplied_signature = parts
+        if (
+            version != _SESSION_COOKIE_VERSION
+            or not expiry_text.isascii()
+            or not expiry_text.isdigit()
+            or not 1 <= len(expiry_text) <= 12
+            or len(nonce) != _SESSION_NONCE_LENGTH
+            or not all(
+                (character.isascii() and character.isalnum()) or character in "-_"
+                for character in nonce
+            )
+            or len(supplied_signature) != _SESSION_SIGNATURE_LENGTH
+            or not all(character in "0123456789abcdef" for character in supplied_signature)
+        ):
+            return None
+
+        payload = f"{version}.{expiry_text}.{nonce}"
+        expected_signature = self._session_cookie_signature(payload)
+        if not hmac.compare_digest(supplied_signature, expected_signature):
+            return None
+
+        expires_at = int(expiry_text)
+        now_timestamp = int(current.timestamp())
+        remaining_lifetime = expires_at - now_timestamp
+        if not 0 < remaining_lifetime <= self._settings.demo_session_lifetime_seconds:
+            return None
+        return nonce
+
     def _client_ip(self, request: Request) -> str:
         direct = request.client.host if request.client is not None else "unknown"
         normalized_direct = _normalize_ip(direct) or "unknown"
@@ -184,26 +243,18 @@ class PublicDemoControls:
     ) -> ClientIdentity:
         current = now or datetime.now(UTC)
         raw_cookie = request.cookies.get(self._settings.demo_session_cookie_name)
-        session_key: str | None = None
-        if raw_cookie is not None and 32 <= len(raw_cookie) <= 256:
-            candidate_key = self._correlation_key("session", raw_cookie)
-            if self._store.demo_session_is_active(candidate_key, now=current):
-                session_key = candidate_key
-
         new_session_cookie: str | None = None
-        if session_key is None:
-            new_session_cookie = secrets.token_urlsafe(32)
-            session_key = self._correlation_key("session", new_session_cookie)
-            self._store.create_demo_session(
-                session_key,
-                created_at=current,
-                expires_at=current
-                + timedelta(seconds=self._settings.demo_session_lifetime_seconds),
-            )
+        session_nonce = (
+            self._verified_session_nonce(raw_cookie, current=current)
+            if raw_cookie is not None
+            else None
+        )
+        if session_nonce is None:
+            new_session_cookie, session_nonce = self._issue_session_cookie(current)
 
         return ClientIdentity(
             ip_key=self._correlation_key("ip", self._client_ip(request)),
-            session_key=session_key,
+            session_key=self._correlation_key("session", session_nonce),
             new_session_cookie=new_session_cookie,
         )
 

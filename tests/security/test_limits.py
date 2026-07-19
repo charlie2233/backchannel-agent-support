@@ -90,6 +90,33 @@ class RecordingLiveDecisionOrchestrator:
         )
 
 
+class DemoSessionAccessRecordingStore(SQLiteStore):
+    """Records use of the legacy durable demo-session compatibility API."""
+
+    def __init__(self, database_path) -> None:
+        self.demo_session_reads = 0
+        self.demo_session_writes = 0
+        super().__init__(database_path)
+
+    def create_demo_session(
+        self,
+        session_key: str,
+        *,
+        created_at: datetime,
+        expires_at: datetime,
+    ) -> None:
+        self.demo_session_writes += 1
+        super().create_demo_session(
+            session_key,
+            created_at=created_at,
+            expires_at=expires_at,
+        )
+
+    def demo_session_is_active(self, session_key: str, *, now: datetime) -> bool:
+        self.demo_session_reads += 1
+        return super().demo_session_is_active(session_key, now=now)
+
+
 @pytest.mark.parametrize(
     ("code", "expected_message"),
     [
@@ -706,6 +733,206 @@ def test_trusted_proxy_chain_stops_at_nearest_untrusted_hop(tmp_path) -> None:
     assert response.json()["code"] == "cooldown"
 
 
+def test_cookieless_health_requests_do_not_touch_durable_demo_sessions(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "stateless-health.sqlite3"
+    store = DemoSessionAccessRecordingStore(database_path)
+    app = create_app(RuntimeSettings(live_ready=False), store=store)
+
+    with TestClient(app) as client:
+        for _ in range(32):
+            client.cookies.clear()
+            assert client.get("/health").status_code == 200
+        client.cookies.clear()
+        assert client.get("/api/scenarios").status_code == 200
+        client.cookies.clear()
+        assert client.post(
+            "/api/recoveries",
+            json={"scenarioId": "api-quota", "executionMode": "replay_fixture"},
+        ).status_code == 201
+        client.cookies.clear()
+        assert client.get("/static/missing.js").status_code == 404
+
+    with sqlite3.connect(database_path) as connection:
+        session_rows = connection.execute(
+            "SELECT COUNT(*) FROM demo_sessions"
+        ).fetchone()[0]
+
+    assert session_rows == 0
+    assert store.demo_session_reads == 0
+    assert store.demo_session_writes == 0
+
+
+def test_signed_cookie_reuse_and_invalid_cookie_replacement_are_stateless(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issued_at = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
+
+    class FrozenDateTime(datetime):
+        current = issued_at
+
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return cls.current.replace(tzinfo=None)
+            return cls.current.astimezone(tz)
+
+    monkeypatch.setattr("server.controls.datetime", FrozenDateTime)
+    database_path = tmp_path / "signed-cookie.sqlite3"
+    settings = RuntimeSettings(
+        live_ready=False,
+        deployed_mode=True,
+        deployed_cors_origins=("https://demo.example",),
+        identity_hash_secret="deployment-identity-secret-that-is-long-enough",
+        demo_session_lifetime_seconds=60,
+    )
+    store = DemoSessionAccessRecordingStore(database_path)
+    app = create_app(settings, store=store)
+
+    with TestClient(app, base_url="https://demo.example") as client:
+        first = client.get("/health")
+        original = first.cookies[settings.demo_session_cookie_name]
+        valid = client.get("/health")
+
+        client.cookies.clear()
+        tampered = f"{original[:-1]}{'A' if original[-1] != 'A' else 'B'}"
+        replaced_tampered = client.get(
+            "/health",
+            headers={
+                "Cookie": f"{settings.demo_session_cookie_name}={tampered}",
+            },
+        )
+
+        FrozenDateTime.current = issued_at + timedelta(seconds=61)
+        client.cookies.clear()
+        replaced_expired = client.get(
+            "/health",
+            headers={
+                "Cookie": f"{settings.demo_session_cookie_name}={original}",
+            },
+        )
+
+    tampered_replacement = replaced_tampered.cookies[
+        settings.demo_session_cookie_name
+    ]
+    expired_replacement = replaced_expired.cookies[
+        settings.demo_session_cookie_name
+    ]
+    cookie_header = first.headers["set-cookie"]
+    with sqlite3.connect(database_path) as connection:
+        durable_dump = "\n".join(connection.iterdump())
+
+    assert "set-cookie" not in valid.headers
+    assert tampered_replacement not in {original, tampered}
+    assert expired_replacement != original
+    assert "HttpOnly" in cookie_header
+    assert "SameSite=Lax" in cookie_header
+    assert "Secure" in cookie_header
+    assert "Max-Age=60" in cookie_header
+    assert original not in durable_dump
+    assert tampered not in durable_dump
+    assert tampered_replacement not in durable_dump
+    assert expired_replacement not in durable_dump
+    assert store.demo_session_reads == 0
+    assert store.demo_session_writes == 0
+
+
+def test_stateless_cookie_identity_preserves_live_ip_and_session_cooldowns(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "stateless-cooldowns.sqlite3"
+    settings = RuntimeSettings(
+        live_ready=True,
+        max_concurrent_live_recoveries=5,
+        live_ip_cooldown_seconds=60,
+        live_session_cooldown_seconds=60,
+        daily_demo_budget_units=10,
+    )
+    first_store = DemoSessionAccessRecordingStore(database_path)
+    first_orchestrator = RecordingLiveOrchestrator(first_store, terminal=True)
+    first_app = create_app(
+        settings,
+        store=first_store,
+        orchestrator=first_orchestrator,  # type: ignore[arg-type]
+    )
+
+    with TestClient(first_app, client=("198.51.100.1", 5000)) as first_client:
+        first = _post_live(first_client)
+        session_cookie = first.cookies[settings.demo_session_cookie_name]
+
+    second_store = DemoSessionAccessRecordingStore(database_path)
+    second_orchestrator = RecordingLiveOrchestrator(second_store, terminal=True)
+    second_app = create_app(
+        settings,
+        store=second_store,
+        orchestrator=second_orchestrator,  # type: ignore[arg-type]
+    )
+    with TestClient(second_app, client=("198.51.100.2", 5000)) as session_client:
+        same_session = session_client.post(
+            "/api/recoveries",
+            json={"scenarioId": "hotel", "executionMode": "openai_live"},
+            headers={
+                "Cookie": f"{settings.demo_session_cookie_name}={session_cookie}",
+            },
+        )
+    tampered = f"{session_cookie[:-1]}{'A' if session_cookie[-1] != 'A' else 'B'}"
+    with TestClient(second_app, client=("198.51.100.1", 5001)) as ip_client:
+        same_ip = ip_client.post(
+            "/api/recoveries",
+            json={"scenarioId": "hotel", "executionMode": "openai_live"},
+            headers={
+                "Cookie": f"{settings.demo_session_cookie_name}={tampered}",
+            },
+        )
+
+    assert first.status_code == 201
+    assert same_session.status_code == 429
+    assert same_session.json()["code"] == "cooldown"
+    assert same_ip.status_code == 429
+    assert same_ip.json()["code"] == "cooldown"
+    assert first_store.demo_session_reads == 0
+    assert first_store.demo_session_writes == 0
+    assert second_store.demo_session_reads == 0
+    assert second_store.demo_session_writes == 0
+
+
+def test_store_reopen_clears_legacy_demo_sessions_but_keeps_compatibility_table(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "legacy-demo-sessions.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE demo_sessions (
+                id TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            );
+            INSERT INTO demo_sessions (id, created_at, expires_at)
+            VALUES (
+                'legacy-session-row',
+                '2026-07-18T12:00:00+00:00',
+                '2026-07-20T12:00:00+00:00'
+            );
+            """
+        )
+
+    SQLiteStore(database_path)
+
+    with sqlite3.connect(database_path) as connection:
+        table_exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'demo_sessions'"
+        ).fetchone()
+        session_rows = connection.execute(
+            "SELECT COUNT(*) FROM demo_sessions"
+        ).fetchone()[0]
+
+    assert table_exists is not None
+    assert session_rows == 0
+
+
 def test_opaque_cookie_and_client_addresses_are_not_persisted_raw(tmp_path) -> None:
     database_path = tmp_path / "opaque-identities.sqlite3"
     settings = RuntimeSettings(live_ready=True, max_concurrent_live_recoveries=5)
@@ -715,6 +942,7 @@ def test_opaque_cookie_and_client_addresses_are_not_persisted_raw(tmp_path) -> N
     with TestClient(app, client=(direct_ip, 5000)) as client:
         response = _post_live(client, forwarded_for=forwarded_ip)
         cookie_value = response.cookies[settings.demo_session_cookie_name]
+        cookie_nonce = cookie_value.split(".")[2]
 
     with sqlite3.connect(database_path) as connection:
         durable_dump = "\n".join(connection.iterdump())
@@ -723,6 +951,7 @@ def test_opaque_cookie_and_client_addresses_are_not_persisted_raw(tmp_path) -> N
     assert direct_ip not in durable_dump
     assert forwarded_ip not in durable_dump
     assert cookie_value not in durable_dump
+    assert cookie_nonce not in durable_dump
     assert "HttpOnly" in response.headers["set-cookie"]
     assert "SameSite=Lax" in response.headers["set-cookie"]
 
