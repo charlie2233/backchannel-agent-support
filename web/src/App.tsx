@@ -29,6 +29,18 @@ function serverStatusLabel(status: RecoveryStatus, hasPendingApproval: boolean):
   }
 }
 
+function workspaceLabel(mode: RecoverySnapshot["executionMode"] | undefined): string {
+  switch (mode) {
+    case "openai_live":
+      return "Live agent workspace";
+    case "sdk_stub":
+      return "SDK QA workspace";
+    case "replay_fixture":
+    case undefined:
+      return "Replay workspace";
+  }
+}
+
 function serverLifecycleDetails(
   snapshot: RecoverySnapshot,
 ): RecoveryScenario["lifecycleDetails"] {
@@ -110,9 +122,14 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (health === null) {
+      return;
+    }
     const controller = new AbortController();
+    const executionMode =
+      health.backend === "openai" && health.liveReady ? "openai_live" : "sdk_stub";
 
-    void createRecovery("hotel", "sdk_stub", controller.signal)
+    void createRecovery("hotel", executionMode, controller.signal)
       .then(setHotelSnapshot)
       .catch((error: unknown) => {
         if (error instanceof DOMException && error.name === "AbortError") {
@@ -122,7 +139,7 @@ export default function App() {
       });
 
     return () => controller.abort();
-  }, []);
+  }, [health]);
 
   const activeSnapshot = activeId === "hotel" ? hotelSnapshot : null;
   const activeScenarioView = useMemo<RecoveryScenario>(
@@ -165,7 +182,7 @@ export default function App() {
         <div className="top-context">
           <span>Operational recovery console</span>
           <span className="environment-badge">
-            {activeSnapshot?.executionMode === "sdk_stub" ? "SDK QA workspace" : "Replay workspace"}
+            {workspaceLabel(activeSnapshot?.executionMode)}
           </span>
         </div>
       </header>

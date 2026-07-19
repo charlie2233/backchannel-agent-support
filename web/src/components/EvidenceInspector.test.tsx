@@ -12,6 +12,8 @@ function pendingSnapshot(): RecoverySnapshot {
     recoveryId: "11111111-2222-4333-8444-555555555555",
     scenarioId: "hotel",
     executionMode: "sdk_stub",
+    modelIds: [],
+    rootTraceId: "qa_trace_0123456789abcdef0123456789abcdef",
     status: "pending_approval",
     currentStep: 3,
     currentStepSummary: "Server paused at exact consent.",

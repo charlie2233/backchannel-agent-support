@@ -227,6 +227,8 @@ class RecoverySnapshot(ApiModel):
     recovery_id: str = Field(alias="recoveryId")
     scenario_id: ScenarioId = Field(alias="scenarioId")
     execution_mode: ExecutionMode = Field(alias="executionMode")
+    model_ids: list[str] = Field(alias="modelIds")
+    root_trace_id: str | None = Field(alias="rootTraceId")
     status: RecoveryStatus
     current_step: int = Field(alias="currentStep", ge=0, le=5)
     current_step_summary: str = Field(alias="currentStepSummary")
@@ -235,6 +237,26 @@ class RecoverySnapshot(ApiModel):
     pending_approval: PendingApprovalView | None = Field(
         default=None, alias="pendingApproval"
     )
+
+    @model_validator(mode="after")
+    def enforce_execution_mode_trace_provenance(self) -> Self:
+        if self.execution_mode is ExecutionMode.REPLAY_FIXTURE:
+            if self.model_ids or self.root_trace_id is not None:
+                raise ValueError("Replay snapshots require no model IDs or root trace ID")
+            return self
+        if self.execution_mode is ExecutionMode.SDK_STUB:
+            if self.model_ids or self.root_trace_id is None or not self.root_trace_id.startswith(
+                "qa_trace_"
+            ):
+                raise ValueError("SDK stub snapshots require one QA root and no model IDs")
+            return self
+        if (
+            not self.model_ids
+            or self.root_trace_id is None
+            or not self.root_trace_id.startswith("trace_")
+        ):
+            raise ValueError("OpenAI live snapshots require model IDs and an SDK root trace ID")
+        return self
 
 
 class RecoveryEvent(ApiModel):

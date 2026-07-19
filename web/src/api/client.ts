@@ -133,6 +133,8 @@ export function isRecoverySnapshot(value: unknown): value is RecoverySnapshot {
       "recoveryId",
       "scenarioId",
       "executionMode",
+      "modelIds",
+      "rootTraceId",
       "status",
       "currentStep",
       "currentStepSummary",
@@ -151,6 +153,20 @@ export function isRecoverySnapshot(value: unknown): value is RecoverySnapshot {
     value.status === "outcome_unknown";
   const approvalIsValid =
     value.pendingApproval === null || isPendingApproval(value.pendingApproval);
+  const modeProvenanceIsValid =
+    isStringArray(value.modelIds) &&
+    ((value.executionMode === "replay_fixture" &&
+      value.modelIds.length === 0 &&
+      value.rootTraceId === null) ||
+      (value.executionMode === "sdk_stub" &&
+        value.modelIds.length === 0 &&
+        typeof value.rootTraceId === "string" &&
+        /^qa_trace_[0-9a-f]{32}$/.test(value.rootTraceId)) ||
+      (value.executionMode === "openai_live" &&
+        value.modelIds.length > 0 &&
+        value.modelIds.every((modelId) => modelId.startsWith("gpt-5.6-")) &&
+        typeof value.rootTraceId === "string" &&
+        /^trace_[0-9a-f]{32}$/.test(value.rootTraceId)));
   return (
     typeof value.recoveryId === "string" &&
     (value.scenarioId === "hotel" || value.scenarioId === "api-quota") &&
@@ -164,6 +180,7 @@ export function isRecoverySnapshot(value: unknown): value is RecoverySnapshot {
     typeof value.currentStepSummary === "string" &&
     isUtcTimestamp(value.createdAt) &&
     isUtcTimestamp(value.updatedAt) &&
+    modeProvenanceIsValid &&
     approvalIsValid &&
     (value.status === "pending_approval" || value.pendingApproval === null)
   );

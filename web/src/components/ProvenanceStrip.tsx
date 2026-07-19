@@ -29,6 +29,9 @@ export function ProvenanceStrip({ presentation, healthError }: ProvenanceStripPr
         <strong>{presentation.label}</strong>
         <p>{presentation.explanation}</p>
       </div>
+      {presentation.showGpt56Agents ? (
+        <span className="boundary-label">GPT-5.6 agents</span>
+      ) : null}
       <span className="boundary-label">Demo adapter boundary</span>
     </section>
   );

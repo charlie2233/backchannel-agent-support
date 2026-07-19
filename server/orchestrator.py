@@ -87,11 +87,13 @@ class RecoveryOrchestrator:
         store: SQLiteStore,
         hotel_provider: HotelSimulator,
         version_policy: ApprovalVersionPolicy | None = None,
+        live_ready: bool = False,
     ) -> None:
         self._store = store
         self._hotel_provider = hotel_provider
         self._hotel_provider.bind_store(store)
         self._version_policy = version_policy or ApprovalVersionPolicy.current()
+        self._live_ready = live_ready
         self._reconcile_completed_executions()
         self._reconcile_claimed_decisions()
 
@@ -198,6 +200,12 @@ class RecoveryOrchestrator:
         except ValueError as error:
             raise UnsupportedOrchestrationError("Unknown scenario") from error
         if (
+            execution_mode is ExecutionMode.OPENAI_LIVE and not self._live_ready
+        ):
+            raise UnsupportedOrchestrationError(
+                "openai_live requires a server-side live-ready runtime"
+            )
+        if (
             approved_scenario is not ScenarioId.HOTEL
             or execution_mode is not ExecutionMode.SDK_STUB
         ):
@@ -206,12 +214,15 @@ class RecoveryOrchestrator:
             )
 
         recovery_id = str(uuid4())
+        root_trace_id = new_qa_trace_id()
         self._store.create_recovery(
             recovery_id=recovery_id,
             scenario_id=approved_scenario,
             execution_mode=execution_mode,
             current_step=0,
             current_step_summary="Deterministic Agents SDK recovery started.",
+            model_ids=[],
+            root_trace_id=root_trace_id,
         )
         arguments = deterministic_hotel_arguments()
         action_digest = remedy_action_digest(arguments)
@@ -268,7 +279,7 @@ class RecoveryOrchestrator:
             protocol_version=self._version_policy.protocol_version,
             agent_graph_version=self._version_policy.agent_graph_version,
             definition_digest=hotel_definition_digest(original_root_agent),
-            root_trace_id=new_qa_trace_id(),
+            root_trace_id=root_trace_id,
             execution_mode=execution_mode,
             action_digest=action_digest,
             remedy_id=arguments.remedy.remedy_id,

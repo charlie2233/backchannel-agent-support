@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from threading import RLock
 from typing import Any, Literal, cast
+from uuid import uuid4
 
 from pydantic import JsonValue
 
@@ -51,6 +52,8 @@ CREATE TABLE IF NOT EXISTS recoveries (
     ),
     current_step INTEGER NOT NULL CHECK (current_step BETWEEN 0 AND 5),
     current_step_summary TEXT NOT NULL,
+    model_ids_json TEXT NOT NULL DEFAULT '[]',
+    root_trace_id TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -279,6 +282,7 @@ class SQLiteStore:
             self._migrate_task2_recovery_constraints(connection)
             self._migrate_task4_remedies(connection)
             self._migrate_task3_pending_approvals(connection)
+            self._migrate_task7_recovery_provenance(connection)
             self._migrate_task3_executions(connection)
             self._migrate_task6_approval_decisions(connection)
             event_columns = {
@@ -306,6 +310,44 @@ class SQLiteStore:
                 )
                 """
             )
+
+    @staticmethod
+    def _migrate_task7_recovery_provenance(connection: sqlite3.Connection) -> None:
+        """Add public mode-bound provenance without losing earlier recoveries."""
+
+        columns = {
+            cast(str, row["name"])
+            for row in connection.execute("PRAGMA table_info(recoveries)").fetchall()
+        }
+        if "model_ids_json" not in columns:
+            connection.execute(
+                "ALTER TABLE recoveries ADD COLUMN model_ids_json TEXT NOT NULL DEFAULT '[]'"
+            )
+        if "root_trace_id" not in columns:
+            connection.execute("ALTER TABLE recoveries ADD COLUMN root_trace_id TEXT")
+        connection.execute(
+            """
+            UPDATE recoveries
+            SET root_trace_id = (
+                SELECT pending_approvals.root_trace_id
+                FROM pending_approvals
+                WHERE pending_approvals.recovery_id = recoveries.id
+            )
+            WHERE root_trace_id IS NULL
+              AND execution_mode = 'sdk_stub'
+              AND EXISTS (
+                  SELECT 1 FROM pending_approvals
+                  WHERE pending_approvals.recovery_id = recoveries.id
+              )
+            """
+        )
+        connection.execute(
+            """
+            UPDATE recoveries
+            SET root_trace_id = 'qa_trace_' || lower(hex(randomblob(16)))
+            WHERE root_trace_id IS NULL AND execution_mode = 'sdk_stub'
+            """
+        )
 
     @staticmethod
     def _migrate_task3_pending_approvals(connection: sqlite3.Connection) -> None:
@@ -734,10 +776,17 @@ class SQLiteStore:
         *,
         pending_approval: PendingApprovalView | None = None,
     ) -> RecoverySnapshot:
+        parsed_model_ids = json.loads(cast(str, row["model_ids_json"]))
+        if not isinstance(parsed_model_ids, list) or not all(
+            isinstance(model_id, str) for model_id in parsed_model_ids
+        ):
+            raise ValueError("Recovery model IDs must be a JSON string array")
         return RecoverySnapshot(
             recoveryId=cast(str, row["id"]),
             scenarioId=ScenarioId(cast(str, row["scenario_id"])),
             executionMode=ExecutionMode(cast(str, row["execution_mode"])),
+            modelIds=parsed_model_ids,
+            rootTraceId=cast(str | None, row["root_trace_id"]),
             status=RecoveryStatus(cast(str, row["status"])),
             currentStep=cast(int, row["current_step"]),
             currentStepSummary=cast(str, row["current_step_summary"]),
@@ -1045,7 +1094,19 @@ class SQLiteStore:
         execution_mode: ExecutionMode,
         current_step: int,
         current_step_summary: str,
+        model_ids: list[str] | None = None,
+        root_trace_id: str | None = None,
     ) -> RecoverySnapshot:
+        selected_model_ids = list(model_ids or [])
+        if execution_mode is ExecutionMode.REPLAY_FIXTURE:
+            if selected_model_ids or root_trace_id is not None:
+                raise ValueError("Replay recoveries cannot carry model or trace provenance")
+        elif execution_mode is ExecutionMode.SDK_STUB:
+            if selected_model_ids:
+                raise ValueError("SDK stub recoveries cannot carry model IDs")
+            root_trace_id = root_trace_id or f"qa_trace_{uuid4().hex}"
+        elif not selected_model_ids or root_trace_id is None:
+            raise ValueError("OpenAI live recoveries require model and trace provenance")
         now = self._now()
         created_data = json.dumps(
             {
@@ -1062,8 +1123,9 @@ class SQLiteStore:
                 """
                 INSERT INTO recoveries (
                     id, scenario_id, execution_mode, status, current_step,
-                    current_step_summary, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    current_step_summary, model_ids_json, root_trace_id,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     recovery_id,
@@ -1072,6 +1134,8 @@ class SQLiteStore:
                     RecoveryStatus.IN_PROGRESS.value,
                     current_step,
                     current_step_summary,
+                    json.dumps(selected_model_ids, separators=(",", ":")),
+                    root_trace_id,
                     now.isoformat(),
                     now.isoformat(),
                 ),

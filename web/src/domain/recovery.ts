@@ -59,6 +59,8 @@ export interface RecoverySnapshot {
   recoveryId: string;
   scenarioId: ScenarioId;
   executionMode: ExecutionMode;
+  modelIds: string[];
+  rootTraceId: string | null;
   status: RecoveryStatus;
   currentStep: number;
   currentStepSummary: string;

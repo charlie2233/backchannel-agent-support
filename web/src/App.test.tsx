@@ -34,6 +34,116 @@ function stubHealthWithUnavailableRecovery() {
 }
 
 describe("Backchannel console", () => {
+  it("renders GPT-5.6 agents only for a verified live backend and live snapshot", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: string | URL | Request) => {
+        const url = String(input);
+        if (url === "/health") {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                backend: "openai",
+                liveReady: true,
+                providerBoundary: "demo_adapter_only",
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        if (url === "/api/recoveries") {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                recoveryId: "11111111-2222-4333-8444-555555555555",
+                scenarioId: "hotel",
+                executionMode: "openai_live",
+                modelIds: ["gpt-5.6-luna", "gpt-5.6-terra"],
+                rootTraceId: "trace_0123456789abcdef0123456789abcdef",
+                status: "in_progress",
+                currentStep: 0,
+                currentStepSummary: "Live recovery started.",
+                createdAt: "2026-07-19T12:00:00Z",
+                updatedAt: "2026-07-19T12:00:00Z",
+                pendingApproval: null,
+              }),
+              { status: 201, headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    expect(await screen.findByText("GPT-5.6 agents")).toBeVisible();
+    expect(screen.queryByText(/12 providers reachable/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/91% less context/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/18 min human support/i)).not.toBeInTheDocument();
+  });
+
+  it.each([
+    { backend: "stub", liveReady: true, executionMode: "openai_live" },
+    { backend: "openai", liveReady: false, executionMode: "openai_live" },
+    { backend: "openai", liveReady: true, executionMode: "sdk_stub" },
+  ] as const)(
+    "does not render GPT-5.6 agents for $backend/$liveReady/$executionMode mismatch",
+    async ({ backend, liveReady, executionMode }) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockImplementation((input: string | URL | Request) => {
+          const url = String(input);
+          if (url === "/health") {
+            return Promise.resolve(
+              new Response(
+                JSON.stringify({
+                  backend,
+                  liveReady,
+                  providerBoundary: "demo_adapter_only",
+                }),
+                { status: 200, headers: { "Content-Type": "application/json" } },
+              ),
+            );
+          }
+          if (url === "/api/recoveries") {
+            return Promise.resolve(
+              new Response(
+                JSON.stringify({
+                  recoveryId: "11111111-2222-4333-8444-555555555555",
+                  scenarioId: "hotel",
+                  executionMode,
+                  modelIds:
+                    executionMode === "openai_live"
+                      ? ["gpt-5.6-luna", "gpt-5.6-terra"]
+                      : [],
+                  rootTraceId:
+                    executionMode === "openai_live"
+                      ? "trace_0123456789abcdef0123456789abcdef"
+                      : "qa_trace_0123456789abcdef0123456789abcdef",
+                  status: "in_progress",
+                  currentStep: 0,
+                  currentStepSummary: "Recovery started.",
+                  createdAt: "2026-07-19T12:00:00Z",
+                  updatedAt: "2026-07-19T12:00:00Z",
+                  pendingApproval: null,
+                }),
+                { status: 201, headers: { "Content-Type": "application/json" } },
+              ),
+            );
+          }
+          throw new Error(`Unexpected request: ${url}`);
+        }),
+      );
+
+      render(<App />);
+
+      expect(await screen.findByText(executionMode === "sdk_stub" ? "SDK stub" : "OpenAI live"))
+        .toBeVisible();
+      expect(screen.queryByText("GPT-5.6 agents")).not.toBeInTheDocument();
+    },
+  );
+
   it(
     "loads the interactive hotel consent from a real server-shaped SDK snapshot",
     async () => {
@@ -61,6 +171,8 @@ describe("Backchannel console", () => {
                   recoveryId: "11111111-2222-4333-8444-555555555555",
                   scenarioId: "hotel",
                   executionMode: "sdk_stub",
+                  modelIds: [],
+                  rootTraceId: "qa_trace_0123456789abcdef0123456789abcdef",
                   status: "pending_approval",
                   currentStep: 3,
                   currentStepSummary: "Server pause loaded.",
@@ -200,6 +312,8 @@ describe("Backchannel console", () => {
                 recoveryId: "11111111-2222-4333-8444-555555555555",
                 scenarioId: "hotel",
                 executionMode: "sdk_stub",
+                modelIds: [],
+                rootTraceId: "qa_trace_0123456789abcdef0123456789abcdef",
                 status,
                 currentStep: 5,
                 currentStepSummary: `${label} server evidence sealed.`,

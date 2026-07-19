@@ -51,6 +51,7 @@ def create_app(
         recovery_orchestrator = RecoveryOrchestrator(
             store=recovery_store,
             hotel_provider=provider,
+            live_ready=runtime_settings.live_ready,
         )
     application = FastAPI(title="Backchannel API", version="0.3.0")
     application.state.recovery_store = recovery_store
