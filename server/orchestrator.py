@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 from contextlib import AbstractContextManager
@@ -71,13 +72,17 @@ from server.policy import (
 )
 from server.providers.hotel_simulator import HotelDispatchResult, HotelSimulator
 from server.store import (
+    APPROVED_RECEIPT_AUTHORIZATION,
+    APPROVED_RECEIPT_VERIFICATIONS,
     ApprovalDecisionClaim,
     ApprovalDecisionError,
+    DecisionResumeLease,
     DurableExecution,
     PendingApprovalEnvelope,
     RecoveryNotFoundError,
     RemedyConsentRecord,
     SQLiteStore,
+    non_replay_receipt_boundary,
 )
 
 logger = logging.getLogger(__name__)
@@ -131,6 +136,8 @@ class RecoveryOrchestrator:
         live_ready: bool = False,
         live_model_provider_factory: LiveModelProviderFactory | None = None,
         live_trace_factory: LiveTraceFactory | None = None,
+        decision_lease_duration: timedelta = timedelta(seconds=30),
+        decision_wait_interval: float = 0.02,
     ) -> None:
         self._store = store
         self._hotel_provider = hotel_provider
@@ -142,6 +149,12 @@ class RecoveryOrchestrator:
         self._live_ready = live_ready
         self._live_model_provider_factory = live_model_provider_factory
         self._live_trace_factory = live_trace_factory or self._openai_trace
+        if decision_lease_duration <= timedelta(0):
+            raise ValueError("Decision lease duration must be positive")
+        if decision_wait_interval <= 0:
+            raise ValueError("Decision wait interval must be positive")
+        self._decision_lease_duration = decision_lease_duration
+        self._decision_wait_interval = decision_wait_interval
         self._reconcile_completed_executions()
         self._reconcile_claimed_decisions()
 
@@ -183,20 +196,10 @@ class RecoveryOrchestrator:
             protocolVersion=envelope.protocol_version,
             agentGraphVersion=envelope.agent_graph_version,
             promptToolSchemaHash=envelope.definition_digest,
-            boundary=(
-                "Live OpenAI model orchestration and demo hotel adapter only; "
-                "no real booking or payment change."
-                if envelope.execution_mode is ExecutionMode.OPENAI_LIVE
-                else "Deterministic Agents SDK model and demo hotel adapter only; "
-                "no OpenAI model call, real booking, or payment change."
-            ),
+            boundary=non_replay_receipt_boundary(envelope.execution_mode),
             providerResult=dispatch.provider_result,
-            authorizationSource="Approved Agents SDK commit_remedy interruption.",
-            verificationResults=[
-                "Demo provider dispatch returned confirmed.",
-                "Provider result stored under one idempotency key.",
-                "Temporary permission revoked after terminal completion.",
-            ],
+            authorizationSource=APPROVED_RECEIPT_AUTHORIZATION,
+            verificationResults=list(APPROVED_RECEIPT_VERIFICATIONS),
             decision="approved",
             decisionRemedyDigest=execution.remedy_digest,
             executionCount=1,
@@ -228,11 +231,33 @@ class RecoveryOrchestrator:
     def _reconcile_completed_executions(self) -> None:
         """Finalize committed provider results without calling the provider again."""
 
+        claims = {
+            claim.recovery_id: claim for claim in self._store.list_claimed_decisions()
+        }
         for execution in self._store.list_executions_needing_finalization():
+            claim = claims.get(execution.recovery_id)
+            if claim is None or claim.request.decision != "approve":
+                continue
+            owner_id = f"reconcile-{uuid4()}"
+            lease = self._store.acquire_decision_resume(
+                claim,
+                resume_owner_id=owner_id,
+                lease_duration=self._decision_lease_duration,
+            )
+            if lease.disposition != "owner":
+                continue
             try:
                 self._store.finalize_completed_execution(
                     execution,
                     receipt=self._receipt_for_execution(execution),
+                    resume_owner_id=owner_id,
+                    resume_generation=lease.resume_generation,
+                )
+                self._store.complete_approval_decision(
+                    claim,
+                    self._decision_response(claim),
+                    resume_owner_id=owner_id,
+                    resume_generation=lease.resume_generation,
                 )
             except Exception:
                 logger.exception(
@@ -250,24 +275,43 @@ class RecoveryOrchestrator:
                     pending = self._store.get_pending_approval(claim.recovery_id)
                 except (RecoveryNotFoundError, ValueError):
                     continue
-                if pending.status == "rejected":
-                    self._store.finalize_declined_decision(
-                        claim,
-                        exact_interruption_rejected=True,
-                    )
+                if pending.status != "rejected":
+                    continue
+                execution = None
+            elif claim.request.decision == "approve":
+                execution = self._store.get_completed_execution(claim.recovery_id)
+                if execution is None:
+                    continue
+            else:
                 continue
-            if claim.request.decision != "approve":
+            owner_id = f"reconcile-{uuid4()}"
+            lease = self._store.acquire_decision_resume(
+                claim,
+                resume_owner_id=owner_id,
+                lease_duration=self._decision_lease_duration,
+            )
+            if lease.disposition != "owner":
                 continue
-            execution = self._store.get_completed_execution(claim.recovery_id)
-            if execution is None:
+            if claim.request.decision == "decline":
+                self._store.finalize_declined_decision(
+                    claim,
+                    exact_interruption_rejected=True,
+                    resume_owner_id=owner_id,
+                    resume_generation=lease.resume_generation,
+                )
                 continue
+            assert execution is not None
             self._store.finalize_completed_execution(
                 execution,
                 receipt=self._receipt_for_execution(execution),
+                resume_owner_id=owner_id,
+                resume_generation=lease.resume_generation,
             )
             self._store.complete_approval_decision(
                 claim,
                 self._decision_response(claim),
+                resume_owner_id=owner_id,
+                resume_generation=lease.resume_generation,
             )
 
     @staticmethod
@@ -420,13 +464,6 @@ class RecoveryOrchestrator:
             raise LiveUnavailableError
         recovery_id = str(uuid4())
         root_trace_id = gen_trace_id()
-        self._store.create_recovery(
-            recovery_id=recovery_id,
-            scenario_id=ScenarioId.HOTEL,
-            execution_mode=ExecutionMode.OPENAI_LIVE,
-            current_step=0,
-            current_step_summary="Live OpenAI demo-provider recovery started.",
-        )
         recorder = ResponseMetadataRecorder()
         model_provider = self._live_model_provider_factory(recorder)
         run_config = configure_openai_live_tracing(model_provider=model_provider)
@@ -563,14 +600,13 @@ class RecoveryOrchestrator:
                 ),
                 evidence=arguments,
             )
-            recovery = self._store.record_transition(
-                recovery_id,
-                status=RecoveryStatus.PENDING_APPROVAL,
-                current_step=3,
+            recovery = self._store.create_pending_recovery(
+                recovery_id=recovery_id,
+                scenario_id=ScenarioId.HOTEL,
+                execution_mode=ExecutionMode.OPENAI_LIVE,
                 current_step_summary=(
                     "Approval required before live demo-provider dispatch."
                 ),
-                event_type="approval.requested",
                 event_data={
                     "phase": "Authorize",
                     "providerExecution": False,
@@ -580,11 +616,6 @@ class RecoveryOrchestrator:
                 remedy_consent=remedy_consent,
             )
         except BaseException:
-            if not self._store.delete_unstarted_recovery(recovery_id):
-                logger.error(
-                    "Live start failed after durable boundary recovery_id=%s",
-                    recovery_id,
-                )
             raise
         return PendingSdkApproval(
             recovery=recovery,
@@ -592,18 +623,66 @@ class RecoveryOrchestrator:
             original_root_agent=graph.broker,
         )
 
+    async def _acquire_resume_lease(
+        self,
+        claim: ApprovalDecisionClaim,
+    ) -> DecisionResumeLease:
+        owner_id = f"resume-{uuid4()}"
+        while True:
+            lease = self._store.acquire_decision_resume(
+                claim,
+                resume_owner_id=owner_id,
+                lease_duration=self._decision_lease_duration,
+            )
+            if lease.disposition != "wait":
+                return lease
+            await asyncio.sleep(self._decision_wait_interval)
+
+    async def _heartbeat_resume_lease(
+        self,
+        claim: ApprovalDecisionClaim,
+        *,
+        resume_owner_id: str,
+        resume_generation: int,
+    ) -> None:
+        interval = self._decision_lease_duration.total_seconds() / 3
+        while True:
+            await asyncio.sleep(interval)
+            if not self._store.renew_decision_resume(
+                claim,
+                resume_owner_id=resume_owner_id,
+                resume_generation=resume_generation,
+                lease_duration=self._decision_lease_duration,
+            ):
+                return
+
+    @staticmethod
+    async def _cancel_heartbeat(task: asyncio.Task[None]) -> None:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
     def _complete_committed_claim(
         self,
         claim: ApprovalDecisionClaim,
         execution: DurableExecution,
+        *,
+        resume_owner_id: str,
+        resume_generation: int,
     ) -> ApprovalDecisionResponse:
         self._store.finalize_completed_execution(
             execution,
             receipt=self._receipt_for_execution(execution),
+            resume_owner_id=resume_owner_id,
+            resume_generation=resume_generation,
         )
         return self._store.complete_approval_decision(
             claim,
             self._decision_response(claim),
+            resume_owner_id=resume_owner_id,
+            resume_generation=resume_generation,
         )
 
     async def approve_decision(
@@ -620,40 +699,81 @@ class RecoveryOrchestrator:
             if not isinstance(claim.response, ApprovalDecisionResponse):
                 raise TypeError("Approval request replayed a decline response")
             return claim.response
-        execution = self._store.get_completed_execution(recovery_id)
-        if execution is not None:
-            return self._complete_committed_claim(claim, execution)
+        lease = await self._acquire_resume_lease(claim)
+        if lease.disposition == "replay":
+            if not isinstance(lease.claim.response, ApprovalDecisionResponse):
+                raise TypeError("Approval request replayed a decline response")
+            return lease.claim.response
+        resume_owner_id = lease.resume_owner_id
+        if resume_owner_id is None:
+            raise RuntimeError("Decision owner lease is missing its owner ID")
+        resume_generation = lease.resume_generation
+        heartbeat = asyncio.create_task(
+            self._heartbeat_resume_lease(
+                claim,
+                resume_owner_id=resume_owner_id,
+                resume_generation=resume_generation,
+            )
+        )
         try:
-            completed = await self._resume_claimed_approval(claim)
-        except ApprovalDecisionError:
             execution = self._store.get_completed_execution(recovery_id)
-            if execution is None:
-                raise
-            return self._complete_committed_claim(claim, execution)
-        except UserError as sdk_error:
-            replayed = self._store.claim_decision(recovery_id, request)
-            if replayed.response is not None:
-                if not isinstance(replayed.response, ApprovalDecisionResponse):
-                    raise TypeError("Approval request replayed a decline response")
-                return replayed.response
+            if execution is not None:
+                return self._complete_committed_claim(
+                    claim,
+                    execution,
+                    resume_owner_id=resume_owner_id,
+                    resume_generation=resume_generation,
+                )
             try:
-                self._store.get_receipt(recovery_id)
-            except RecoveryNotFoundError:
-                raise sdk_error
+                completed = await self._resume_claimed_approval(
+                    claim,
+                    resume_owner_id=resume_owner_id,
+                    resume_generation=resume_generation,
+                )
+            except ApprovalDecisionError:
+                execution = self._store.get_completed_execution(recovery_id)
+                if execution is None:
+                    raise
+                return self._complete_committed_claim(
+                    claim,
+                    execution,
+                    resume_owner_id=resume_owner_id,
+                    resume_generation=resume_generation,
+                )
+            except UserError as sdk_error:
+                try:
+                    self._store.get_receipt(recovery_id)
+                except RecoveryNotFoundError:
+                    raise sdk_error
+                execution = self._store.get_completed_execution(recovery_id)
+                if execution is None:
+                    raise
+                return self._complete_committed_claim(
+                    claim,
+                    execution,
+                    resume_owner_id=resume_owner_id,
+                    resume_generation=resume_generation,
+                )
+            if completed is None:
+                raise ApprovalDecisionError(
+                    "resume_owner_lost", recovery_id, status_code=409
+                )
             execution = self._store.get_completed_execution(recovery_id)
             if execution is None:
-                raise
-            return self._complete_committed_claim(claim, execution)
-        if completed is None:
-            replayed = self._store.claim_decision(recovery_id, request)
-            if replayed.response is not None:
-                if not isinstance(replayed.response, ApprovalDecisionResponse):
-                    raise TypeError("Approval request replayed a decline response")
-                return replayed.response
-        execution = self._store.get_completed_execution(recovery_id)
-        if execution is None:
-            raise RuntimeError("Approved SDK run completed without a durable execution")
-        return self._complete_committed_claim(claim, execution)
+                raise RuntimeError("Approved SDK run completed without a durable execution")
+            return self._complete_committed_claim(
+                claim,
+                execution,
+                resume_owner_id=resume_owner_id,
+                resume_generation=resume_generation,
+            )
+        finally:
+            await self._cancel_heartbeat(heartbeat)
+            self._store.release_decision_resume(
+                claim,
+                resume_owner_id=resume_owner_id,
+                resume_generation=resume_generation,
+            )
 
     async def decline_decision(
         self,
@@ -669,17 +789,43 @@ class RecoveryOrchestrator:
             if not isinstance(claim.response, DeclineDecisionResponse):
                 raise TypeError("Decline request replayed an approval response")
             return claim.response
-        pending = self._store.get_pending_approval(recovery_id)
-        if pending.status == "rejected":
+        lease = await self._acquire_resume_lease(claim)
+        if lease.disposition == "replay":
+            if not isinstance(lease.claim.response, DeclineDecisionResponse):
+                raise TypeError("Decline request replayed an approval response")
+            return lease.claim.response
+        resume_owner_id = lease.resume_owner_id
+        if resume_owner_id is None:
+            raise RuntimeError("Decision owner lease is missing its owner ID")
+        resume_generation = lease.resume_generation
+        heartbeat = asyncio.create_task(
+            self._heartbeat_resume_lease(
+                claim,
+                resume_owner_id=resume_owner_id,
+                resume_generation=resume_generation,
+            )
+        )
+        try:
+            pending = self._store.get_pending_approval(recovery_id)
+            if pending.status != "rejected":
+                await self._resume_claimed_decline(
+                    claim,
+                    resume_owner_id=resume_owner_id,
+                    resume_generation=resume_generation,
+                )
             return self._store.finalize_declined_decision(
                 claim,
                 exact_interruption_rejected=True,
+                resume_owner_id=resume_owner_id,
+                resume_generation=resume_generation,
             )
-        await self._resume_claimed_decline(claim)
-        return self._store.finalize_declined_decision(
-            claim,
-            exact_interruption_rejected=True,
-        )
+        finally:
+            await self._cancel_heartbeat(heartbeat)
+            self._store.release_decision_resume(
+                claim,
+                resume_owner_id=resume_owner_id,
+                resume_generation=resume_generation,
+            )
 
     async def decide(
         self,
@@ -695,24 +841,42 @@ class RecoveryOrchestrator:
     async def _resume_claimed_approval(
         self,
         claim: ApprovalDecisionClaim,
+        *,
+        resume_owner_id: str,
+        resume_generation: int,
     ) -> RunResult | None:
         """Restore and approve only after a durable exact-consent claim."""
 
-        return await self._resume_claimed_decision(claim, approve=True)
+        return await self._resume_claimed_decision(
+            claim,
+            approve=True,
+            resume_owner_id=resume_owner_id,
+            resume_generation=resume_generation,
+        )
 
     async def _resume_claimed_decline(
         self,
         claim: ApprovalDecisionClaim,
+        *,
+        resume_owner_id: str,
+        resume_generation: int,
     ) -> RunResult | None:
         """Restore and reject only the exact interruption bound to the claim."""
 
-        return await self._resume_claimed_decision(claim, approve=False)
+        return await self._resume_claimed_decision(
+            claim,
+            approve=False,
+            resume_owner_id=resume_owner_id,
+            resume_generation=resume_generation,
+        )
 
     async def _resume_claimed_decision(
         self,
         claim: ApprovalDecisionClaim,
         *,
         approve: bool,
+        resume_owner_id: str,
+        resume_generation: int,
     ) -> RunResult | None:
         """Restore and consent-bind one exact SDK approval interruption."""
 
@@ -720,6 +884,11 @@ class RecoveryOrchestrator:
         expected_decision = "approve" if approve else "decline"
         if claim.request.decision != expected_decision:
             raise ValueError("Decision claim action does not match resume path")
+        self._store.validate_claimed_decision(
+            claim,
+            resume_owner_id=resume_owner_id,
+            resume_generation=resume_generation,
+        )
         try:
             recovery = self._store.get_recovery(recovery_id)
             envelope = self._store.get_pending_approval(recovery_id)
@@ -738,6 +907,8 @@ class RecoveryOrchestrator:
                 on_record=lambda metadata: self._store.update_pending_model_metadata(
                     recovery_id,
                     metadata,
+                    resume_owner_id=resume_owner_id,
+                    resume_generation=resume_generation,
                 ),
             )
             model_provider = self._live_model_provider_factory(recorder)
@@ -777,6 +948,8 @@ class RecoveryOrchestrator:
             protocol_version=envelope.protocol_version,
             agent_graph_version=envelope.agent_graph_version,
             definition_digest=envelope.definition_digest,
+            resume_owner_id=resume_owner_id,
+            resume_generation=resume_generation,
         )
         if envelope.execution_mode is ExecutionMode.SDK_STUB:
             fresh_agent = build_hotel_agent(
@@ -926,7 +1099,11 @@ class RecoveryOrchestrator:
         if restored_consent_digest != envelope.consent_digest:
             self._raise_incompatible(recovery_id, "restored_consent_digest")
 
-        validated_claim = self._store.validate_claimed_decision(claim)
+        validated_claim = self._store.validate_claimed_decision(
+            claim,
+            resume_owner_id=resume_owner_id,
+            resume_generation=resume_generation,
+        )
         if validated_claim.response is not None:
             return None
         execution_count_before = self._store.count_executions(recovery_id)
@@ -938,29 +1115,22 @@ class RecoveryOrchestrator:
                 always_reject=False,
                 rejection_message=DECLINE_MESSAGE,
             )
-        try:
-            if envelope.execution_mode is ExecutionMode.OPENAI_LIVE:
-                with self._live_trace_factory(
-                    trace_id=envelope.root_trace_id,
-                    group_id=recovery_id,
-                ):
-                    completed = await Runner.run(
-                        fresh_agent,
-                        state,
-                        run_config=run_config,
-                    )
-            else:
+        if envelope.execution_mode is ExecutionMode.OPENAI_LIVE:
+            with self._live_trace_factory(
+                trace_id=envelope.root_trace_id,
+                group_id=recovery_id,
+            ):
                 completed = await Runner.run(
                     fresh_agent,
                     state,
                     run_config=run_config,
                 )
-        finally:
-            if recorder is not None:
-                self._store.update_pending_model_metadata(
-                    recovery_id,
-                    recorder.snapshot(),
-                )
+        else:
+            completed = await Runner.run(
+                fresh_agent,
+                state,
+                run_config=run_config,
+            )
         if not approve:
             if self._store.count_executions(recovery_id) != execution_count_before:
                 raise RuntimeError("SDK rejection unexpectedly changed execution evidence")
@@ -971,7 +1141,11 @@ class RecoveryOrchestrator:
                     raise RuntimeError("Live rejection did not close without action")
             elif completed.final_output != CLOSED_WITHOUT_ACTION_MESSAGE:
                 raise RuntimeError("Deterministic rejection did not close without action")
-            self._store.record_exact_interruption_rejected(claim)
+            self._store.record_exact_interruption_rejected(
+                claim,
+                resume_owner_id=resume_owner_id,
+                resume_generation=resume_generation,
+            )
         elif envelope.execution_mode is ExecutionMode.OPENAI_LIVE:
             if not isinstance(completed.final_output, BrokerOutcome) or (
                 completed.final_output.status != "completed"

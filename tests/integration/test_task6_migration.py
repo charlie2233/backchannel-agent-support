@@ -143,6 +143,7 @@ def _downgrade_to_task5_decisions_and_receipt(database_path) -> None:
                 terminal_row["id"],
             ),
         )
+        connection.execute("DELETE FROM receipt_provenance_migrations")
         connection.commit()
         connection.execute("PRAGMA foreign_keys = ON")
 

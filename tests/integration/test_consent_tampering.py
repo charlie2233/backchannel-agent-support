@@ -252,6 +252,7 @@ def test_task4_pending_rows_are_preserved_but_marked_incompatible(tmp_path) -> N
             "remedy_id",
             "consent_digest",
             "model_metadata_json",
+            "model_metadata_revision",
             "state_json",
             "status",
             "created_at",

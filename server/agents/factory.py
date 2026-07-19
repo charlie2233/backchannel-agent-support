@@ -22,7 +22,13 @@ from server.agents.versioning import (
 )
 from server.models import ExecutionMode, RecoveryReceipt
 from server.providers.hotel_simulator import HotelDispatchRequest, HotelSimulator
-from server.store import SQLiteStore
+from server.store import (
+    APPROVED_RECEIPT_AUTHORIZATION,
+    APPROVED_RECEIPT_VERIFICATIONS,
+    ApprovalDecisionError,
+    SQLiteStore,
+    non_replay_receipt_boundary,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +43,8 @@ class HotelAgentContext:
     protocol_version: str | None = None
     agent_graph_version: str | None = None
     definition_digest: str | None = None
+    resume_owner_id: str | None = None
+    resume_generation: int | None = None
 
 
 def build_commit_remedy_tool() -> FunctionTool:
@@ -57,12 +65,22 @@ def build_commit_remedy_tool() -> FunctionTool:
         remedy_digest = tool_context.context.approved_remedy_digest
         if remedy_digest is None or not remedy_digest.startswith("sha256:"):
             raise ValueError("Exact public consent digest is required before dispatch")
+        resume_owner_id = tool_context.context.resume_owner_id
+        resume_generation = tool_context.context.resume_generation
+        if resume_owner_id is None or resume_generation is None:
+            raise ApprovalDecisionError(
+                "decision_unavailable",
+                tool_context.context.recovery_id,
+                status_code=409,
+            )
         action_digest = broker_remedy_action_digest(remedy)
         tool_context.context.store.assert_provider_dispatch_authorized(
             recovery_id=tool_context.context.recovery_id,
             tool_call_id=tool_context.tool_call_id,
             remedy_digest=remedy_digest,
             action_digest=action_digest,
+            resume_owner_id=resume_owner_id,
+            resume_generation=resume_generation,
         )
         idempotency_key = f"{tool_context.context.recovery_id}:{tool_context.tool_call_id}"
         idempotency_key = f"{idempotency_key}:{remedy_digest}"
@@ -91,17 +109,10 @@ def build_commit_remedy_tool() -> FunctionTool:
                 protocolVersion=tool_context.context.protocol_version,
                 agentGraphVersion=tool_context.context.agent_graph_version,
                 promptToolSchemaHash=tool_context.context.definition_digest,
-                boundary=(
-                    "Deterministic Agents SDK model and demo hotel adapter only; "
-                    "no OpenAI model call, real booking, or payment change."
-                ),
+                boundary=non_replay_receipt_boundary(ExecutionMode.SDK_STUB),
                 providerResult=dispatch.provider_result,
-                authorizationSource="Approved Agents SDK commit_remedy interruption.",
-                verificationResults=[
-                    "Demo provider dispatch returned confirmed.",
-                    "Provider result stored under one idempotency key.",
-                    "Temporary permission revoked after terminal completion.",
-                ],
+                authorizationSource=APPROVED_RECEIPT_AUTHORIZATION,
+                verificationResults=list(APPROVED_RECEIPT_VERIFICATIONS),
                 decision="approved",
                 decisionRemedyDigest=remedy_digest,
                 executionCount=1,
@@ -119,6 +130,8 @@ def build_commit_remedy_tool() -> FunctionTool:
             tool_context.context.store.finalize_completed_execution(
                 execution,
                 receipt=receipt,
+                resume_owner_id=resume_owner_id,
+                resume_generation=resume_generation,
             )
         return dispatch.model_dump_json()
 

@@ -4,10 +4,12 @@ import asyncio
 import json
 import sqlite3
 
+import pytest
+
 from server.models import ApprovalDecisionRequest, ExecutionMode, RecoveryStatus
 from server.orchestrator import RecoveryOrchestrator
 from server.providers.hotel_simulator import HotelSimulator
-from server.store import SQLiteStore
+from server.store import ReceiptTransitionError, SQLiteStore
 
 
 def _approval_request(pending) -> ApprovalDecisionRequest:
@@ -16,6 +18,18 @@ def _approval_request(pending) -> ApprovalDecisionRequest:
     return ApprovalDecisionRequest(
         decision="approve",
         clientDecisionId="task7-migration-completed",
+        remedyId=approval.remedy_id,
+        remedyDigest=approval.remedy_digest,
+        toolCallId=approval.tool_call_id,
+    )
+
+
+def _decline_request(pending, decision_id: str) -> ApprovalDecisionRequest:
+    approval = pending.recovery.pending_approval
+    assert approval is not None
+    return ApprovalDecisionRequest(
+        decision="decline",
+        clientDecisionId=decision_id,
         remedyId=approval.remedy_id,
         remedyDigest=approval.remedy_digest,
         toolCallId=approval.tool_call_id,
@@ -44,6 +58,7 @@ def _downgrade_pending_envelopes_to_task6(database_path) -> None:
                     recovery_id,
                 ),
             )
+        connection.execute("DELETE FROM receipt_provenance_migrations")
         connection.commit()
         connection.execute("PRAGMA foreign_keys = OFF")
         connection.execute("BEGIN IMMEDIATE")
@@ -145,8 +160,278 @@ def test_task6_envelopes_rows_receipts_and_foreign_keys_migrate_without_loss(
             ).fetchall()
         }
         assert "model_metadata_json" in pending_columns
+        assert "model_metadata_revision" in pending_columns
+        assert connection.execute(
+            "SELECT DISTINCT model_metadata_revision FROM pending_approvals"
+        ).fetchall() == [(0,)]
         assert connection.execute("SELECT COUNT(*) FROM recoveries").fetchone() == (2,)
         assert connection.execute("SELECT COUNT(*) FROM pending_approvals").fetchone() == (
             2,
         )
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_current_terminal_receipt_bytes_are_stable_across_reopen(tmp_path) -> None:
+    database_path = tmp_path / "task7-receipt-stable.sqlite3"
+    store = SQLiteStore(database_path)
+    orchestrator = RecoveryOrchestrator(
+        store=store,
+        hotel_provider=HotelSimulator(store=store),
+    )
+    pending = asyncio.run(
+        orchestrator.start("hotel", execution_mode=ExecutionMode.SDK_STUB)
+    )
+    asyncio.run(
+        orchestrator.approve_decision(
+            pending.recovery.recovery_id,
+            _approval_request(pending),
+        )
+    )
+    store.close()
+
+    with sqlite3.connect(database_path) as connection:
+        raw = json.loads(
+            connection.execute("SELECT receipt_json FROM receipts").fetchone()[0]
+        )
+        stable_bytes = json.dumps(raw, indent=2, ensure_ascii=False)
+        connection.execute("UPDATE receipts SET receipt_json = ?", (stable_bytes,))
+
+    reopened = SQLiteStore(database_path)
+    reopened.close()
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("SELECT receipt_json FROM receipts").fetchone()[0] == (
+            stable_bytes
+        )
+
+
+@pytest.mark.parametrize("tamper_mode", ["replace", "remove"])
+def test_current_terminal_receipt_provenance_tampering_is_rejected_on_reopen(
+    tmp_path,
+    tamper_mode: str,
+) -> None:
+    database_path = tmp_path / "task7-receipt-tamper.sqlite3"
+    store = SQLiteStore(database_path)
+    orchestrator = RecoveryOrchestrator(
+        store=store,
+        hotel_provider=HotelSimulator(store=store),
+    )
+    pending = asyncio.run(
+        orchestrator.start("hotel", execution_mode=ExecutionMode.SDK_STUB)
+    )
+    asyncio.run(
+        orchestrator.approve_decision(
+            pending.recovery.recovery_id,
+            _approval_request(pending),
+        )
+    )
+    store.close()
+
+    with sqlite3.connect(database_path) as connection:
+        receipt = json.loads(
+            connection.execute("SELECT receipt_json FROM receipts").fetchone()[0]
+        )
+        if tamper_mode == "replace":
+            receipt["rootTraceId"] = f"qa_trace_{'0' * 32}"
+        else:
+            for key in (
+                "rootTraceId",
+                "sdkVersion",
+                "protocolVersion",
+                "agentGraphVersion",
+                "promptToolSchemaHash",
+            ):
+                receipt.pop(key)
+        connection.execute(
+            "UPDATE receipts SET receipt_json = ?",
+            (json.dumps(receipt, separators=(",", ":"), sort_keys=True),),
+        )
+
+    with pytest.raises(ReceiptTransitionError, match="provenance"):
+        SQLiteStore(database_path)
+
+
+@pytest.mark.parametrize("tamper_mode", ["replace", "remove"])
+def test_current_terminal_receipt_semantics_must_match_durable_completion(
+    tmp_path,
+    tamper_mode: str,
+) -> None:
+    database_path = tmp_path / f"task7-receipt-semantic-{tamper_mode}.sqlite3"
+    store = SQLiteStore(database_path)
+    orchestrator = RecoveryOrchestrator(
+        store=store,
+        hotel_provider=HotelSimulator(store=store),
+    )
+    pending = asyncio.run(
+        orchestrator.start("hotel", execution_mode=ExecutionMode.SDK_STUB)
+    )
+    asyncio.run(
+        orchestrator.approve_decision(
+            pending.recovery.recovery_id,
+            _approval_request(pending),
+        )
+    )
+    store.close()
+
+    with sqlite3.connect(database_path) as connection:
+        receipt = json.loads(
+            connection.execute("SELECT receipt_json FROM receipts").fetchone()[0]
+        )
+        if tamper_mode == "replace":
+            receipt.update(
+                {
+                    "decision": "declined",
+                    "status": RecoveryStatus.OUTCOME_UNKNOWN.value,
+                    "exactInterruptionRejected": True,
+                }
+            )
+            receipt.pop("approvedRemedyDigest")
+        else:
+            receipt.pop("decision")
+        connection.execute(
+            "UPDATE receipts SET receipt_json = ?",
+            (json.dumps(receipt, separators=(",", ":"), sort_keys=True),),
+        )
+
+    with pytest.raises(ReceiptTransitionError, match="evidence"):
+        SQLiteStore(database_path)
+
+
+def test_current_non_replay_receipt_requires_its_pending_envelope(tmp_path) -> None:
+    database_path = tmp_path / "task7-receipt-missing-envelope.sqlite3"
+    store = SQLiteStore(database_path)
+    orchestrator = RecoveryOrchestrator(
+        store=store,
+        hotel_provider=HotelSimulator(store=store),
+    )
+    pending = asyncio.run(
+        orchestrator.start("hotel", execution_mode=ExecutionMode.SDK_STUB)
+    )
+    asyncio.run(
+        orchestrator.approve_decision(
+            pending.recovery.recovery_id,
+            _approval_request(pending),
+        )
+    )
+    store.close()
+
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "DELETE FROM pending_approvals WHERE recovery_id = ?",
+            (pending.recovery.recovery_id,),
+        )
+
+    with pytest.raises(ReceiptTransitionError, match="envelope"):
+        SQLiteStore(database_path)
+
+
+@pytest.mark.parametrize(
+    ("field", "tampered_value"),
+    [
+        ("providerResult", "Tampered approved provider result."),
+        ("boundary", "Tampered approved provider boundary."),
+        ("authorizationSource", "Tampered approved authorization source."),
+        ("verificationResults", ["Tampered approved verification claim."]),
+    ],
+)
+def test_current_approved_receipt_narrative_claims_match_durable_evidence(
+    tmp_path,
+    field: str,
+    tampered_value: str | list[str],
+) -> None:
+    database_path = tmp_path / f"task7-approved-{field}.sqlite3"
+    store = SQLiteStore(database_path)
+    orchestrator = RecoveryOrchestrator(
+        store=store,
+        hotel_provider=HotelSimulator(store=store),
+    )
+    pending = asyncio.run(
+        orchestrator.start("hotel", execution_mode=ExecutionMode.SDK_STUB)
+    )
+    recovery_id = pending.recovery.recovery_id
+    asyncio.run(orchestrator.approve_decision(recovery_id, _approval_request(pending)))
+    store.close()
+
+    with sqlite3.connect(database_path) as connection:
+        receipt = json.loads(
+            connection.execute(
+                "SELECT receipt_json FROM receipts WHERE recovery_id = ?",
+                (recovery_id,),
+            ).fetchone()[0]
+        )
+        receipt[field] = tampered_value
+        connection.execute(
+            "UPDATE receipts SET receipt_json = ? WHERE recovery_id = ?",
+            (
+                json.dumps(receipt, separators=(",", ":"), sort_keys=True),
+                recovery_id,
+            ),
+        )
+
+    with pytest.raises(ReceiptTransitionError, match="evidence"):
+        SQLiteStore(database_path)
+
+
+@pytest.mark.parametrize(
+    ("terminal_kind", "field", "tampered_value"),
+    [
+        ("closed", "providerResult", "Tampered claim: provider action completed."),
+        ("closed", "boundary", "Tampered claim: real provider boundary."),
+        ("closed", "authorizationSource", "Tampered authorization source."),
+        ("closed", "verificationResults", ["Tampered verification claim."]),
+        ("outcome_unknown", "providerResult", "Tampered claim: no dispatch began."),
+        ("outcome_unknown", "verificationResults", ["Tampered cancellation claim."]),
+    ],
+)
+def test_current_decline_receipt_narrative_claims_match_durable_evidence(
+    tmp_path,
+    terminal_kind: str,
+    field: str,
+    tampered_value: str | list[str],
+) -> None:
+    database_path = tmp_path / f"task7-decline-{terminal_kind}-{field}.sqlite3"
+    store = SQLiteStore(database_path)
+    orchestrator = RecoveryOrchestrator(
+        store=store,
+        hotel_provider=HotelSimulator(store=store),
+    )
+    pending = asyncio.run(
+        orchestrator.start("hotel", execution_mode=ExecutionMode.SDK_STUB)
+    )
+    recovery_id = pending.recovery.recovery_id
+    request = _decline_request(pending, f"decline-{terminal_kind}-{field}")
+    if terminal_kind == "outcome_unknown":
+        store.record_completed_execution(
+            execution_id=f"execution-{field}",
+            recovery_id=recovery_id,
+            idempotency_key=f"idempotency-{field}",
+            request_digest="request-digest",
+            tool_call_id=request.tool_call_id,
+            remedy_digest=request.remedy_digest,
+            result_json={
+                "dispatch_id": f"dispatch-{field}",
+                "status": "confirmed",
+                "simulated": True,
+                "provider_result": "Durable dispatch evidence.",
+            },
+        )
+    asyncio.run(orchestrator.decline_decision(recovery_id, request))
+    store.close()
+
+    with sqlite3.connect(database_path) as connection:
+        receipt = json.loads(
+            connection.execute(
+                "SELECT receipt_json FROM receipts WHERE recovery_id = ?",
+                (recovery_id,),
+            ).fetchone()[0]
+        )
+        receipt[field] = tampered_value
+        connection.execute(
+            "UPDATE receipts SET receipt_json = ? WHERE recovery_id = ?",
+            (
+                json.dumps(receipt, separators=(",", ":"), sort_keys=True),
+                recovery_id,
+            ),
+        )
+
+    with pytest.raises(ReceiptTransitionError, match="evidence"):
+        SQLiteStore(database_path)

@@ -57,13 +57,13 @@ npm run smoke:live:3
 The external validation gate is blocked. A candidate credential was passed only to the
 current hardened single-smoke child process on 2026-07-19; the command returned the
 app-owned redacted result `LiveModelRequestError/invalid_api_key`. This row supersedes
-the pre-hardening validation evidence. Per the validation sequence, the three-run
-command was not attempted after the single run failed. This auth failure is not
-replaced with stub evidence.
+all prior hardened blocker evidence. Per the validation sequence, the three-run command
+was not attempted after the single run failed. This auth failure is not replaced with
+stub evidence.
 
 | Run | Result | Elapsed ms | Actual returned model IDs | Tool order | Approvals | Root trace ID | Safe blocker |
 | --- | --- | ---: | --- | --- | ---: | --- | --- |
-| Single | Blocked | 969 | none returned | none | 0 | `trace_efafb54fe3f84ae8865d0d895534668b` | `LiveModelRequestError/invalid_api_key` |
+| Single | Blocked | 913 | none returned | none | 0 | `trace_1e580da416444f4f923c6a7aa6b2947e` | `LiveModelRequestError/invalid_api_key` |
 | Three-run 1 | Not attempted after single-run blocker | - | - | - | - | - | preceding auth blocker |
 | Three-run 2 | Not attempted after single-run blocker | - | - | - | - | - | preceding auth blocker |
 | Three-run 3 | Not attempted after single-run blocker | - | - | - | - | - | preceding auth blocker |

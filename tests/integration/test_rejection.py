@@ -246,7 +246,7 @@ def test_decline_retries_after_crash_between_claim_and_sdk_restore(
     class SimulatedProcessCrash(RuntimeError):
         pass
 
-    async def crash_before_restore(_claim):
+    async def crash_before_restore(_claim, **_kwargs):
         raise SimulatedProcessCrash("crash after durable decline claim")
 
     monkeypatch.setattr(orchestrator, "_resume_claimed_decline", crash_before_restore)

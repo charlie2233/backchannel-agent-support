@@ -1,6 +1,7 @@
 import asyncio
 import json
 import sqlite3
+from datetime import timedelta
 
 import pytest
 
@@ -14,10 +15,13 @@ from server.models import (
 from server.orchestrator import RecoveryOrchestrator
 from server.providers.hotel_simulator import HotelSimulator
 from server.store import (
+    APPROVED_RECEIPT_AUTHORIZATION,
+    APPROVED_RECEIPT_VERIFICATIONS,
     DurableExecution,
     ReceiptTransitionError,
     RecoveryNotFoundError,
     SQLiteStore,
+    non_replay_receipt_boundary,
 )
 
 APPROVED_DIGEST = f"sha256:{'a' * 64}"
@@ -68,7 +72,7 @@ def create_replay_recovery(store: SQLiteStore, recovery_id: str) -> None:
 
 def create_durable_sdk_execution(
     store: SQLiteStore,
-) -> tuple[str, DurableExecution, RecoveryReceipt]:
+) -> tuple[str, DurableExecution, RecoveryReceipt, str, int]:
     provider = HotelSimulator(store=store)
     orchestrator = RecoveryOrchestrator(store=store, hotel_provider=provider)
     pending = asyncio.run(
@@ -77,7 +81,7 @@ def create_durable_sdk_execution(
     recovery_id = pending.recovery.recovery_id
     approval = pending.recovery.pending_approval
     assert approval is not None
-    store.claim_decision(
+    claim = store.claim_decision(
         recovery_id,
         ApprovalDecisionRequest(
             decision="approve",
@@ -86,6 +90,12 @@ def create_durable_sdk_execution(
             remedyDigest=approval.remedy_digest,
             toolCallId=approval.tool_call_id,
         ),
+    )
+    owner_id = f"receipt-finalizer-{recovery_id}"
+    lease = store.acquire_decision_resume(
+        claim,
+        resume_owner_id=owner_id,
+        lease_duration=timedelta(minutes=1),
     )
     provider_result = "Bound demo-provider result."
     execution, dispatched = store.record_completed_execution(
@@ -103,6 +113,7 @@ def create_durable_sdk_execution(
         },
     )
     assert dispatched is True
+    envelope = store.get_pending_approval(recovery_id)
     receipt = RecoveryReceipt(
         recoveryId=recovery_id,
         executionMode=ExecutionMode.SDK_STUB,
@@ -110,10 +121,15 @@ def create_durable_sdk_execution(
         simulated=True,
         providerExecution=True,
         modelIds=[],
-        boundary="Durable evidence test boundary.",
+        rootTraceId=envelope.root_trace_id,
+        sdkVersion=envelope.sdk_version,
+        protocolVersion=envelope.protocol_version,
+        agentGraphVersion=envelope.agent_graph_version,
+        promptToolSchemaHash=envelope.definition_digest,
+        boundary=non_replay_receipt_boundary(ExecutionMode.SDK_STUB),
         providerResult=provider_result,
-        authorizationSource="Exact approval decision.",
-        verificationResults=["Durable provider result verified."],
+        authorizationSource=APPROVED_RECEIPT_AUTHORIZATION,
+        verificationResults=list(APPROVED_RECEIPT_VERIFICATIONS),
         decision="approved",
         decisionRemedyDigest=approval.remedy_digest,
         executionCount=1,
@@ -123,7 +139,7 @@ def create_durable_sdk_execution(
         scopeClosed=True,
         approvedRemedyDigest=approval.remedy_digest,
     )
-    return recovery_id, execution, receipt
+    return recovery_id, execution, receipt, owner_id, lease.resume_generation
 
 
 def assert_transition_was_atomic(
@@ -214,7 +230,9 @@ def test_finalizer_rejects_existing_receipt_with_another_approved_digest(
 ) -> None:
     database_path = tmp_path / "wrong-finalizer-receipt.sqlite3"
     store = SQLiteStore(database_path)
-    recovery_id, execution, expected_receipt = create_durable_sdk_execution(store)
+    recovery_id, execution, expected_receipt, owner_id, generation = (
+        create_durable_sdk_execution(store)
+    )
     wrong_receipt = expected_receipt.model_copy(
         update={"approved_remedy_digest": OTHER_VALID_DIGEST}
     )
@@ -229,7 +247,12 @@ def test_finalizer_rejects_existing_receipt_with_another_approved_digest(
         )
 
     with pytest.raises(ReceiptTransitionError, match="receipt evidence mismatch"):
-        store.finalize_completed_execution(execution, receipt=expected_receipt)
+        store.finalize_completed_execution(
+            execution,
+            receipt=expected_receipt,
+            resume_owner_id=owner_id,
+            resume_generation=generation,
+        )
 
     assert store.get_recovery(recovery_id).status is RecoveryStatus.PENDING_APPROVAL
     with sqlite3.connect(database_path) as connection:
@@ -246,7 +269,9 @@ def test_finalizer_rejects_existing_receipt_with_another_approved_digest(
 def test_finalizer_rejects_terminal_event_with_wrong_type_and_data(tmp_path) -> None:
     database_path = tmp_path / "wrong-finalizer-terminal.sqlite3"
     store = SQLiteStore(database_path)
-    recovery_id, execution, expected_receipt = create_durable_sdk_execution(store)
+    recovery_id, execution, expected_receipt, owner_id, generation = (
+        create_durable_sdk_execution(store)
+    )
     wrong_terminal_data = {
         "phase": "Cancelled",
         "providerExecution": False,
@@ -267,7 +292,12 @@ def test_finalizer_rejects_terminal_event_with_wrong_type_and_data(tmp_path) -> 
         )
 
     with pytest.raises(ReceiptTransitionError, match="terminal evidence mismatch"):
-        store.finalize_completed_execution(execution, receipt=expected_receipt)
+        store.finalize_completed_execution(
+            execution,
+            receipt=expected_receipt,
+            resume_owner_id=owner_id,
+            resume_generation=generation,
+        )
 
     assert store.get_recovery(recovery_id).status is RecoveryStatus.PENDING_APPROVAL
     with pytest.raises(RecoveryNotFoundError, match="Receipt not found"):
@@ -282,10 +312,22 @@ def test_finalizer_replays_matching_receipt_and_terminal_evidence_idempotently(
     tmp_path,
 ) -> None:
     store = SQLiteStore(tmp_path / "matching-finalizer-evidence.sqlite3")
-    recovery_id, execution, expected_receipt = create_durable_sdk_execution(store)
+    recovery_id, execution, expected_receipt, owner_id, generation = (
+        create_durable_sdk_execution(store)
+    )
 
-    assert store.finalize_completed_execution(execution, receipt=expected_receipt) is True
-    assert store.finalize_completed_execution(execution, receipt=expected_receipt) is False
+    assert store.finalize_completed_execution(
+        execution,
+        receipt=expected_receipt,
+        resume_owner_id=owner_id,
+        resume_generation=generation,
+    ) is True
+    assert store.finalize_completed_execution(
+        execution,
+        receipt=expected_receipt,
+        resume_owner_id=owner_id,
+        resume_generation=generation,
+    ) is False
 
     assert store.get_recovery(recovery_id).status is RecoveryStatus.COMPLETED
     assert store.get_receipt(recovery_id) == expected_receipt
@@ -298,3 +340,40 @@ def test_finalizer_replays_matching_receipt_and_terminal_evidence_idempotently(
     assert terminal_events[0].data["approvedRemedyDigest"] == (
         expected_receipt.approved_remedy_digest
     )
+
+
+def test_finalizer_rejects_incomplete_task7_provenance_without_sealing(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "incomplete-finalizer-provenance.sqlite3"
+    store = SQLiteStore(database_path)
+    recovery_id, execution, receipt, owner_id, generation = (
+        create_durable_sdk_execution(store)
+    )
+    incomplete_receipt = receipt.model_copy(
+        update={
+            "root_trace_id": None,
+            "sdk_version": None,
+            "protocol_version": None,
+            "agent_graph_version": None,
+            "prompt_tool_schema_hash": None,
+        }
+    )
+
+    with pytest.raises(ReceiptTransitionError, match="provenance"):
+        store.finalize_completed_execution(
+            execution,
+            receipt=incomplete_receipt,
+            resume_owner_id=owner_id,
+            resume_generation=generation,
+        )
+
+    assert store.get_recovery(recovery_id).status is RecoveryStatus.PENDING_APPROVAL
+    with pytest.raises(RecoveryNotFoundError, match="Receipt not found"):
+        store.get_receipt(recovery_id)
+    assert not any(event.terminal for event in store.list_events(recovery_id))
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM receipt_provenance_migrations WHERE recovery_id = ?",
+            (recovery_id,),
+        ).fetchone() == (0,)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from datetime import timedelta
 
 import pytest
 from agents.exceptions import UserError
@@ -9,7 +10,14 @@ from agents.exceptions import UserError
 from server.models import ApprovalDecisionRequest, ExecutionMode, RecoveryReceipt
 from server.orchestrator import RecoveryOrchestrator
 from server.providers.hotel_simulator import HotelSimulator
-from server.store import ApprovalDecisionError, RecoveryNotFoundError, SQLiteStore
+from server.store import (
+    APPROVED_RECEIPT_AUTHORIZATION,
+    APPROVED_RECEIPT_VERIFICATIONS,
+    ApprovalDecisionError,
+    RecoveryNotFoundError,
+    SQLiteStore,
+    non_replay_receipt_boundary,
+)
 
 
 def _start_and_claim_approval(store: SQLiteStore):
@@ -27,14 +35,20 @@ def _start_and_claim_approval(store: SQLiteStore):
         remedyDigest=approval.remedy_digest,
         toolCallId=approval.tool_call_id,
     )
-    store.claim_decision(pending.recovery.recovery_id, request)
-    return pending.recovery.recovery_id, request
+    claim = store.claim_decision(pending.recovery.recovery_id, request)
+    owner_id = f"test-owner-{pending.recovery.recovery_id}"
+    lease = store.acquire_decision_resume(
+        claim,
+        resume_owner_id=owner_id,
+        lease_duration=timedelta(minutes=1),
+    )
+    return pending.recovery.recovery_id, request, owner_id, lease.resume_generation
 
 
 def test_provider_guard_requires_the_exact_active_permission_scope(tmp_path) -> None:
     database_path = tmp_path / "provider-active-scope.sqlite3"
     store = SQLiteStore(database_path)
-    recovery_id, request = _start_and_claim_approval(store)
+    recovery_id, request, owner_id, generation = _start_and_claim_approval(store)
     assert store.get_permission_scope(recovery_id).status == "active"
     with sqlite3.connect(database_path) as connection:
         connection.execute(
@@ -49,6 +63,8 @@ def test_provider_guard_requires_the_exact_active_permission_scope(tmp_path) -> 
             tool_call_id=request.tool_call_id,
             remedy_digest=request.remedy_digest,
             action_digest=store.get_pending_approval(recovery_id).action_digest,
+            resume_owner_id=owner_id,
+            resume_generation=generation,
         )
 
     assert store.count_executions(recovery_id) == 0
@@ -121,11 +137,13 @@ def test_provider_guard_rejects_action_digest_tampered_after_claim_validation(
     )
     original_validate = store.validate_claimed_decision
     tampered = False
+    validation_count = 0
 
-    def validate_then_tamper(claim):
-        nonlocal tampered
-        validated = original_validate(claim)
-        if not tampered:
+    def validate_then_tamper(claim, **kwargs):
+        nonlocal tampered, validation_count
+        validated = original_validate(claim, **kwargs)
+        validation_count += 1
+        if validation_count == 2 and not tampered:
             with sqlite3.connect(database_path) as connection:
                 connection.execute(
                     f"UPDATE {tampered_table} SET action_digest = ? "
@@ -147,7 +165,7 @@ def test_provider_guard_rejects_action_digest_tampered_after_claim_validation(
 def test_approved_receipt_and_scope_revocation_commit_atomically(tmp_path) -> None:
     database_path = tmp_path / "approved-scope-atomic.sqlite3"
     store = SQLiteStore(database_path)
-    recovery_id, request = _start_and_claim_approval(store)
+    recovery_id, request, owner_id, generation = _start_and_claim_approval(store)
     provider_result = "Durable provider evidence for scope atomicity."
     execution, _dispatched = store.record_completed_execution(
         execution_id="execution-scope-atomic",
@@ -163,6 +181,7 @@ def test_approved_receipt_and_scope_revocation_commit_atomically(tmp_path) -> No
             "provider_result": provider_result,
         },
     )
+    envelope = store.get_pending_approval(recovery_id)
     receipt = RecoveryReceipt(
         recoveryId=recovery_id,
         executionMode=ExecutionMode.SDK_STUB,
@@ -170,13 +189,15 @@ def test_approved_receipt_and_scope_revocation_commit_atomically(tmp_path) -> No
         simulated=True,
         providerExecution=True,
         modelIds=[],
-        boundary="Deterministic test adapter only.",
+        rootTraceId=envelope.root_trace_id,
+        sdkVersion=envelope.sdk_version,
+        protocolVersion=envelope.protocol_version,
+        agentGraphVersion=envelope.agent_graph_version,
+        promptToolSchemaHash=envelope.definition_digest,
+        boundary=non_replay_receipt_boundary(ExecutionMode.SDK_STUB),
         providerResult=provider_result,
-        authorizationSource="Exact durable approval decision.",
-        verificationResults=[
-            "Provider result stored.",
-            "Temporary permission revoked after terminal completion.",
-        ],
+        authorizationSource=APPROVED_RECEIPT_AUTHORIZATION,
+        verificationResults=list(APPROVED_RECEIPT_VERIFICATIONS),
         decision="approved",
         decisionRemedyDigest=request.remedy_digest,
         executionCount=1,
@@ -198,7 +219,12 @@ def test_approved_receipt_and_scope_revocation_commit_atomically(tmp_path) -> No
         )
 
     with pytest.raises(sqlite3.IntegrityError, match="receipt write blocked"):
-        store.finalize_completed_execution(execution, receipt=receipt)
+        store.finalize_completed_execution(
+            execution,
+            receipt=receipt,
+            resume_owner_id=owner_id,
+            resume_generation=generation,
+        )
 
     assert store.get_permission_scope(recovery_id).status == "active"
     with pytest.raises(RecoveryNotFoundError):
@@ -207,7 +233,12 @@ def test_approved_receipt_and_scope_revocation_commit_atomically(tmp_path) -> No
 
     with sqlite3.connect(database_path) as connection:
         connection.execute("DROP TRIGGER reject_scope_receipt")
-    assert store.finalize_completed_execution(execution, receipt=receipt) is True
+    assert store.finalize_completed_execution(
+        execution,
+        receipt=receipt,
+        resume_owner_id=owner_id,
+        resume_generation=generation,
+    ) is True
     scope = store.get_permission_scope(recovery_id)
     assert scope.status == "revoked"
     assert scope.revoked_at is not None
