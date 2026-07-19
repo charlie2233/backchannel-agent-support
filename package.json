@@ -8,6 +8,8 @@
   "scripts": {
     "build": "npm --workspace web run build",
     "check": "npm --workspace web run check && uv run ruff check server tests && uv run mypy server && uv run pytest -q",
+    "smoke:live": "uv run python scripts/smoke_live.py",
+    "smoke:live:3": "uv run python scripts/smoke_live_three.py",
     "smoke:stub": "node scripts/smoke-stub.mjs",
     "test": "npm --workspace web test -- --run"
   },
