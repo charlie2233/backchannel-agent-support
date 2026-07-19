@@ -7,6 +7,7 @@ import { ProvenanceStrip } from "./components/ProvenanceStrip";
 import { ScenarioRail } from "./components/ScenarioRail";
 import {
   isTerminalRecoveryStatus,
+  type DecisionAction,
   type DecisionRequest,
   type PendingApproval,
   type RecoveryScenario,
@@ -59,6 +60,12 @@ function recoveryStateLabel(snapshot: RecoverySnapshot | null, scenario: Recover
   return snapshot.pendingApproval === null ? "Decision in progress" : "Awaiting approval";
 }
 
+interface AutomaticDecisionRetry {
+  action: DecisionAction;
+  recoveryId: string;
+  retryKey: string;
+}
+
 export default function App() {
   const [activeId, setActiveId] = useState<ScenarioId>("hotel");
   const [health, setHealth] = useState<HealthStatus | null>(null);
@@ -67,6 +74,8 @@ export default function App() {
     readActiveHotelRecovery(),
   );
   const [createdSnapshot, setCreatedSnapshot] = useState<RecoverySnapshot | null>(null);
+  const [automaticDecisionRetry, setAutomaticDecisionRetry] =
+    useState<AutomaticDecisionRetry | null>(null);
   const retriedClaims = useRef(new Set<string>());
 
   const recovery = useRecovery(hotelRecoveryId, {
@@ -150,9 +159,27 @@ export default function App() {
       return;
     }
     retriedClaims.current.add(retryKey);
-    void postDecision(hotelRecoveryId, stored.request).catch(() => {
-      // Preserve the exact claim for a same-ID retry on the next reload.
+    const controller = new AbortController();
+    setAutomaticDecisionRetry({
+      action: stored.request.decision,
+      recoveryId: hotelRecoveryId,
+      retryKey,
     });
+    void postDecision(hotelRecoveryId, stored.request, controller.signal)
+      .catch(() => {
+        // Preserve the exact claim for a same-ID retry on the next reload.
+      })
+      .finally(() => {
+        setAutomaticDecisionRetry((current) =>
+          current?.retryKey === retryKey ? null : current,
+        );
+      });
+    return () => {
+      controller.abort();
+      setAutomaticDecisionRetry((current) =>
+        current?.retryKey === retryKey ? null : current,
+      );
+    };
   }, [hotelRecoveryId, recovery.snapshot]);
 
   useEffect(() => {
@@ -233,6 +260,12 @@ export default function App() {
           scenario={activeScenarioView}
           snapshot={activeSnapshot}
           receipt={activeReceipt}
+          externalSubmittingAction={
+            automaticDecisionRetry !== null &&
+            automaticDecisionRetry.recoveryId === activeSnapshot?.recoveryId
+              ? automaticDecisionRetry.action
+              : null
+          }
         />
       </div>
     </div>

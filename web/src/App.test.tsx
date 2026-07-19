@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "./App";
@@ -321,6 +321,120 @@ describe("Backchannel console", () => {
     expect(decisionBodies).toEqual([storedRequest, storedRequest]);
     expect(sessionStorage.getItem("backchannel.pendingDecision.v1")).not.toBeNull();
   });
+
+  it.each([
+    {
+      action: "approve" as const,
+      submittingLabel: "Approving…",
+      originalLabel: "Approve remedy",
+      alternateLabel: "Decline",
+    },
+    {
+      action: "decline" as const,
+      submittingLabel: "Declining…",
+      originalLabel: "Decline",
+      alternateLabel: "Approve remedy",
+    },
+  ])(
+    "locks both actions while automatically retrying a stored $action with the same ID",
+    async ({ action, submittingLabel, originalLabel, alternateLabel }) => {
+      const storedRequest = {
+        decision: action,
+        clientDecisionId: `decision-${action}-reload-visible`,
+        remedyId: "server-remedy",
+        remedyDigest: digest,
+        toolCallId: "server-call",
+      };
+      sessionStorage.setItem("backchannel.hotelRecovery.v1", recoveryId);
+      sessionStorage.setItem(
+        "backchannel.pendingDecision.v1",
+        JSON.stringify({ recoveryId, request: storedRequest }),
+      );
+      let rejectAutomaticRetry: (reason?: unknown) => void = () => undefined;
+      const unresolvedAutomaticRetry = new Promise<Response>((_resolve, reject) => {
+        rejectAutomaticRetry = reject;
+      });
+      let decisionCalls = 0;
+      const fetchMock = vi.fn().mockImplementation(
+        (input: string | URL | Request, init?: RequestInit) => {
+          const url = String(input);
+          if (url === "/health") {
+            return Promise.resolve(healthResponse());
+          }
+          if (url === `/api/recoveries/${recoveryId}`) {
+            return Promise.resolve(jsonResponse(pendingSnapshot()));
+          }
+          if (url.endsWith("/decisions")) {
+            expect(JSON.parse(String(init?.body))).toEqual(storedRequest);
+            decisionCalls += 1;
+            if (decisionCalls === 1) {
+              return unresolvedAutomaticRetry;
+            }
+            return Promise.resolve(
+              jsonResponse(
+                action === "approve"
+                  ? {
+                      clientDecisionId: storedRequest.clientDecisionId,
+                      recoveryId,
+                      decision: "approve",
+                      status: "completed",
+                      approvedRemedyDigest: digest,
+                      executionStarted: true,
+                    }
+                  : {
+                      clientDecisionId: storedRequest.clientDecisionId,
+                      recoveryId,
+                      decision: "decline",
+                      status: "closed_without_action",
+                      decisionRemedyDigest: digest,
+                      executionStarted: false,
+                    },
+              ),
+            );
+          }
+          throw new Error(`Unexpected request: ${url}`);
+        },
+      );
+      vi.stubGlobal("fetch", fetchMock);
+
+      render(<App />);
+
+      const submittingButton = await screen.findByRole("button", {
+        name: submittingLabel,
+      });
+      const alternateButton = screen.getByRole("button", { name: alternateLabel });
+      expect(submittingButton).toBeDisabled();
+      expect(alternateButton).toBeDisabled();
+      fireEvent.click(submittingButton);
+      fireEvent.click(alternateButton);
+      expect(
+        fetchMock.mock.calls.filter(([input]) => String(input).endsWith("/decisions")),
+      ).toHaveLength(1);
+
+      await act(async () => {
+        rejectAutomaticRetry(new Error("Transient automatic retry failure"));
+        await Promise.resolve();
+      });
+
+      const retryButton = await screen.findByRole("button", { name: originalLabel });
+      await waitFor(() => expect(retryButton).toBeEnabled());
+      expect(screen.getByRole("button", { name: alternateLabel })).toBeDisabled();
+      fireEvent.click(retryButton);
+
+      await waitFor(() => {
+        expect(
+          fetchMock.mock.calls.filter(([input]) => String(input).endsWith("/decisions")),
+        ).toHaveLength(2);
+      });
+      const bodies = fetchMock.mock.calls
+        .filter(([input]) => String(input).endsWith("/decisions"))
+        .map(([, init]) => JSON.parse(String((init as RequestInit).body)));
+      expect(bodies).toEqual([storedRequest, storedRequest]);
+      expect(sessionStorage.getItem("backchannel.pendingDecision.v1")).toBe(
+        JSON.stringify({ recoveryId, request: storedRequest }),
+      );
+    },
+  );
 
   it("renders outcome unknown truthfully from the authoritative receipt on reload", async () => {
     sessionStorage.setItem("backchannel.hotelRecovery.v1", recoveryId);

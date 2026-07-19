@@ -19,6 +19,7 @@ interface EvidenceInspectorProps {
   scenario: RecoveryScenario;
   snapshot?: RecoverySnapshot | null;
   receipt?: RecoveryReceipt | null;
+  externalSubmittingAction?: DecisionAction | null;
   onDecisionAccepted?: (response: DecisionResponse) => void;
   clientDecisionIdFactory?: (action: DecisionAction) => string;
 }
@@ -187,6 +188,7 @@ export function EvidenceInspector({
   scenario,
   snapshot = null,
   receipt = null,
+  externalSubmittingAction = null,
   onDecisionAccepted,
   clientDecisionIdFactory = defaultDecisionId,
 }: EvidenceInspectorProps) {
@@ -238,6 +240,8 @@ export function EvidenceInspector({
 
   if (snapshot !== null && approval !== null) {
     const terms = approval.terms;
+    const effectiveSubmittingAction =
+      externalSubmittingAction ?? submittingAction;
 
     const copyDigest = async () => {
       setError(null);
@@ -251,7 +255,7 @@ export function EvidenceInspector({
 
     const submitDecision = async (action: DecisionAction) => {
       if (
-        submittingAction !== null ||
+        effectiveSubmittingAction !== null ||
         acceptedAction !== null ||
         (lockedAction !== null && lockedAction !== action)
       ) {
@@ -307,7 +311,7 @@ export function EvidenceInspector({
       }
     };
 
-    const actionsDisabled = submittingAction !== null || acceptedAction !== null;
+    const actionsDisabled = effectiveSubmittingAction !== null || acceptedAction !== null;
     return (
       <aside className="evidence-inspector" aria-labelledby="approval-heading">
         <div className="inspector-heading">
@@ -410,7 +414,7 @@ export function EvidenceInspector({
             disabled={actionsDisabled || (lockedAction !== null && lockedAction !== "decline")}
             onClick={() => void submitDecision("decline")}
           >
-            {submittingAction === "decline" ? "Declining…" : "Decline"}
+            {effectiveSubmittingAction === "decline" ? "Declining…" : "Decline"}
           </button>
           <button
             className="consent-action consent-action--approve"
@@ -418,7 +422,7 @@ export function EvidenceInspector({
             disabled={actionsDisabled || (lockedAction !== null && lockedAction !== "approve")}
             onClick={() => void submitDecision("approve")}
           >
-            {submittingAction === "approve" ? "Approving…" : "Approve remedy"}
+            {effectiveSubmittingAction === "approve" ? "Approving…" : "Approve remedy"}
           </button>
         </div>
       </aside>
