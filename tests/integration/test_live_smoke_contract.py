@@ -91,11 +91,17 @@ def test_three_run_child_rejects_status_exit_mismatch(
     payload = {
         "approvalCount": 1 if status == "passed" else 0,
         "elapsedMs": 1,
-        "errorClass": None if status == "passed" else "RedactedError",
-        "modelIds": [],
-        "orderedToolNames": [],
+        "errorClass": None if status == "passed" else "RuntimeError",
+        "modelIds": (
+            ["gpt-5.6-luna", "gpt-5.6-terra"] if status == "passed" else []
+        ),
+        "orderedToolNames": ["commit_remedy"] if status == "passed" else [],
         "status": status,
-        "traceId": None,
+        "traceId": (
+            "trace_0123456789abcdef0123456789abcdef"
+            if status == "passed"
+            else None
+        ),
     }
     monkeypatch.setattr(
         smoke_live_three.subprocess,
@@ -164,7 +170,7 @@ def test_three_run_child_rejects_malformed_record(monkeypatch) -> None:
         {
             "approvalCount": 0,
             "elapsedMs": 1,
-            "errorClass": "secret/path prompt\ntraceback",
+            "errorClass": "PromptSecretAbc123",
             "modelIds": [],
             "orderedToolNames": [],
             "status": "blocked",
@@ -217,6 +223,68 @@ def test_three_run_child_accepts_only_complete_live_pass_evidence(monkeypatch) -
     assert smoke_live_three._run_child(
         ROOT / "scripts" / "smoke_live.py"
     ) == payload
+
+
+def test_three_run_main_rejects_duplicate_pass_trace_ids(monkeypatch, capsys) -> None:
+    passed = {
+        "approvalCount": 1,
+        "elapsedMs": 1,
+        "errorClass": None,
+        "modelIds": ["gpt-5.6-luna", "gpt-5.6-terra"],
+        "orderedToolNames": ["commit_remedy"],
+        "status": "passed",
+        "traceId": "trace_0123456789abcdef0123456789abcdef",
+    }
+    monkeypatch.setattr(smoke_live_three, "_run_child", lambda _script: passed.copy())
+
+    exit_code = smoke_live_three.main()
+
+    assert exit_code == 1
+    records = _parse_records(capsys.readouterr().out)
+    assert len(records) == 3
+    assert all(record["status"] == "failed" for record in records)
+    assert all(record["errorClass"] == "DuplicateLiveTraceId" for record in records)
+    assert all(record["traceId"] is None for record in records)
+
+
+def test_three_run_main_accepts_three_distinct_complete_live_proofs(
+    monkeypatch,
+    capsys,
+) -> None:
+    results = [
+        {
+            "approvalCount": 1,
+            "elapsedMs": 1,
+            "errorClass": None,
+            "modelIds": ["gpt-5.6-luna", "gpt-5.6-terra"],
+            "orderedToolNames": ["commit_remedy"],
+            "status": "passed",
+            "traceId": f"trace_{index:032x}",
+        }
+        for index in range(1, 4)
+    ]
+    calls = 0
+
+    def fake_child(_script: Path) -> dict[str, Any]:
+        nonlocal calls
+        result = results[calls]
+        calls += 1
+        return result
+
+    monkeypatch.setattr(smoke_live_three, "_run_child", fake_child)
+
+    exit_code = smoke_live_three.main()
+
+    assert exit_code == 0
+    assert calls == 3
+    assert _parse_records(capsys.readouterr().out) == results
+
+
+def test_three_run_failed_child_normalizes_unknown_error_class() -> None:
+    result = smoke_live_three._failed_child("PromptSecretAbc123")
+
+    assert result["errorClass"] == "LiveSmokeChildProtocolError"
+    assert "PromptSecretAbc123" not in json.dumps(result)
 
 
 def test_three_run_main_preserves_three_redacted_records_and_failed_exit(

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import subprocess
 import sys
 from pathlib import Path
@@ -24,10 +23,58 @@ RESULT_KEYS = {
 STATUS_EXIT_CODES = {"passed": 0, "failed": 1, "blocked": 2}
 LIVE_MODEL_IDS = ["gpt-5.6-luna", "gpt-5.6-terra"]
 LIVE_TOOL_NAMES = ["commit_remedy"]
-SAFE_ERROR_CLASS = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,127}\Z")
+PROTOCOL_ERROR_CLASS = "LiveSmokeChildProtocolError"
+SAFE_ERROR_CLASSES = frozenset(
+    {
+        # Deliberate live-smoke outcomes.
+        "MissingOpenAIAPIKey",
+        "AssertionError",
+        "KeyError",
+        "OSError",
+        "RuntimeError",
+        "TimeoutError",
+        "TypeError",
+        "ValidationError",
+        "ValueError",
+        # OpenAI Python client errors that may block the external gate.
+        "APIConnectionError",
+        "APIError",
+        "APIResponseValidationError",
+        "APIStatusError",
+        "APITimeoutError",
+        "AuthenticationError",
+        "BadRequestError",
+        "ConflictError",
+        "ContentFilterFinishReasonError",
+        "InternalServerError",
+        "LengthFinishReasonError",
+        "NotFoundError",
+        "OAuthError",
+        "OpenAIError",
+        "PermissionDeniedError",
+        "RateLimitError",
+        "UnprocessableEntityError",
+        "WebSocketConnectionClosedError",
+        "WebSocketQueueFullError",
+        # Agents SDK errors that may fail the local orchestration contract.
+        "MCPToolCancellationError",
+        "MaxTurnsExceeded",
+        "ModelBehaviorError",
+        "ModelRefusalError",
+        "ToolTimeoutError",
+        "UserError",
+        # Parent-process protocol failures.
+        "DuplicateLiveTraceId",
+        PROTOCOL_ERROR_CLASS,
+        "LiveSmokeTimeout",
+    }
+)
 
 
 def _failed_child(error_class: str) -> dict[str, Any]:
+    safe_error_class = (
+        error_class if error_class in SAFE_ERROR_CLASSES else PROTOCOL_ERROR_CLASS
+    )
     return {
         "status": "failed",
         "elapsedMs": 0,
@@ -35,7 +82,7 @@ def _failed_child(error_class: str) -> dict[str, Any]:
         "orderedToolNames": [],
         "approvalCount": 0,
         "traceId": None,
-        "errorClass": error_class,
+        "errorClass": safe_error_class,
     }
 
 
@@ -82,7 +129,7 @@ def _is_valid_result(value: object) -> bool:
         and tool_names == []
         and trace_id is None
         and isinstance(error_class, str)
-        and SAFE_ERROR_CLASS.fullmatch(error_class) is not None
+        and error_class in SAFE_ERROR_CLASSES
     )
 
 
@@ -104,22 +151,31 @@ def _run_child(script: Path) -> dict[str, Any]:
         return _failed_child("LiveSmokeTimeout")
     lines = [line for line in completed.stdout.splitlines() if line.strip()]
     if len(lines) != 1:
-        return _failed_child("LiveSmokeChildProtocolError")
+        return _failed_child(PROTOCOL_ERROR_CLASS)
     try:
         parsed = json.loads(lines[0])
     except (TypeError, ValueError):
-        return _failed_child("LiveSmokeChildProtocolError")
+        return _failed_child(PROTOCOL_ERROR_CLASS)
     if not _is_valid_result(parsed):
-        return _failed_child("LiveSmokeChildProtocolError")
+        return _failed_child(PROTOCOL_ERROR_CLASS)
     status = parsed["status"]
     if completed.stderr or completed.returncode != STATUS_EXIT_CODES[status]:
-        return _failed_child("LiveSmokeChildProtocolError")
+        return _failed_child(PROTOCOL_ERROR_CLASS)
     return parsed
 
 
 def main() -> int:
     child_script = Path(__file__).with_name("smoke_live.py").resolve()
-    results = [_run_child(child_script) for _ in range(3)]
+    raw_results = [_run_child(child_script) for _ in range(3)]
+    results = [
+        result if _is_valid_result(result) else _failed_child(PROTOCOL_ERROR_CLASS)
+        for result in raw_results
+    ]
+    passed_trace_ids = [
+        result["traceId"] for result in results if result["status"] == "passed"
+    ]
+    if len(passed_trace_ids) != len(set(passed_trace_ids)):
+        results = [_failed_child("DuplicateLiveTraceId") for _ in results]
     for result in results:
         print(json.dumps(result, separators=(",", ":"), sort_keys=True))
     statuses = {result["status"] for result in results}

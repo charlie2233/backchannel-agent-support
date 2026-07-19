@@ -68,4 +68,6 @@ The scripts set `OPENAI_AGENTS_DONT_LOG_MODEL_DATA=1` and
 elapsed milliseconds, model IDs, ordered tool names, approval count, trace ID, and a redacted
 error class. It never prints the key, prompts, tool arguments, serialized run state, or exception
 text. Auth, quota, connectivity, or model-access errors remain **BLOCKED** under their exception
-class; they are never replaced with stub results.
+class when it is in the parent's fixed allowlist; unknown child error classes are normalized to
+`LiveSmokeChildProtocolError` and are never replaced with stub results. The three-run command
+returns success only when all three complete proof records carry distinct valid live trace IDs.
