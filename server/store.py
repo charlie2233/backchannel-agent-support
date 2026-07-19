@@ -3035,7 +3035,6 @@ class SQLiteStore:
     def reset(self) -> None:
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            connection.execute("DELETE FROM demo_sessions")
             connection.execute("DELETE FROM live_admissions")
             connection.execute("DELETE FROM usage_ledger")
             connection.execute("DELETE FROM recoveries")

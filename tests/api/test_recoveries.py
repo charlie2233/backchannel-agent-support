@@ -16,6 +16,19 @@ from server.replay.loader import ScenarioLoader
 from server.store import SQLiteStore
 
 
+class RuntimeSqlTracingStore(SQLiteStore):
+    def __init__(self, database_path) -> None:
+        self.runtime_trace_enabled = False
+        self.runtime_statements: list[str] = []
+        super().__init__(database_path)
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = super()._connect()
+        if self.runtime_trace_enabled:
+            connection.set_trace_callback(self.runtime_statements.append)
+        return connection
+
+
 @pytest.fixture
 def client(tmp_path) -> TestClient:
     store = SQLiteStore(tmp_path / "api.sqlite3")
@@ -164,7 +177,7 @@ def test_demo_reset_is_forbidden_by_default_without_deleting_recovery(
 
 
 def test_demo_reset_deletes_recovery_only_when_explicitly_enabled(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "reset-enabled.sqlite3")
+    store = RuntimeSqlTracingStore(tmp_path / "reset-enabled.sqlite3")
     settings = RuntimeSettings(live_ready=False, demo_reset_enabled=True)
     with TestClient(create_app(settings, store=store)) as client:
         created = client.post(
@@ -173,10 +186,16 @@ def test_demo_reset_deletes_recovery_only_when_explicitly_enabled(tmp_path) -> N
         )
         recovery_id = created.json()["recoveryId"]
 
+        store.runtime_trace_enabled = True
         reset = client.post("/api/demo/reset")
+        store.runtime_trace_enabled = False
 
         assert reset.status_code == 200
         assert reset.json() == {"reset": True}
+        assert not any(
+            "demo_sessions" in statement.lower()
+            for statement in store.runtime_statements
+        )
         assert client.get(f"/api/recoveries/{recovery_id}").status_code == 404
 
 
