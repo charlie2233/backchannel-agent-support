@@ -12,8 +12,9 @@ the live gate.
 {"approvalCount":0,"elapsedMs":0,"errorClass":"MissingOpenAIAPIKey","modelIds":[],"orderedToolNames":[],"status":"blocked","traceId":null}
 ```
 
-`npm run smoke:live:3` launched exactly three independent child processes. Each child used its
-own temporary SQLite database and exited before orchestration because the key was absent:
+`npm run smoke:live:3` launched exactly three independent child processes. Each child exited
+before orchestration or temporary-database creation because the key was absent; when live-ready,
+each child creates its own temporary SQLite database:
 
 ```json
 {"approvalCount":0,"elapsedMs":0,"errorClass":"MissingOpenAIAPIKey","modelIds":[],"orderedToolNames":[],"status":"blocked","traceId":null}

@@ -18,6 +18,7 @@ RESULT_KEYS = {
     "status",
     "traceId",
 }
+STATUS_EXIT_CODES = {"passed": 0, "failed": 1, "blocked": 2}
 
 
 def _failed_child(error_class: str) -> dict[str, Any]:
@@ -30,6 +31,34 @@ def _failed_child(error_class: str) -> dict[str, Any]:
         "traceId": None,
         "errorClass": error_class,
     }
+
+
+def _is_valid_result(value: object) -> bool:
+    if not isinstance(value, dict) or set(value) != RESULT_KEYS:
+        return False
+    status = value.get("status")
+    elapsed_ms = value.get("elapsedMs")
+    approval_count = value.get("approvalCount")
+    model_ids = value.get("modelIds")
+    tool_names = value.get("orderedToolNames")
+    trace_id = value.get("traceId")
+    error_class = value.get("errorClass")
+    return (
+        isinstance(status, str)
+        and status in STATUS_EXIT_CODES
+        and isinstance(elapsed_ms, int)
+        and not isinstance(elapsed_ms, bool)
+        and elapsed_ms >= 0
+        and isinstance(approval_count, int)
+        and not isinstance(approval_count, bool)
+        and approval_count >= 0
+        and isinstance(model_ids, list)
+        and all(isinstance(item, str) for item in model_ids)
+        and isinstance(tool_names, list)
+        and all(isinstance(item, str) for item in tool_names)
+        and (trace_id is None or isinstance(trace_id, str))
+        and (error_class is None or isinstance(error_class, str))
+    )
 
 
 def _run_child(script: Path) -> dict[str, Any]:
@@ -55,7 +84,10 @@ def _run_child(script: Path) -> dict[str, Any]:
         parsed = json.loads(lines[0])
     except (TypeError, ValueError):
         return _failed_child("LiveSmokeChildProtocolError")
-    if not isinstance(parsed, dict) or set(parsed) != RESULT_KEYS:
+    if not _is_valid_result(parsed):
+        return _failed_child("LiveSmokeChildProtocolError")
+    status = parsed["status"]
+    if completed.stderr or completed.returncode != STATUS_EXIT_CODES[status]:
         return _failed_child("LiveSmokeChildProtocolError")
     return parsed
 

@@ -145,19 +145,24 @@ class ScriptedLiveModel(Model):
         assert self._model_name == TERRA_MODEL
         assert [tool.name for tool in tools] == ["commit_remedy"]
         function_output = self._matching_function_output(input)
-        if function_output is not None:
+        if function_output is not None and not self._provider.repeat_tool_after_output:
             # The SDK deliberately resets a required tool choice after that tool
             # returns so the resumed broker can produce its terminal message.
             assert model_settings.tool_choice is None
             return self._message("Live demo-provider recovery completed.", response_id)
-        assert model_settings.tool_choice == "commit_remedy"
-        assert model_settings.parallel_tool_calls is False
+        if function_output is None:
+            assert model_settings.tool_choice == "commit_remedy"
+            assert model_settings.parallel_tool_calls is False
         return ModelResponse(
             output=[
                 ResponseFunctionToolCall(
                     type="function_call",
                     name="commit_remedy",
-                    call_id="live-commit-remedy",
+                    call_id=(
+                        "live-repeat-remedy"
+                        if function_output is not None
+                        else "live-commit-remedy"
+                    ),
                     arguments=arguments.model_dump_json(),
                 )
             ],
@@ -195,8 +200,9 @@ class ScriptedLiveModel(Model):
 
 
 class ScriptedLiveProvider(ModelProvider):
-    def __init__(self) -> None:
+    def __init__(self, *, repeat_tool_after_output: bool = False) -> None:
         self.calls: list[RecordedModelCall] = []
+        self.repeat_tool_after_output = repeat_tool_after_output
 
     def get_model(self, model_name: str | None) -> Model:
         assert model_name in {LUNA_MODEL, TERRA_MODEL}
@@ -276,9 +282,7 @@ def test_false_ready_direct_orchestrator_call_rejects_openai_live(tmp_path) -> N
     )
 
     with pytest.raises(UnsupportedOrchestrationError, match="live-ready"):
-        asyncio.run(
-            orchestrator.start("hotel", execution_mode=ExecutionMode.OPENAI_LIVE)
-        )
+        asyncio.run(orchestrator.start("hotel", execution_mode=ExecutionMode.OPENAI_LIVE))
 
     assert store.count_recoveries() == 0
 
@@ -361,9 +365,7 @@ def test_live_graph_uses_one_redacted_root_and_resumes_with_durable_provenance(
             model_provider=fake_models,
         )
 
-        pending = asyncio.run(
-            orchestrator.start("hotel", execution_mode=ExecutionMode.OPENAI_LIVE)
-        )
+        pending = asyncio.run(orchestrator.start("hotel", execution_mode=ExecutionMode.OPENAI_LIVE))
         snapshot = pending.recovery
         envelope = store.get_pending_approval(snapshot.recovery_id)
 
@@ -385,10 +387,7 @@ def test_live_graph_uses_one_redacted_root_and_resumes_with_durable_provenance(
             ProviderProof.__name__,
             None,
         ]
-        assert all(
-            call.tracing is ModelTracing.ENABLED_WITHOUT_DATA
-            for call in fake_models.calls
-        )
+        assert all(call.tracing is ModelTracing.ENABLED_WITHOUT_DATA for call in fake_models.calls)
         assert envelope.execution_mode is ExecutionMode.OPENAI_LIVE
         assert envelope.model_ids == (LUNA_MODEL, TERRA_MODEL)
         assert envelope.root_trace_id == snapshot.root_trace_id
@@ -446,9 +445,7 @@ def test_live_graph_uses_one_redacted_root_and_resumes_with_durable_provenance(
         assert receipt.definition_digest == envelope.definition_digest
         assert "demo hotel adapter" in receipt.boundary.lower()
         assert len(capture.started_traces) == 1
-        assert {span.trace_id for span in capture.ended_spans} == {
-            snapshot.root_trace_id
-        }
+        assert {span.trace_id for span in capture.ended_spans} == {snapshot.root_trace_id}
         for span in capture.ended_spans:
             span_data = span.span_data
             if hasattr(span_data, "input"):
@@ -473,9 +470,7 @@ def test_live_crash_reconciliation_preserves_live_receipt_provenance(
         live_ready=True,
         model_provider=models,
     )
-    pending = asyncio.run(
-        orchestrator.start("hotel", execution_mode=ExecutionMode.OPENAI_LIVE)
-    )
+    pending = asyncio.run(orchestrator.start("hotel", execution_mode=ExecutionMode.OPENAI_LIVE))
     recovery_id = pending.recovery.recovery_id
     original_finalize = store.finalize_completed_execution
 
@@ -519,3 +514,106 @@ def test_live_crash_reconciliation_preserves_live_receipt_provenance(
     assert receipt.model_call is True
     assert receipt.model_ids == [LUNA_MODEL, TERRA_MODEL]
     assert receipt.root_trace_id == pending.recovery.root_trace_id
+
+
+def test_live_decline_after_restart_closes_without_provider_execution(tmp_path) -> None:
+    database_path = tmp_path / "live-decline.sqlite3"
+    store = SQLiteStore(database_path)
+    provider = HotelSimulator(store=store)
+    models = ScriptedLiveProvider()
+    orchestrator = RecoveryOrchestrator(
+        store=store,
+        hotel_provider=provider,
+        live_ready=True,
+        model_provider=models,
+    )
+    pending = asyncio.run(orchestrator.start("hotel", execution_mode=ExecutionMode.OPENAI_LIVE))
+    recovery_id = pending.recovery.recovery_id
+    approval = pending.recovery.pending_approval
+    assert approval is not None
+    store.close()
+
+    fresh_store = SQLiteStore(database_path)
+    fresh_provider = HotelSimulator(store=fresh_store)
+    fresh_models = ScriptedLiveProvider()
+    fresh_orchestrator = RecoveryOrchestrator(
+        store=fresh_store,
+        hotel_provider=fresh_provider,
+        live_ready=True,
+        model_provider=fresh_models,
+    )
+    from server.models import ApprovalDecisionRequest
+
+    decision = asyncio.run(
+        fresh_orchestrator.approve_decision(
+            recovery_id,
+            ApprovalDecisionRequest(
+                action="decline",
+                clientDecisionId="live-restart-decline",
+                remedyId=approval.remedy_id,
+                remedyDigest=approval.remedy_digest,
+                toolCallId=approval.tool_call_id,
+            ),
+        )
+    )
+
+    assert decision.status == "closed_without_action"
+    assert decision.execution_started is False
+    assert [call.model_name for call in fresh_models.calls] == [TERRA_MODEL]
+    assert fresh_provider.dispatch_count == 0
+    assert fresh_store.count_executions(recovery_id) == 0
+    receipt = fresh_store.get_receipt(recovery_id)
+    assert receipt.execution_mode is ExecutionMode.OPENAI_LIVE
+    assert receipt.status == "closed_without_action"
+    assert receipt.provider_execution is False
+    assert receipt.approved_remedy_digest is None
+    assert "Temporary permission revoked." in receipt.verification_results
+    assert fresh_store.get_recovery(recovery_id).pending_approval is None
+
+
+def test_live_decline_with_new_interruption_seals_outcome_unknown(tmp_path) -> None:
+    database_path = tmp_path / "live-decline-uncertain.sqlite3"
+    store = SQLiteStore(database_path)
+    pending = asyncio.run(
+        RecoveryOrchestrator(
+            store=store,
+            hotel_provider=HotelSimulator(store=store),
+            live_ready=True,
+            model_provider=ScriptedLiveProvider(),
+        ).start("hotel", execution_mode=ExecutionMode.OPENAI_LIVE)
+    )
+    approval = pending.recovery.pending_approval
+    assert approval is not None
+    recovery_id = pending.recovery.recovery_id
+    store.close()
+
+    fresh_store = SQLiteStore(database_path)
+    fresh_provider = HotelSimulator(store=fresh_store)
+    orchestrator = RecoveryOrchestrator(
+        store=fresh_store,
+        hotel_provider=fresh_provider,
+        live_ready=True,
+        model_provider=ScriptedLiveProvider(repeat_tool_after_output=True),
+    )
+    from server.models import ApprovalDecisionRequest
+
+    decision = asyncio.run(
+        orchestrator.approve_decision(
+            recovery_id,
+            ApprovalDecisionRequest(
+                action="decline",
+                clientDecisionId="live-decline-uncertain",
+                remedyId=approval.remedy_id,
+                remedyDigest=approval.remedy_digest,
+                toolCallId=approval.tool_call_id,
+            ),
+        )
+    )
+
+    assert decision.status == "outcome_unknown"
+    assert decision.execution_started is None
+    assert fresh_provider.dispatch_count == 0
+    assert fresh_store.count_executions(recovery_id) == 0
+    receipt = fresh_store.get_receipt(recovery_id)
+    assert receipt.status == "outcome_unknown"
+    assert receipt.provider_execution is None

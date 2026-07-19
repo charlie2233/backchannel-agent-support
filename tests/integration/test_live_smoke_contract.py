@@ -5,6 +5,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
+
+from scripts import smoke_live_three
+
 ROOT = Path(__file__).resolve().parents[2]
 RESULT_KEYS = {
     "approvalCount",
@@ -73,3 +77,99 @@ def test_three_run_smoke_emits_exactly_three_independent_blocked_records() -> No
     assert len(records) == 3
     for record in records:
         _assert_redacted_blocked_record(record)
+
+
+@pytest.mark.parametrize(
+    ("status", "returncode"),
+    [("passed", 1), ("failed", 0), ("blocked", 0)],
+)
+def test_three_run_child_rejects_status_exit_mismatch(
+    monkeypatch,
+    status: str,
+    returncode: int,
+) -> None:
+    payload = {
+        "approvalCount": 1 if status == "passed" else 0,
+        "elapsedMs": 1,
+        "errorClass": None if status == "passed" else "RedactedError",
+        "modelIds": [],
+        "orderedToolNames": [],
+        "status": status,
+        "traceId": None,
+    }
+    monkeypatch.setattr(
+        smoke_live_three.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args=[],
+            returncode=returncode,
+            stdout=json.dumps(payload),
+            stderr="",
+        ),
+    )
+
+    result = smoke_live_three._run_child(ROOT / "scripts" / "smoke_live.py")
+
+    assert result == smoke_live_three._failed_child("LiveSmokeChildProtocolError")
+
+
+def test_three_run_child_never_forwards_stderr(monkeypatch) -> None:
+    payload = smoke_live_three._failed_child("RedactedError")
+    monkeypatch.setattr(
+        smoke_live_three.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args=[],
+            returncode=1,
+            stdout=json.dumps(payload),
+            stderr="secret child exception text",
+        ),
+    )
+
+    result = smoke_live_three._run_child(ROOT / "scripts" / "smoke_live.py")
+
+    assert result == smoke_live_three._failed_child("LiveSmokeChildProtocolError")
+    assert "secret" not in json.dumps(result).lower()
+
+
+def test_three_run_child_rejects_malformed_record(monkeypatch) -> None:
+    monkeypatch.setattr(
+        smoke_live_three.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=json.dumps({"status": "passed", "elapsedMs": "not-an-int"}),
+            stderr="",
+        ),
+    )
+
+    result = smoke_live_three._run_child(ROOT / "scripts" / "smoke_live.py")
+
+    assert result == smoke_live_three._failed_child("LiveSmokeChildProtocolError")
+
+
+def test_three_run_main_preserves_three_redacted_records_and_failed_exit(
+    monkeypatch,
+    capsys,
+) -> None:
+    results = [
+        smoke_live_three._failed_child("FirstRedactedError"),
+        smoke_live_three._failed_child("SecondRedactedError"),
+        smoke_live_three._failed_child("ThirdRedactedError"),
+    ]
+    calls = 0
+
+    def fake_child(_script: Path) -> dict[str, Any]:
+        nonlocal calls
+        result = results[calls]
+        calls += 1
+        return result
+
+    monkeypatch.setattr(smoke_live_three, "_run_child", fake_child)
+
+    exit_code = smoke_live_three.main()
+
+    assert exit_code == 1
+    assert calls == 3
+    assert _parse_records(capsys.readouterr().out) == results

@@ -36,6 +36,7 @@ from server.policy import (
     evaluate_hotel_policy,
     exact_hotel_terms,
 )
+from server.trace_ids import is_valid_live_trace_id, is_valid_qa_trace_id
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -307,6 +308,7 @@ class SQLiteStore:
             self._migrate_task4_remedies(connection)
             self._migrate_task3_pending_approvals(connection)
             self._migrate_task7_recovery_provenance(connection)
+            self._migrate_task7_receipts(connection)
             self._migrate_task3_executions(connection)
             self._migrate_task6_approval_decisions(connection)
             event_columns = {
@@ -358,9 +360,7 @@ class SQLiteStore:
         }
         for column, column_type in additions.items():
             if column not in columns:
-                connection.execute(
-                    f"ALTER TABLE recoveries ADD COLUMN {column} {column_type}"
-                )
+                connection.execute(f"ALTER TABLE recoveries ADD COLUMN {column} {column_type}")
         connection.execute(
             """
             UPDATE recoveries
@@ -411,14 +411,118 @@ class SQLiteStore:
         )
 
     @staticmethod
+    def _migrate_task7_receipts(connection: sqlite3.Connection) -> None:
+        """Enrich legacy receipts only from durable, mode-compatible provenance."""
+
+        rows = connection.execute(
+            """
+            SELECT
+                receipts.recovery_id AS recovery_id,
+                receipts.receipt_json AS receipt_json,
+                recoveries.execution_mode AS execution_mode,
+                recoveries.model_ids_json AS model_ids_json,
+                recoveries.root_trace_id AS root_trace_id,
+                recoveries.model_call AS model_call,
+                recoveries.sdk_version AS sdk_version,
+                recoveries.protocol_version AS protocol_version,
+                recoveries.agent_graph_version AS agent_graph_version,
+                recoveries.definition_digest AS definition_digest
+            FROM receipts
+            JOIN recoveries ON recoveries.id = receipts.recovery_id
+            """
+        ).fetchall()
+        for row in rows:
+            try:
+                payload = json.loads(cast(str, row["receipt_json"]))
+                mode = ExecutionMode(cast(str, row["execution_mode"]))
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(payload, dict) or payload.get("executionMode") != mode.value:
+                continue
+
+            if mode is ExecutionMode.REPLAY_FIXTURE:
+                payload.update(
+                    {
+                        "modelCall": False,
+                        "modelIds": [],
+                        "rootTraceId": None,
+                        "sdkVersion": None,
+                        "protocolVersion": None,
+                        "agentGraphVersion": None,
+                        "definitionDigest": None,
+                    }
+                )
+            else:
+                try:
+                    model_ids = json.loads(cast(str, row["model_ids_json"]))
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(model_ids, list) or not all(
+                    isinstance(model_id, str) for model_id in model_ids
+                ):
+                    continue
+                root_trace_id = cast(str | None, row["root_trace_id"])
+                markers = (
+                    cast(str | None, row["sdk_version"]),
+                    cast(str | None, row["protocol_version"]),
+                    cast(str | None, row["agent_graph_version"]),
+                    cast(str | None, row["definition_digest"]),
+                )
+                if any(marker is None for marker in markers):
+                    continue
+                model_call = bool(cast(int, row["model_call"]))
+                if mode is ExecutionMode.SDK_STUB:
+                    if (
+                        model_call
+                        or model_ids
+                        or not (
+                            isinstance(root_trace_id, str) and is_valid_qa_trace_id(root_trace_id)
+                        )
+                    ):
+                        continue
+                    boundary = SDK_STUB_BOUNDARY
+                else:
+                    if (
+                        not model_call
+                        or model_ids != ["gpt-5.6-luna", "gpt-5.6-terra"]
+                        or not (
+                            isinstance(root_trace_id, str) and is_valid_live_trace_id(root_trace_id)
+                        )
+                    ):
+                        # Never invent live model-call or trace evidence.
+                        continue
+                    boundary = OPENAI_LIVE_BOUNDARY
+                payload.update(
+                    {
+                        "modelCall": model_call,
+                        "modelIds": model_ids,
+                        "rootTraceId": root_trace_id,
+                        "sdkVersion": markers[0],
+                        "protocolVersion": markers[1],
+                        "agentGraphVersion": markers[2],
+                        "definitionDigest": markers[3],
+                        "boundary": boundary,
+                    }
+                )
+            try:
+                receipt = RecoveryReceipt.model_validate(payload)
+            except (TypeError, ValueError):
+                continue
+            connection.execute(
+                "UPDATE receipts SET receipt_json = ? WHERE recovery_id = ?",
+                (
+                    receipt.model_dump_json(by_alias=True),
+                    cast(str, row["recovery_id"]),
+                ),
+            )
+
+    @staticmethod
     def _migrate_task3_pending_approvals(connection: sqlite3.Connection) -> None:
         """Rebuild every legacy envelope table to the exact Task 5 contract."""
 
         columns = {
             cast(str, row["name"])
-            for row in connection.execute(
-                "PRAGMA table_info(pending_approvals)"
-            ).fetchall()
+            for row in connection.execute("PRAGMA table_info(pending_approvals)").fetchall()
         }
         task7_columns = {
             "tool_call_id",
@@ -513,7 +617,7 @@ class SQLiteStore:
                 SELECT
                     tool_call_id,
                     recovery_id,
-                    'legacy-incompatible',
+                    {legacy_value("sdk_version")},
                     {legacy_value("protocol_version")},
                     {legacy_value("agent_graph_version")},
                     {legacy_value("definition_digest")},
@@ -531,9 +635,7 @@ class SQLiteStore:
                 """
             )
             connection.execute("DROP TABLE pending_approvals")
-            connection.execute(
-                "ALTER TABLE pending_approvals_task5 RENAME TO pending_approvals"
-            )
+            connection.execute("ALTER TABLE pending_approvals_task5 RENAME TO pending_approvals")
             violations = connection.execute("PRAGMA foreign_key_check").fetchall()
             if violations:
                 raise RuntimeError("Pending approval migration violated foreign keys")
@@ -563,9 +665,7 @@ class SQLiteStore:
         }
         for column, column_type in additions.items():
             if column not in columns:
-                connection.execute(
-                    f"ALTER TABLE remedies ADD COLUMN {column} {column_type}"
-                )
+                connection.execute(f"ALTER TABLE remedies ADD COLUMN {column} {column_type}")
 
         primary_key = {
             cast(str, row["name"]): cast(int, row["pk"])
@@ -650,9 +750,7 @@ class SQLiteStore:
 
         columns = {
             cast(str, row["name"])
-            for row in connection.execute(
-                "PRAGMA table_info(approval_decisions)"
-            ).fetchall()
+            for row in connection.execute("PRAGMA table_info(approval_decisions)").fetchall()
         }
         if "action" in columns:
             return
@@ -663,9 +761,7 @@ class SQLiteStore:
             connection.execute("BEGIN IMMEDIATE")
             locked_columns = {
                 cast(str, row["name"])
-                for row in connection.execute(
-                    "PRAGMA table_info(approval_decisions)"
-                ).fetchall()
+                for row in connection.execute("PRAGMA table_info(approval_decisions)").fetchall()
             }
             if "action" in locked_columns:
                 connection.commit()
@@ -739,9 +835,7 @@ class SQLiteStore:
                     ),
                 )
             connection.execute("DROP TABLE approval_decisions")
-            connection.execute(
-                "ALTER TABLE approval_decisions_task6 RENAME TO approval_decisions"
-            )
+            connection.execute("ALTER TABLE approval_decisions_task6 RENAME TO approval_decisions")
             violations = connection.execute("PRAGMA foreign_key_check").fetchall()
             if violations:
                 raise RuntimeError("Approval decision migration violated foreign keys")
@@ -913,9 +1007,7 @@ class SQLiteStore:
         if any(row[field] is None for field in required):
             raise ValueError("Legacy remedy does not contain a consent record")
         changed_fields = json.loads(cast(str, row["changed_fields_json"]))
-        provider_commitments = json.loads(
-            cast(str, row["provider_commitments_json"])
-        )
+        provider_commitments = json.loads(cast(str, row["provider_commitments_json"]))
         if not isinstance(changed_fields, list) or not all(
             isinstance(item, str) for item in changed_fields
         ):
@@ -933,15 +1025,9 @@ class SQLiteStore:
             provider_commitments=tuple(provider_commitments),
             expiry=datetime.fromisoformat(cast(str, row["expiry"])),
             consent_digest=cast(str, row["digest"]),
-            hard_constraint_satisfied=bool(
-                cast(int, row["hard_constraint_satisfied"])
-            ),
-            delegated_authority_satisfied=bool(
-                cast(int, row["delegated_authority_satisfied"])
-            ),
-            evidence=CommitRemedyArguments.model_validate_json(
-                cast(str, row["evidence_json"])
-            ),
+            hard_constraint_satisfied=bool(cast(int, row["hard_constraint_satisfied"])),
+            delegated_authority_satisfied=bool(cast(int, row["delegated_authority_satisfied"])),
+            evidence=CommitRemedyArguments.model_validate_json(cast(str, row["evidence_json"])),
         )
 
     @staticmethod
@@ -974,9 +1060,7 @@ class SQLiteStore:
     def _decision_claim_from_row(cls, row: sqlite3.Row) -> ApprovalDecisionClaim:
         response: ApprovalDecisionResponse | None = None
         if row["result_json"] is not None:
-            response = ApprovalDecisionResponse.model_validate_json(
-                cast(str, row["result_json"])
-            )
+            response = ApprovalDecisionResponse.model_validate_json(cast(str, row["result_json"]))
         return ApprovalDecisionClaim(
             recovery_id=cast(str, row["recovery_id"]),
             request=cls._decision_request_from_row(row),
@@ -997,27 +1081,21 @@ class SQLiteStore:
             (recovery_id,),
         ).fetchone()
         if recovery is None:
-            raise ApprovalDecisionError(
-                "decision_unavailable", recovery_id, status_code=404
-            )
+            raise ApprovalDecisionError("decision_unavailable", recovery_id, status_code=404)
         if (
             cast(str, recovery["status"]) != RecoveryStatus.PENDING_APPROVAL.value
             or cast(str, recovery["scenario_id"]) != ScenarioId.HOTEL.value
             or cast(str, recovery["execution_mode"])
             not in {ExecutionMode.SDK_STUB.value, ExecutionMode.OPENAI_LIVE.value}
         ):
-            raise ApprovalDecisionError(
-                "decision_unavailable", recovery_id, status_code=409
-            )
+            raise ApprovalDecisionError("decision_unavailable", recovery_id, status_code=409)
 
         pending_row = connection.execute(
             "SELECT * FROM pending_approvals WHERE recovery_id = ?",
             (recovery_id,),
         ).fetchone()
         if pending_row is None:
-            raise ApprovalDecisionError(
-                "decision_unavailable", recovery_id, status_code=409
-            )
+            raise ApprovalDecisionError("decision_unavailable", recovery_id, status_code=409)
         try:
             pending = self._pending_approval_from_row(pending_row)
         except (TypeError, ValueError):
@@ -1025,30 +1103,20 @@ class SQLiteStore:
                 "resume_incompatible", recovery_id, status_code=409
             ) from None
         if pending.status not in {"pending", "approved"}:
-            raise ApprovalDecisionError(
-                "decision_unavailable", recovery_id, status_code=409
-            )
+            raise ApprovalDecisionError("decision_unavailable", recovery_id, status_code=409)
         if request.remedy_id != pending.remedy_id:
-            raise ApprovalDecisionError(
-                "remedy_mismatch", recovery_id, status_code=422
-            )
+            raise ApprovalDecisionError("remedy_mismatch", recovery_id, status_code=422)
         if request.tool_call_id != pending.tool_call_id:
-            raise ApprovalDecisionError(
-                "tool_call_mismatch", recovery_id, status_code=422
-            )
+            raise ApprovalDecisionError("tool_call_mismatch", recovery_id, status_code=422)
         if request.remedy_digest != pending.consent_digest:
-            raise ApprovalDecisionError(
-                "remedy_digest_mismatch", recovery_id, status_code=422
-            )
+            raise ApprovalDecisionError("remedy_digest_mismatch", recovery_id, status_code=422)
 
         remedy_row = connection.execute(
             "SELECT * FROM remedies WHERE recovery_id = ? AND id = ?",
             (recovery_id, pending.remedy_id),
         ).fetchone()
         if remedy_row is None:
-            raise ApprovalDecisionError(
-                "decision_unavailable", recovery_id, status_code=409
-            )
+            raise ApprovalDecisionError("decision_unavailable", recovery_id, status_code=409)
         try:
             consent = self._remedy_consent_from_row(remedy_row)
             recomputed_digest = remedy_consent_digest(
@@ -1070,35 +1138,25 @@ class SQLiteStore:
             consent.consent_digest != pending.consent_digest
             or recomputed_digest != pending.consent_digest
         ):
-            raise ApprovalDecisionError(
-                "remedy_digest_mismatch", recovery_id, status_code=422
-            )
+            raise ApprovalDecisionError("remedy_digest_mismatch", recovery_id, status_code=422)
         if consent.expiry <= now:
             raise ApprovalDecisionError("remedy_expired", recovery_id, status_code=422)
         if exact_hotel_terms(consent.evidence) != consent.terms:
-            raise ApprovalDecisionError(
-                "constraint_denied", recovery_id, status_code=422
-            )
+            raise ApprovalDecisionError("constraint_denied", recovery_id, status_code=422)
         policy = evaluate_hotel_policy(
             consent.evidence,
             DETERMINISTIC_HOTEL_AUTHORITY,
         )
         if (
             not policy.hard_constraint_satisfied
-            or consent.hard_constraint_satisfied
-            != policy.hard_constraint_satisfied
+            or consent.hard_constraint_satisfied != policy.hard_constraint_satisfied
         ):
-            raise ApprovalDecisionError(
-                "constraint_denied", recovery_id, status_code=422
-            )
+            raise ApprovalDecisionError("constraint_denied", recovery_id, status_code=422)
         if (
             not policy.delegated_authority_satisfied
-            or consent.delegated_authority_satisfied
-            != policy.delegated_authority_satisfied
+            or consent.delegated_authority_satisfied != policy.delegated_authority_satisfied
         ):
-            raise ApprovalDecisionError(
-                "authority_denied", recovery_id, status_code=422
-            )
+            raise ApprovalDecisionError("authority_denied", recovery_id, status_code=422)
         return pending, consent
 
     def _public_pending_view(
@@ -1213,9 +1271,12 @@ class SQLiteStore:
             if selected_model_ids or model_call:
                 raise ValueError("SDK stub recoveries cannot carry model IDs")
             root_trace_id = root_trace_id or f"qa_trace_{uuid4().hex}"
+            if not is_valid_qa_trace_id(root_trace_id):
+                raise ValueError("SDK stub recovery has invalid trace provenance")
         elif (
             selected_model_ids != ["gpt-5.6-luna", "gpt-5.6-terra"]
             or root_trace_id is None
+            or not is_valid_live_trace_id(root_trace_id)
             or not model_call
             or any(
                 marker is None
@@ -1293,11 +1354,7 @@ class SQLiteStore:
     ) -> RecoverySnapshot:
         now = self._now()
         event_json = json.dumps(event_data, separators=(",", ":"), sort_keys=True)
-        receipt_json = (
-            receipt.model_dump_json(by_alias=True)
-            if receipt is not None
-            else None
-        )
+        receipt_json = receipt.model_dump_json(by_alias=True) if receipt is not None else None
         pending_state_json = (
             json.dumps(
                 pending_approval.state_json,
@@ -1309,9 +1366,7 @@ class SQLiteStore:
             else None
         )
         if (pending_approval is None) is not (remedy_consent is None):
-            raise ValueError(
-                "Pending SDK envelope and authoritative consent must persist together"
-            )
+            raise ValueError("Pending SDK envelope and authoritative consent must persist together")
         if pending_approval is not None and remedy_consent is not None:
             if remedy_consent.recovery_id != recovery_id:
                 raise ValueError("Remedy consent recovery ID does not match transition")
@@ -1329,9 +1384,7 @@ class SQLiteStore:
                 raise RecoveryNotFoundError("Recovery not found")
             if receipt is not None:
                 if not status.terminal:
-                    raise ReceiptTransitionError(
-                        "Receipt requires a terminal transition"
-                    )
+                    raise ReceiptTransitionError("Receipt requires a terminal transition")
                 if receipt.recovery_id != recovery_id:
                     raise ReceiptTransitionError(
                         "Receipt recovery ID does not match the transition"
@@ -1373,9 +1426,7 @@ class SQLiteStore:
                 }
                 for marker, (stored, pending) in marker_pairs.items():
                     if stored is not None and stored != pending:
-                        raise ValueError(
-                            f"Pending approval {marker} does not match recovery"
-                        )
+                        raise ValueError(f"Pending approval {marker} does not match recovery")
             next_sequence = cast(
                 int,
                 connection.execute(
@@ -1506,8 +1557,7 @@ class SQLiteStore:
             pending_view = (
                 self._public_pending_view(connection, recovery_id)
                 if row is not None
-                and cast(str, row["status"])
-                == RecoveryStatus.PENDING_APPROVAL.value
+                and cast(str, row["status"]) == RecoveryStatus.PENDING_APPROVAL.value
                 else None
             )
         if row is None:
@@ -1616,9 +1666,7 @@ class SQLiteStore:
                 (recovery_id,),
             ).fetchone()
             if existing is not None:
-                raise ApprovalDecisionError(
-                    "already_decided", recovery_id, status_code=409
-                )
+                raise ApprovalDecisionError("already_decided", recovery_id, status_code=409)
 
             self._validate_consent_for_decision(
                 connection,
@@ -1684,8 +1732,7 @@ class SQLiteStore:
                 )
             durable_claim = self._decision_claim_from_row(row)
             if (
-                durable_claim.request.client_decision_id
-                != claim.request.client_decision_id
+                durable_claim.request.client_decision_id != claim.request.client_decision_id
                 or durable_claim.request_fingerprint != claim.request_fingerprint
             ):
                 raise ApprovalDecisionError(
@@ -1718,18 +1765,14 @@ class SQLiteStore:
                 (recovery_id,),
             ).fetchone()
             if row is None:
-                raise ApprovalDecisionError(
-                    "decision_unavailable", recovery_id, status_code=409
-                )
+                raise ApprovalDecisionError("decision_unavailable", recovery_id, status_code=409)
             claim = self._decision_claim_from_row(row)
             if (
                 claim.request.action is not DecisionAction.APPROVE
                 or claim.request.tool_call_id != tool_call_id
                 or claim.request.remedy_digest != remedy_digest
             ):
-                raise ApprovalDecisionError(
-                    "decision_id_conflict", recovery_id, status_code=409
-                )
+                raise ApprovalDecisionError("decision_id_conflict", recovery_id, status_code=409)
             completed = connection.execute(
                 """
                 SELECT 1 FROM executions
@@ -1767,8 +1810,7 @@ class SQLiteStore:
                 )
             durable_claim = self._decision_claim_from_row(row)
             if (
-                durable_claim.request.client_decision_id
-                != claim.request.client_decision_id
+                durable_claim.request.client_decision_id != claim.request.client_decision_id
                 or durable_claim.request_fingerprint != claim.request_fingerprint
             ):
                 raise ApprovalDecisionError(
@@ -1807,8 +1849,7 @@ class SQLiteStore:
                 )
             durable_claim = self._decision_claim_from_row(row)
             if (
-                durable_claim.request.client_decision_id
-                != claim.request.client_decision_id
+                durable_claim.request.client_decision_id != claim.request.client_decision_id
                 or durable_claim.request_fingerprint != claim.request_fingerprint
                 or durable_claim.request.action is not DecisionAction.DECLINE
             ):
@@ -1837,15 +1878,10 @@ class SQLiteStore:
             may_have_begun = (
                 bool(execution_rows)
                 or cast(str, pending["status"]) != "pending"
-                or cast(str, recovery["status"])
-                != RecoveryStatus.PENDING_APPROVAL.value
+                or cast(str, recovery["status"]) != RecoveryStatus.PENDING_APPROVAL.value
             )
-            decision_status: Literal[
-                "closed_without_action", "outcome_unknown"
-            ] = (
-                "outcome_unknown"
-                if may_have_begun
-                else "closed_without_action"
+            decision_status: Literal["closed_without_action", "outcome_unknown"] = (
+                "outcome_unknown" if may_have_begun else "closed_without_action"
             )
             terminal_status = RecoveryStatus(decision_status)
             response = ApprovalDecisionResponse(
@@ -2124,10 +2160,7 @@ class SQLiteStore:
                     raise ExecutionConflictError(
                         "Idempotency key was already used for a different execution"
                     )
-                if (
-                    cast(str, existing["status"]) != "completed"
-                    or existing["result_json"] is None
-                ):
+                if cast(str, existing["status"]) != "completed" or existing["result_json"] is None:
                     connection.execute(
                         """
                         UPDATE executions
@@ -2257,9 +2290,7 @@ class SQLiteStore:
                         cast(str, existing_receipt["receipt_json"])
                     )
                 except (TypeError, ValueError):
-                    raise ReceiptTransitionError(
-                        "Existing receipt evidence mismatch"
-                    ) from None
+                    raise ReceiptTransitionError("Existing receipt evidence mismatch") from None
                 if stored_receipt != receipt:
                     raise ReceiptTransitionError("Existing receipt evidence mismatch")
 
@@ -2276,20 +2307,14 @@ class SQLiteStore:
             if terminal_events:
                 terminal_event = terminal_events[0]
                 try:
-                    stored_terminal_data = json.loads(
-                        cast(str, terminal_event["data_json"])
-                    )
+                    stored_terminal_data = json.loads(cast(str, terminal_event["data_json"]))
                 except (TypeError, ValueError):
-                    raise ReceiptTransitionError(
-                        "Existing terminal evidence mismatch"
-                    ) from None
+                    raise ReceiptTransitionError("Existing terminal evidence mismatch") from None
                 if (
                     cast(str, terminal_event["type"]) != "recovery.completed"
                     or stored_terminal_data != terminal_data
                 ):
-                    raise ReceiptTransitionError(
-                        "Existing terminal evidence mismatch"
-                    )
+                    raise ReceiptTransitionError("Existing terminal evidence mismatch")
 
             if existing_receipt is None:
                 connection.execute(

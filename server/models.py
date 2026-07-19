@@ -13,6 +13,8 @@ from pydantic import (
     model_validator,
 )
 
+from server.trace_ids import is_valid_live_trace_id, is_valid_qa_trace_id
+
 
 class ApiModel(BaseModel):
     """Base model that accepts Python names and emits explicit API aliases."""
@@ -40,8 +42,7 @@ SDK_STUB_BOUNDARY = (
     "no OpenAI model call, real booking, or payment change."
 )
 OPENAI_LIVE_BOUNDARY = (
-    "OpenAI agent model calls and demo hotel adapter only; "
-    "no real booking or payment change."
+    "OpenAI agent model calls and demo hotel adapter only; no real booking or payment change."
 )
 
 
@@ -72,7 +73,6 @@ class RecoveryStatus(StrEnum):
 
 
 class HealthResponse(ApiModel):
-
     backend: RuntimeBackend
     live_ready: bool = Field(alias="liveReady")
     provider_boundary: ProviderBoundary = Field(alias="providerBoundary")
@@ -161,14 +161,10 @@ class PendingApprovalView(ApiModel):
     terms: HotelRemedyTerms
     cost_delta_minor: int = Field(alias="costDeltaMinor", strict=True)
     changed_fields: list[str] = Field(alias="changedFields", min_length=1)
-    provider_commitments: list[str] = Field(
-        alias="providerCommitments", min_length=1
-    )
+    provider_commitments: list[str] = Field(alias="providerCommitments", min_length=1)
     expiry: datetime
     hard_constraint_satisfied: bool = Field(alias="hardConstraintSatisfied")
-    delegated_authority_satisfied: bool = Field(
-        alias="delegatedAuthoritySatisfied"
-    )
+    delegated_authority_satisfied: bool = Field(alias="delegatedAuthoritySatisfied")
     tool_call_id: str = Field(alias="toolCallId")
     execution_started: Literal[False] = Field(alias="executionStarted")
 
@@ -244,9 +240,7 @@ class RecoverySnapshot(ApiModel):
     current_step_summary: str = Field(alias="currentStepSummary")
     created_at: datetime = Field(alias="createdAt")
     updated_at: datetime = Field(alias="updatedAt")
-    pending_approval: PendingApprovalView | None = Field(
-        default=None, alias="pendingApproval"
-    )
+    pending_approval: PendingApprovalView | None = Field(default=None, alias="pendingApproval")
 
     @model_validator(mode="after")
     def enforce_execution_mode_trace_provenance(self) -> Self:
@@ -255,15 +249,17 @@ class RecoverySnapshot(ApiModel):
                 raise ValueError("Replay snapshots require no model IDs or root trace ID")
             return self
         if self.execution_mode is ExecutionMode.SDK_STUB:
-            if self.model_ids or self.root_trace_id is None or not self.root_trace_id.startswith(
-                "qa_trace_"
+            if (
+                self.model_ids
+                or self.root_trace_id is None
+                or not is_valid_qa_trace_id(self.root_trace_id)
             ):
                 raise ValueError("SDK stub snapshots require one QA root and no model IDs")
             return self
         if (
             not self.model_ids
             or self.root_trace_id is None
-            or not self.root_trace_id.startswith("trace_")
+            or not is_valid_live_trace_id(self.root_trace_id)
         ):
             raise ValueError("OpenAI live snapshots require model IDs and an SDK root trace ID")
         return self
@@ -345,7 +341,7 @@ class RecoveryReceipt(ApiModel):
                 or self.model_call
                 or self.model_ids
                 or self.root_trace_id is None
-                or not self.root_trace_id.startswith("qa_trace_")
+                or not is_valid_qa_trace_id(self.root_trace_id)
                 or any(marker is None for marker in version_markers)
                 or self.boundary != SDK_STUB_BOUNDARY
             ):
@@ -358,7 +354,7 @@ class RecoveryReceipt(ApiModel):
                 or not self.model_call
                 or self.model_ids != ["gpt-5.6-luna", "gpt-5.6-terra"]
                 or self.root_trace_id is None
-                or not self.root_trace_id.startswith("trace_")
+                or not is_valid_live_trace_id(self.root_trace_id)
                 or any(marker is None for marker in version_markers)
                 or self.boundary != OPENAI_LIVE_BOUNDARY
             ):
@@ -369,14 +365,11 @@ class RecoveryReceipt(ApiModel):
         if self.status == "completed" and self.provider_execution is not True:
             raise ValueError("Completed receipts require provider execution evidence")
         if (
-            self.execution_mode
-            in {ExecutionMode.SDK_STUB, ExecutionMode.OPENAI_LIVE}
+            self.execution_mode in {ExecutionMode.SDK_STUB, ExecutionMode.OPENAI_LIVE}
             and self.status == "completed"
             and self.approved_remedy_digest is None
         ):
-            raise ValueError(
-                "Completed SDK receipts require an approved remedy digest"
-            )
+            raise ValueError("Completed SDK receipts require an approved remedy digest")
         if self.status == RecoveryStatus.CLOSED_WITHOUT_ACTION.value and (
             self.provider_execution is not False or self.approved_remedy_digest is not None
         ):

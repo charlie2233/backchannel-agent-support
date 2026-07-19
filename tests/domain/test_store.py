@@ -6,6 +6,7 @@ from uuid import UUID
 import pytest
 
 from server.models import (
+    SDK_STUB_BOUNDARY,
     ApprovalDecisionRequest,
     DecisionAction,
     ExecutionMode,
@@ -29,6 +30,126 @@ REQUIRED_TABLES = {
 }
 
 APPROVED_DIGEST = f"sha256:{'a' * 64}"
+
+
+def test_task7_migrates_legacy_sdk_receipt_from_durable_pending_provenance(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "legacy-sdk-receipt.sqlite3"
+    timestamp = "2026-07-18T20:00:00+00:00"
+    recovery_id = "legacy-sdk-completed"
+    root_trace_id = "qa_trace_0123456789abcdef0123456789abcdef"
+    definition_digest = "b" * 64
+    with sqlite3.connect(database_path) as connection:
+        connection.executescript(
+            """
+            PRAGMA foreign_keys = ON;
+            CREATE TABLE recoveries (
+                id TEXT PRIMARY KEY,
+                scenario_id TEXT NOT NULL CHECK (scenario_id IN ('hotel', 'api-quota')),
+                execution_mode TEXT NOT NULL CHECK (
+                    execution_mode IN ('openai_live', 'sdk_stub', 'replay_fixture')
+                ),
+                status TEXT NOT NULL CHECK (
+                    status IN (
+                        'in_progress', 'pending_approval', 'completed',
+                        'closed_without_action', 'outcome_unknown'
+                    )
+                ),
+                current_step INTEGER NOT NULL CHECK (current_step BETWEEN 0 AND 5),
+                current_step_summary TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE pending_approvals (
+                tool_call_id TEXT PRIMARY KEY,
+                recovery_id TEXT NOT NULL REFERENCES recoveries(id) ON DELETE CASCADE,
+                sdk_version TEXT NOT NULL,
+                protocol_version TEXT NOT NULL,
+                agent_graph_version TEXT NOT NULL,
+                definition_digest TEXT NOT NULL,
+                root_trace_id TEXT NOT NULL,
+                execution_mode TEXT NOT NULL,
+                action_digest TEXT NOT NULL,
+                remedy_id TEXT NOT NULL,
+                consent_digest TEXT NOT NULL,
+                state_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE receipts (
+                recovery_id TEXT PRIMARY KEY REFERENCES recoveries(id) ON DELETE CASCADE,
+                receipt_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            """
+        )
+        connection.execute(
+            "INSERT INTO recoveries VALUES (?, 'hotel', 'sdk_stub', 'completed', 5, ?, ?, ?)",
+            (recovery_id, "Legacy SDK recovery completed.", timestamp, timestamp),
+        )
+        connection.execute(
+            """
+            INSERT INTO pending_approvals VALUES (
+                'legacy-call', ?, '0.18.3', 'backchannel.approval.v1',
+                'backchannel.hotel-agent.v1', ?, ?, 'sdk_stub', ?, 'legacy-remedy',
+                ?, '{}', 'completed', ?, ?
+            )
+            """,
+            (
+                recovery_id,
+                definition_digest,
+                root_trace_id,
+                "c" * 64,
+                APPROVED_DIGEST,
+                timestamp,
+                timestamp,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO receipts VALUES (?, ?, ?)",
+            (
+                recovery_id,
+                json.dumps(
+                    {
+                        "recoveryId": recovery_id,
+                        "executionMode": "sdk_stub",
+                        "status": "completed",
+                        "simulated": True,
+                        "providerExecution": True,
+                        "modelIds": [],
+                        "boundary": SDK_STUB_BOUNDARY,
+                        "providerResult": "Legacy demo provider result.",
+                        "authorizationSource": "Legacy exact approval.",
+                        "verificationResults": ["Legacy provider result verified."],
+                        "approvedRemedyDigest": APPROVED_DIGEST,
+                    }
+                ),
+                timestamp,
+            ),
+        )
+
+    store = SQLiteStore(database_path)
+    receipt = store.get_receipt(recovery_id)
+
+    assert receipt.execution_mode is ExecutionMode.SDK_STUB
+    assert receipt.model_call is False
+    assert receipt.model_ids == []
+    assert receipt.root_trace_id == root_trace_id
+    assert receipt.sdk_version == "0.18.3"
+    assert receipt.protocol_version == "backchannel.approval.v1"
+    assert receipt.agent_graph_version == "backchannel.hotel-agent.v1"
+    assert receipt.definition_digest == definition_digest
+    with sqlite3.connect(database_path) as connection:
+        raw = json.loads(
+            connection.execute(
+                "SELECT receipt_json FROM receipts WHERE recovery_id = ?",
+                (recovery_id,),
+            ).fetchone()[0]
+        )
+    assert raw["modelCall"] is False
+    assert raw["rootTraceId"] == root_trace_id
 
 
 def test_hotel_recovery_and_ordered_events_survive_reopen(tmp_path) -> None:
@@ -160,9 +281,7 @@ def test_task2_recovery_constraints_migrate_without_losing_replay_rows(
     legacy = store.get_recovery("legacy-replay")
     assert legacy.execution_mode is ExecutionMode.REPLAY_FIXTURE
     assert legacy.status is RecoveryStatus.COMPLETED
-    assert [event.type for event in store.list_events("legacy-replay")] == [
-        "recovery.completed"
-    ]
+    assert [event.type for event in store.list_events("legacy-replay")] == ["recovery.completed"]
     assert store.get_receipt("legacy-replay").provider_execution is False
     sdk_recovery = store.create_recovery(
         recovery_id="sdk-stub-recovery",

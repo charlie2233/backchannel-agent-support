@@ -48,9 +48,7 @@ def test_pending_snapshot_persists_exact_public_consent_without_sdk_state(
     provider = HotelSimulator(store=store)
     orchestrator = RecoveryOrchestrator(store=store, hotel_provider=provider)
 
-    pending = asyncio.run(
-        orchestrator.start("hotel", execution_mode=ExecutionMode.SDK_STUB)
-    )
+    pending = asyncio.run(orchestrator.start("hotel", execution_mode=ExecutionMode.SDK_STUB))
     recovery_id = pending.recovery.recovery_id
     snapshot = store.get_recovery(recovery_id)
     approval = snapshot.pending_approval
@@ -195,7 +193,7 @@ def test_task4_pending_rows_are_preserved_but_marked_incompatible(tmp_path) -> N
     migrated = SQLiteStore(database_path)
     envelope = migrated.get_pending_approval("task4-recovery")
 
-    assert envelope.sdk_version == "legacy-incompatible"
+    assert envelope.sdk_version == "0.18.3"
     assert envelope.action_digest == "a" * 64
     assert envelope.remedy_id == "legacy-incompatible"
     assert envelope.consent_digest == "legacy-incompatible"
@@ -205,9 +203,7 @@ def test_task4_pending_rows_are_preserved_but_marked_incompatible(tmp_path) -> N
 
     provider = HotelSimulator(store=migrated)
     orchestrator = RecoveryOrchestrator(store=migrated, hotel_provider=provider)
-    current = asyncio.run(
-        orchestrator.start("hotel", execution_mode=ExecutionMode.SDK_STUB)
-    )
+    current = asyncio.run(orchestrator.start("hotel", execution_mode=ExecutionMode.SDK_STUB))
     approval = current.recovery.pending_approval
     assert approval is not None
     response = asyncio.run(
@@ -228,16 +224,11 @@ def test_task4_pending_rows_are_preserved_but_marked_incompatible(tmp_path) -> N
     migrated.close()
 
     reopened = SQLiteStore(database_path)
-    assert reopened.get_pending_approval("task4-recovery").state_json == {
-        "legacy": True
-    }
+    assert reopened.get_pending_approval("task4-recovery").state_json == {"legacy": True}
     assert reopened.get_receipt(current.recovery.recovery_id).provider_execution is True
     with sqlite3.connect(database_path) as connection:
         pending_columns = {
-            row[1]
-            for row in connection.execute(
-                "PRAGMA table_info(pending_approvals)"
-            ).fetchall()
+            row[1] for row in connection.execute("PRAGMA table_info(pending_approvals)").fetchall()
         }
         assert pending_columns == {
             "tool_call_id",
@@ -245,10 +236,10 @@ def test_task4_pending_rows_are_preserved_but_marked_incompatible(tmp_path) -> N
             "sdk_version",
             "protocol_version",
             "agent_graph_version",
-                "definition_digest",
-                "root_trace_id",
-                "model_ids_json",
-                "execution_mode",
+            "definition_digest",
+            "root_trace_id",
+            "model_ids_json",
+            "execution_mode",
             "action_digest",
             "remedy_id",
             "consent_digest",
@@ -257,9 +248,7 @@ def test_task4_pending_rows_are_preserved_but_marked_incompatible(tmp_path) -> N
             "created_at",
             "updated_at",
         }
-        assert connection.execute("SELECT COUNT(*) FROM pending_approvals").fetchone() == (
-            2,
-        )
+        assert connection.execute("SELECT COUNT(*) FROM pending_approvals").fetchone() == (2,)
         assert connection.execute("SELECT COUNT(*) FROM remedies").fetchone() == (2,)
         assert connection.execute(
             "SELECT COUNT(*) FROM events WHERE recovery_id = 'task4-recovery'"
@@ -273,9 +262,7 @@ def test_remedy_envelope_and_event_roll_back_as_one_atomic_transition(tmp_path) 
     store = SQLiteStore(database_path)
     provider = HotelSimulator(store=store)
     orchestrator = RecoveryOrchestrator(store=store, hotel_provider=provider)
-    first = asyncio.run(
-        orchestrator.start("hotel", execution_mode=ExecutionMode.SDK_STUB)
-    )
+    first = asyncio.run(orchestrator.start("hotel", execution_mode=ExecutionMode.SDK_STUB))
     first_id = first.recovery.recovery_id
     first_envelope = store.get_pending_approval(first_id)
     first_consent = store.get_remedy_consent(first_id)
@@ -319,12 +306,8 @@ def test_repeated_recoveries_can_reuse_the_authoritative_remedy_identity(tmp_pat
     provider = HotelSimulator(store=store)
     orchestrator = RecoveryOrchestrator(store=store, hotel_provider=provider)
 
-    first = asyncio.run(
-        orchestrator.start("hotel", execution_mode=ExecutionMode.SDK_STUB)
-    )
-    second = asyncio.run(
-        orchestrator.start("hotel", execution_mode=ExecutionMode.SDK_STUB)
-    )
+    first = asyncio.run(orchestrator.start("hotel", execution_mode=ExecutionMode.SDK_STUB))
+    second = asyncio.run(orchestrator.start("hotel", execution_mode=ExecutionMode.SDK_STUB))
 
     assert first.recovery.recovery_id != second.recovery.recovery_id
     assert first.recovery.pending_approval is not None
@@ -393,13 +376,9 @@ def test_displayed_commitment_cannot_diverge_from_restored_sdk_arguments(
         initial = _create_api_recovery(client)
         recovery_id = str(initial["recoveryId"])
         consent = store.get_remedy_consent(recovery_id)
-        displayed_commitments = sorted(
-            [*consent.provider_commitments, "Late checkout guaranteed"]
-        )
+        displayed_commitments = sorted([*consent.provider_commitments, "Late checkout guaranteed"])
         displayed_evidence = consent.evidence.model_dump(mode="json")
-        displayed_evidence["remedy"][
-            "provider_commitments"
-        ] = displayed_commitments
+        displayed_evidence["remedy"]["provider_commitments"] = displayed_commitments
         displayed_digest = remedy_consent_digest(
             {
                 "recoveryId": recovery_id,
@@ -431,9 +410,7 @@ def test_displayed_commitment_cannot_diverge_from_restored_sdk_arguments(
             )
 
         displayed = client.get(f"/api/recoveries/{recovery_id}").json()
-        assert displayed["pendingApproval"]["providerCommitments"] == (
-            displayed_commitments
-        )
+        assert displayed["pendingApproval"]["providerCommitments"] == (displayed_commitments)
         assert displayed["pendingApproval"]["remedyDigest"] == displayed_digest
         response = client.post(
             f"/api/recoveries/{recovery_id}/decisions",
@@ -588,9 +565,7 @@ def test_same_claim_resumes_after_process_loss_before_sdk_restore(
     store = SQLiteStore(database_path)
     provider = HotelSimulator(store=store)
     orchestrator = RecoveryOrchestrator(store=store, hotel_provider=provider)
-    pending = asyncio.run(
-        orchestrator.start("hotel", execution_mode=ExecutionMode.SDK_STUB)
-    )
+    pending = asyncio.run(orchestrator.start("hotel", execution_mode=ExecutionMode.SDK_STUB))
     approval = pending.recovery.pending_approval
     assert approval is not None
     request = ApprovalDecisionRequest(
@@ -609,9 +584,7 @@ def test_same_claim_resumes_after_process_loss_before_sdk_restore(
 
     monkeypatch.setattr(orchestrator, "_resume_claimed_approval", crash_before_restore)
     with pytest.raises(SimulatedProcessLoss, match="durable claim"):
-        asyncio.run(
-            orchestrator.approve_decision(pending.recovery.recovery_id, request)
-        )
+        asyncio.run(orchestrator.approve_decision(pending.recovery.recovery_id, request))
 
     assert store.count_decisions(pending.recovery.recovery_id) == 1
     assert store.count_executions(pending.recovery.recovery_id) == 0

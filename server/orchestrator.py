@@ -31,7 +31,6 @@ from server.agents.schemas import (
     deterministic_hotel_arguments,
 )
 from server.agents.stub_model import (
-    DECLINED_REMEDY_CLOSURE,
     EXACT_REMEDY_REJECTION_MESSAGE,
 )
 from server.agents.tracing import (
@@ -48,8 +47,6 @@ from server.agents.versioning import (
     LIVE_PROVIDER_START_PROMPT,
     ApprovalVersionPolicy,
     hotel_definition_digest,
-    is_valid_live_trace_id,
-    is_valid_qa_trace_id,
     live_broker_start_prompt,
     live_hotel_definition_digest,
     new_qa_trace_id,
@@ -81,6 +78,7 @@ from server.store import (
     RemedyConsentRecord,
     SQLiteStore,
 )
+from server.trace_ids import is_valid_live_trace_id, is_valid_qa_trace_id
 
 logger = logging.getLogger(__name__)
 
@@ -204,9 +202,7 @@ class RecoveryOrchestrator:
             approved_scenario = ScenarioId(scenario_id)
         except ValueError as error:
             raise UnsupportedOrchestrationError("Unknown scenario") from error
-        if (
-            execution_mode is ExecutionMode.OPENAI_LIVE and not self._live_ready
-        ):
+        if execution_mode is ExecutionMode.OPENAI_LIVE and not self._live_ready:
             raise UnsupportedOrchestrationError(
                 "openai_live requires a server-side live-ready runtime"
             )
@@ -388,9 +384,7 @@ class RecoveryOrchestrator:
             expiry=expiry,
             consent_digest=consent_digest,
             hard_constraint_satisfied=policy_result.hard_constraint_satisfied,
-            delegated_authority_satisfied=(
-                policy_result.delegated_authority_satisfied
-            ),
+            delegated_authority_satisfied=(policy_result.delegated_authority_satisfied),
             evidence=arguments,
         )
 
@@ -579,17 +573,11 @@ class RecoveryOrchestrator:
             consent.evidence,
             DETERMINISTIC_HOTEL_AUTHORITY,
         )
-        if (
-            policy_result.hard_constraint_satisfied
-            != consent.hard_constraint_satisfied
-        ):
+        if policy_result.hard_constraint_satisfied != consent.hard_constraint_satisfied:
             self._raise_incompatible(recovery_id, "hard_constraint_result")
         if not policy_result.hard_constraint_satisfied:
             self._raise_incompatible(recovery_id, "hard_constraint_denied")
-        if (
-            policy_result.delegated_authority_satisfied
-            != consent.delegated_authority_satisfied
-        ):
+        if policy_result.delegated_authority_satisfied != consent.delegated_authority_satisfied:
             self._raise_incompatible(recovery_id, "authority_result")
         if not policy_result.delegated_authority_satisfied:
             self._raise_incompatible(recovery_id, "authority_denied")
@@ -637,9 +625,7 @@ class RecoveryOrchestrator:
                 ),
                 "costDeltaMinor": restored_arguments.remedy.cost_delta_minor,
                 "changedFields": sorted(restored_arguments.remedy.changed_fields),
-                "providerCommitments": sorted(
-                    restored_arguments.remedy.provider_commitments
-                ),
+                "providerCommitments": sorted(restored_arguments.remedy.provider_commitments),
                 "expiry": consent.expiry,
             }
         )
@@ -663,8 +649,14 @@ class RecoveryOrchestrator:
             run_config=run_config,
         )
         if claim.request.action is DecisionAction.DECLINE:
-            if completed.interruptions:
-                self._raise_incompatible(recovery_id, "rejection_interruption")
-            if completed.final_output != DECLINED_REMEDY_CLOSURE:
-                self._raise_incompatible(recovery_id, "rejection_closure")
+            if (
+                completed.interruptions
+                or self._store.get_completed_execution(recovery_id) is not None
+            ):
+                # Never claim cancellation when the resumed run produced another
+                # authorization boundary or durable provider evidence.
+                self._store.update_pending_approval_status(
+                    recovery_id,
+                    status="outcome_unknown",
+                )
         return completed

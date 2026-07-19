@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from dataclasses import dataclass
 from importlib.metadata import version
 from typing import Any
@@ -26,14 +25,11 @@ from server.config import (
 )
 
 SDK_DISTRIBUTION = "openai-agents"
-_QA_TRACE_PATTERN = re.compile(r"qa_trace_[0-9a-f]{32}\Z")
 HOTEL_AGENT_NAME = "Backchannel hotel recovery"
 HOTEL_AGENT_INSTRUCTIONS = (
     "Use the supplied typed evidence and request approval before commit_remedy."
 )
-HOTEL_START_PROMPT = (
-    "Run the deterministic hotel recovery to its authorization boundary."
-)
+HOTEL_START_PROMPT = "Run the deterministic hotel recovery to its authorization boundary."
 LIVE_CONSUMER_MODEL = "gpt-5.6-luna"
 LIVE_PROVIDER_MODEL = "gpt-5.6-luna"
 LIVE_BROKER_MODEL = "gpt-5.6-terra"
@@ -217,11 +213,3 @@ def new_qa_trace_id() -> str:
     """Return a local SDK QA correlation ID, never an OpenAI trace identifier."""
 
     return f"qa_trace_{uuid4().hex}"
-
-
-def is_valid_qa_trace_id(value: str) -> bool:
-    return _QA_TRACE_PATTERN.fullmatch(value) is not None
-
-
-def is_valid_live_trace_id(value: str) -> bool:
-    return re.fullmatch(r"trace_[0-9a-f]{32}", value) is not None
