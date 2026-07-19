@@ -11,6 +11,7 @@ from typing import Any
 from uuid import uuid4
 
 from agents import Agent
+from agents.agent_output import AgentOutputSchema, AgentOutputSchemaBase
 from agents.tool import FunctionTool
 
 from server.agents.schemas import (
@@ -19,7 +20,12 @@ from server.agents.schemas import (
     ConsumerProof,
     ProviderProof,
 )
-from server.config import APPROVAL_PROTOCOL_VERSION, HOTEL_AGENT_GRAPH_VERSION
+from server.config import (
+    APPROVAL_PROTOCOL_VERSION,
+    HOTEL_AGENT_GRAPH_VERSION,
+    HOTEL_LIVE_AGENT_GRAPH_VERSION,
+)
+from server.models import ExecutionMode
 
 SDK_DISTRIBUTION = "openai-agents"
 _QA_TRACE_PATTERN = re.compile(r"qa_trace_[0-9a-f]{32}\Z")
@@ -46,6 +52,19 @@ class ApprovalVersionPolicy:
             sdk_version=version(SDK_DISTRIBUTION),
             protocol_version=APPROVAL_PROTOCOL_VERSION,
             agent_graph_version=HOTEL_AGENT_GRAPH_VERSION,
+        )
+
+    @classmethod
+    def for_mode(cls, execution_mode: ExecutionMode) -> ApprovalVersionPolicy:
+        graph_version = (
+            HOTEL_LIVE_AGENT_GRAPH_VERSION
+            if execution_mode is ExecutionMode.OPENAI_LIVE
+            else HOTEL_AGENT_GRAPH_VERSION
+        )
+        return cls(
+            sdk_version=version(SDK_DISTRIBUTION),
+            protocol_version=APPROVAL_PROTOCOL_VERSION,
+            agent_graph_version=graph_version,
         )
 
 
@@ -99,6 +118,71 @@ def hotel_definition_digest(agent: Agent[Any]) -> str:
     return canonical_digest(definition)
 
 
+def live_hotel_definition_digest(agents: tuple[Agent[Any], Agent[Any], Agent[Any]]) -> str:
+    """Bind live resume to all Agent prompts, models, output schemas, and tools."""
+
+    from server.agents.live_factory import (  # Local import avoids graph construction cycle.
+        LIVE_BROKER_INSTRUCTIONS,
+        LIVE_CONSUMER_INSTRUCTIONS,
+        LIVE_CONSUMER_PROMPT,
+        LIVE_PROVIDER_INSTRUCTIONS,
+        LIVE_PROVIDER_PROMPT,
+    )
+
+    definitions: list[dict[str, Any]] = []
+    for agent in agents:
+        if not isinstance(agent.instructions, str) or not isinstance(agent.model, str):
+            raise TypeError("The live hotel graph requires static prompts and model aliases")
+        tools: list[dict[str, Any]] = []
+        for tool in agent.tools:
+            if not isinstance(tool, FunctionTool):
+                raise TypeError("The live hotel graph requires function tools only")
+            tools.append(
+                {
+                    "description": tool.description,
+                    "name": tool.name,
+                    "needsApproval": tool.needs_approval,
+                    "paramsJsonSchema": tool.params_json_schema,
+                    "strictJsonSchema": tool.strict_json_schema,
+                }
+            )
+        if isinstance(agent.output_type, AgentOutputSchemaBase):
+            output_schema = agent.output_type
+        elif agent.output_type is None:
+            raise TypeError("Every live hotel Agent requires a strict output schema")
+        else:
+            output_schema = AgentOutputSchema(agent.output_type)
+        definitions.append(
+            {
+                "instructions": agent.instructions,
+                "model": agent.model,
+                "name": agent.name,
+                "outputSchema": (
+                    {
+                        "jsonSchema": output_schema.json_schema(),
+                        "name": output_schema.name(),
+                        "strict": output_schema.is_strict_json_schema(),
+                    }
+                    if output_schema is not None and not output_schema.is_plain_text()
+                    else None
+                ),
+                "tools": tools,
+            }
+        )
+    return canonical_digest(
+        {
+            "agents": definitions,
+            "prompts": {
+                "consumerInstructions": LIVE_CONSUMER_INSTRUCTIONS,
+                "consumerStart": LIVE_CONSUMER_PROMPT,
+                "providerInstructions": LIVE_PROVIDER_INSTRUCTIONS,
+                "providerStart": LIVE_PROVIDER_PROMPT,
+                "brokerInstructions": LIVE_BROKER_INSTRUCTIONS,
+            },
+        }
+    )
+
+
 def remedy_action_digest(arguments: CommitRemedyArguments) -> str:
     """Create the internal idempotency digest for the deterministic remedy action."""
 
@@ -119,3 +203,10 @@ def new_qa_trace_id() -> str:
 
 def is_valid_qa_trace_id(value: str) -> bool:
     return _QA_TRACE_PATTERN.fullmatch(value) is not None
+
+
+_OPENAI_TRACE_PATTERN = re.compile(r"trace_[0-9a-f]{32}\Z")
+
+
+def is_valid_openai_trace_id(value: str) -> bool:
+    return _OPENAI_TRACE_PATTERN.fullmatch(value) is not None

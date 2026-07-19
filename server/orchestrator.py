@@ -3,23 +3,52 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, NoReturn
 from uuid import uuid4
 
-from agents import Agent, RunContextWrapper, Runner, RunResult, RunState
+from agents import (
+    Agent,
+    ModelProvider,
+    RunContextWrapper,
+    Runner,
+    RunResult,
+    RunState,
+    gen_trace_id,
+    trace,
+)
 from agents.exceptions import UserError
 
 from server.agents.factory import HotelAgentContext, build_hotel_agent
-from server.agents.schemas import CommitRemedyArguments, deterministic_hotel_arguments
+from server.agents.live_factory import (
+    LIVE_CONSUMER_PROMPT,
+    LIVE_PROVIDER_PROMPT,
+    build_live_hotel_agents,
+    live_broker_prompt,
+)
+from server.agents.live_models import ResponseMetadataRecorder
+from server.agents.schemas import (
+    BrokerOutcome,
+    CommitRemedyArguments,
+    ConsumerProof,
+    ProviderProof,
+    deterministic_hotel_arguments,
+)
 from server.agents.stub_model import CLOSED_WITHOUT_ACTION_MESSAGE, DECLINE_MESSAGE
-from server.agents.tracing import configure_sdk_stub_tracing
+from server.agents.tracing import (
+    configure_openai_live_tracing,
+    configure_sdk_stub_tracing,
+)
 from server.agents.versioning import (
     HOTEL_START_PROMPT,
     ApprovalVersionPolicy,
     hotel_definition_digest,
+    is_valid_openai_trace_id,
     is_valid_qa_trace_id,
+    live_hotel_definition_digest,
     new_qa_trace_id,
     remedy_action_digest,
 )
@@ -72,6 +101,19 @@ class ResumeIncompatibleError(ValueError):
         return {"code": self.code, "recoveryId": self.recovery_id}
 
 
+class LiveUnavailableError(ValueError):
+    """Stable key/capability gate raised before any live model or provider call."""
+
+    code = "live_unavailable"
+
+    def __init__(self) -> None:
+        super().__init__(self.code)
+
+
+LiveModelProviderFactory = Callable[[ResponseMetadataRecorder], ModelProvider]
+LiveTraceFactory = Callable[..., AbstractContextManager[Any]]
+
+
 @dataclass(frozen=True, slots=True)
 class PendingSdkApproval:
     recovery: RecoverySnapshot
@@ -86,13 +128,34 @@ class RecoveryOrchestrator:
         store: SQLiteStore,
         hotel_provider: HotelSimulator,
         version_policy: ApprovalVersionPolicy | None = None,
+        live_ready: bool = False,
+        live_model_provider_factory: LiveModelProviderFactory | None = None,
+        live_trace_factory: LiveTraceFactory | None = None,
     ) -> None:
         self._store = store
         self._hotel_provider = hotel_provider
         self._hotel_provider.bind_store(store)
         self._version_policy = version_policy or ApprovalVersionPolicy.current()
+        self._live_version_policy = ApprovalVersionPolicy.for_mode(
+            ExecutionMode.OPENAI_LIVE
+        )
+        self._live_ready = live_ready
+        self._live_model_provider_factory = live_model_provider_factory
+        self._live_trace_factory = live_trace_factory or self._openai_trace
         self._reconcile_completed_executions()
         self._reconcile_claimed_decisions()
+
+    @staticmethod
+    def _openai_trace(*, trace_id: str, group_id: str) -> AbstractContextManager[Any]:
+        return trace(
+            "Backchannel live hotel recovery",
+            trace_id=trace_id,
+            group_id=group_id,
+            metadata={
+                "executionMode": ExecutionMode.OPENAI_LIVE.value,
+                "providerBoundary": "demo_adapter_only",
+            },
+        )
 
     @staticmethod
     def _context_serializer(_context: HotelAgentContext) -> dict[str, Any]:
@@ -100,20 +163,31 @@ class RecoveryOrchestrator:
 
         return {}
 
-    @staticmethod
-    def _receipt_for_execution(execution: DurableExecution) -> RecoveryReceipt:
+    def _receipt_for_execution(self, execution: DurableExecution) -> RecoveryReceipt:
         if execution.result_json is None:
             raise ValueError("Completed durable execution is missing its result")
         dispatch = HotelDispatchResult.model_validate(execution.result_json)
+        envelope = self._store.get_pending_approval(execution.recovery_id)
+        model_ids = list(
+            dict.fromkeys(item.returned_model for item in envelope.model_metadata)
+        )
         return RecoveryReceipt(
             recoveryId=execution.recovery_id,
-            executionMode=ExecutionMode.SDK_STUB,
+            executionMode=envelope.execution_mode,
             status="completed",
             simulated=True,
             providerExecution=True,
-            modelIds=[],
+            modelIds=model_ids,
+            rootTraceId=envelope.root_trace_id,
+            sdkVersion=envelope.sdk_version,
+            protocolVersion=envelope.protocol_version,
+            agentGraphVersion=envelope.agent_graph_version,
+            promptToolSchemaHash=envelope.definition_digest,
             boundary=(
-                "Deterministic Agents SDK model and demo hotel adapter only; "
+                "Live OpenAI model orchestration and demo hotel adapter only; "
+                "no real booking or payment change."
+                if envelope.execution_mode is ExecutionMode.OPENAI_LIVE
+                else "Deterministic Agents SDK model and demo hotel adapter only; "
                 "no OpenAI model call, real booking, or payment change."
             ),
             providerResult=dispatch.provider_result,
@@ -215,6 +289,14 @@ class RecoveryOrchestrator:
             approved_scenario = ScenarioId(scenario_id)
         except ValueError as error:
             raise UnsupportedOrchestrationError("Unknown scenario") from error
+        if execution_mode is ExecutionMode.OPENAI_LIVE:
+            if approved_scenario is not ScenarioId.HOTEL:
+                raise UnsupportedOrchestrationError(
+                    "OpenAI live supports the hotel scenario only"
+                )
+            if not self._live_ready or self._live_model_provider_factory is None:
+                raise LiveUnavailableError
+            return await self._start_live_hotel()
         if (
             approved_scenario is not ScenarioId.HOTEL
             or execution_mode is not ExecutionMode.SDK_STUB
@@ -237,6 +319,7 @@ class RecoveryOrchestrator:
             recovery_id=recovery_id,
             store=self._store,
             hotel_provider=self._hotel_provider,
+            execution_mode=ExecutionMode.SDK_STUB,
         )
         original_root_agent = build_hotel_agent(
             context=context,
@@ -292,6 +375,7 @@ class RecoveryOrchestrator:
             remedy_id=arguments.remedy.remedy_id,
             consent_digest=consent_digest,
             state_json=state_json,
+            model_metadata=(),
         )
         remedy_consent = RemedyConsentRecord(
             remedy_id=arguments.remedy.remedy_id,
@@ -327,6 +411,185 @@ class RecoveryOrchestrator:
             recovery=recovery,
             sdk_result=result,
             original_root_agent=original_root_agent,
+        )
+
+    async def _start_live_hotel(self) -> PendingSdkApproval:
+        """Run three live Agents under one persisted trace to exact approval."""
+
+        if self._live_model_provider_factory is None:
+            raise LiveUnavailableError
+        recovery_id = str(uuid4())
+        root_trace_id = gen_trace_id()
+        self._store.create_recovery(
+            recovery_id=recovery_id,
+            scenario_id=ScenarioId.HOTEL,
+            execution_mode=ExecutionMode.OPENAI_LIVE,
+            current_step=0,
+            current_step_summary="Live OpenAI demo-provider recovery started.",
+        )
+        recorder = ResponseMetadataRecorder()
+        model_provider = self._live_model_provider_factory(recorder)
+        run_config = configure_openai_live_tracing(model_provider=model_provider)
+        context = HotelAgentContext(
+            recovery_id=recovery_id,
+            store=self._store,
+            hotel_provider=self._hotel_provider,
+            execution_mode=ExecutionMode.OPENAI_LIVE,
+            root_trace_id=root_trace_id,
+            sdk_version=self._live_version_policy.sdk_version,
+            protocol_version=self._live_version_policy.protocol_version,
+            agent_graph_version=self._live_version_policy.agent_graph_version,
+        )
+        graph = build_live_hotel_agents()
+        definition_digest = live_hotel_definition_digest(
+            (graph.consumer, graph.provider, graph.broker)
+        )
+        authoritative_arguments = deterministic_hotel_arguments()
+        try:
+            with self._live_trace_factory(
+                trace_id=root_trace_id,
+                group_id=recovery_id,
+            ):
+                consumer_result = await Runner.run(
+                    graph.consumer,
+                    LIVE_CONSUMER_PROMPT,
+                    context=context,
+                    run_config=run_config,
+                )
+                if not isinstance(consumer_result.final_output, ConsumerProof):
+                    raise RuntimeError("Live consumer Agent returned incompatible output")
+                if consumer_result.final_output != authoritative_arguments.consumer_proof:
+                    raise RuntimeError(
+                        "Live consumer proof changed the fixed source evidence"
+                    )
+                provider_result = await Runner.run(
+                    graph.provider,
+                    LIVE_PROVIDER_PROMPT,
+                    context=context,
+                    run_config=run_config,
+                )
+                if not isinstance(provider_result.final_output, ProviderProof):
+                    raise RuntimeError("Live provider Agent returned incompatible output")
+                if provider_result.final_output != authoritative_arguments.provider_proof:
+                    raise RuntimeError(
+                        "Live provider proof changed the fixed source evidence"
+                    )
+                proposed = authoritative_arguments.remedy
+                proposed_arguments = CommitRemedyArguments(
+                    consumer_proof=consumer_result.final_output,
+                    provider_proof=provider_result.final_output,
+                    remedy=proposed,
+                )
+                broker_result = await Runner.run(
+                    graph.broker,
+                    live_broker_prompt(proposed_arguments),
+                    context=context,
+                    run_config=run_config,
+                )
+            if len(broker_result.interruptions) != 1:
+                raise RuntimeError("Live broker did not produce exactly one interruption")
+            interruption = broker_result.interruptions[0]
+            if interruption.tool_name != "commit_remedy" or not interruption.call_id:
+                raise RuntimeError("Live broker interrupted on an unexpected tool")
+            try:
+                arguments = CommitRemedyArguments.model_validate_json(
+                    interruption.arguments or ""
+                )
+            except ValueError:
+                raise RuntimeError("Live broker produced invalid commit arguments") from None
+            if arguments != proposed_arguments:
+                raise RuntimeError("Live broker changed the supplied exact remedy evidence")
+            metadata = recorder.snapshot()
+            if tuple(item.requested_model for item in metadata) != (
+                "gpt-5.6-luna",
+                "gpt-5.6-luna",
+                "gpt-5.6-terra",
+            ):
+                raise RuntimeError("Live graph model resolution was incomplete")
+
+            state_json = broker_result.to_state().to_json(
+                context_serializer=self._context_serializer,
+                strict_context=True,
+            )
+            action_digest = remedy_action_digest(arguments)
+            terms = exact_hotel_terms(arguments)
+            expiry = datetime.now(UTC) + timedelta(minutes=30)
+            changed_fields = tuple(sorted(arguments.remedy.changed_fields))
+            provider_commitments = tuple(
+                sorted(arguments.remedy.provider_commitments)
+            )
+            consent_digest = remedy_consent_digest(
+                {
+                    "recoveryId": recovery_id,
+                    "remedyId": arguments.remedy.remedy_id,
+                    "terms": terms.model_dump(mode="json", by_alias=True),
+                    "costDeltaMinor": arguments.remedy.cost_delta_minor,
+                    "changedFields": list(changed_fields),
+                    "providerCommitments": list(provider_commitments),
+                    "expiry": expiry,
+                }
+            )
+            policy_result = evaluate_hotel_policy(
+                arguments,
+                DETERMINISTIC_HOTEL_AUTHORITY,
+            )
+            envelope = PendingApprovalEnvelope(
+                tool_call_id=interruption.call_id,
+                recovery_id=recovery_id,
+                sdk_version=self._live_version_policy.sdk_version,
+                protocol_version=self._live_version_policy.protocol_version,
+                agent_graph_version=self._live_version_policy.agent_graph_version,
+                definition_digest=definition_digest,
+                root_trace_id=root_trace_id,
+                execution_mode=ExecutionMode.OPENAI_LIVE,
+                action_digest=action_digest,
+                remedy_id=arguments.remedy.remedy_id,
+                consent_digest=consent_digest,
+                state_json=state_json,
+                model_metadata=metadata,
+            )
+            remedy_consent = RemedyConsentRecord(
+                remedy_id=arguments.remedy.remedy_id,
+                recovery_id=recovery_id,
+                terms=terms,
+                cost_delta_minor=arguments.remedy.cost_delta_minor,
+                changed_fields=changed_fields,
+                provider_commitments=provider_commitments,
+                expiry=expiry,
+                consent_digest=consent_digest,
+                hard_constraint_satisfied=policy_result.hard_constraint_satisfied,
+                delegated_authority_satisfied=(
+                    policy_result.delegated_authority_satisfied
+                ),
+                evidence=arguments,
+            )
+            recovery = self._store.record_transition(
+                recovery_id,
+                status=RecoveryStatus.PENDING_APPROVAL,
+                current_step=3,
+                current_step_summary=(
+                    "Approval required before live demo-provider dispatch."
+                ),
+                event_type="approval.requested",
+                event_data={
+                    "phase": "Authorize",
+                    "providerExecution": False,
+                    "summary": "A live Agents SDK approval interruption is pending.",
+                },
+                pending_approval=envelope,
+                remedy_consent=remedy_consent,
+            )
+        except BaseException:
+            if not self._store.delete_unstarted_recovery(recovery_id):
+                logger.error(
+                    "Live start failed after durable boundary recovery_id=%s",
+                    recovery_id,
+                )
+            raise
+        return PendingSdkApproval(
+            recovery=recovery,
+            sdk_result=broker_result,
+            original_root_agent=graph.broker,
         )
 
     def _complete_committed_claim(
@@ -457,15 +720,6 @@ class RecoveryOrchestrator:
         expected_decision = "approve" if approve else "decline"
         if claim.request.decision != expected_decision:
             raise ValueError("Decision claim action does not match resume path")
-        arguments = deterministic_hotel_arguments()
-        expected_action_digest = remedy_action_digest(arguments)
-        fresh_context = HotelAgentContext(
-            recovery_id=recovery_id,
-            store=self._store,
-            hotel_provider=self._hotel_provider,
-            approved_remedy_digest=claim.request.remedy_digest,
-        )
-        fresh_agent = build_hotel_agent(context=fresh_context, arguments=arguments)
         try:
             recovery = self._store.get_recovery(recovery_id)
             envelope = self._store.get_pending_approval(recovery_id)
@@ -473,13 +727,70 @@ class RecoveryOrchestrator:
         except (RecoveryNotFoundError, ValueError, TypeError):
             self._raise_incompatible(recovery_id, "envelope")
 
+        arguments = consent.evidence
+        expected_action_digest = remedy_action_digest(arguments)
+        recorder: ResponseMetadataRecorder | None = None
+        if envelope.execution_mode is ExecutionMode.OPENAI_LIVE:
+            if not self._live_ready or self._live_model_provider_factory is None:
+                raise LiveUnavailableError
+            recorder = ResponseMetadataRecorder(
+                envelope.model_metadata,
+                on_record=lambda metadata: self._store.update_pending_model_metadata(
+                    recovery_id,
+                    metadata,
+                ),
+            )
+            model_provider = self._live_model_provider_factory(recorder)
+            live_graph = build_live_hotel_agents()
+            fresh_agent = live_graph.broker
+            expected_policy = self._live_version_policy
+            expected_definition_digest = live_hotel_definition_digest(
+                (live_graph.consumer, live_graph.provider, live_graph.broker)
+            )
+            expected_tool_call_id = claim.request.tool_call_id
+            run_config = configure_openai_live_tracing(
+                model_provider=model_provider
+            )
+        elif envelope.execution_mode is ExecutionMode.SDK_STUB:
+            expected_policy = self._version_policy
+            fresh_agent = build_hotel_agent(
+                context=HotelAgentContext(
+                    recovery_id=recovery_id,
+                    store=self._store,
+                    hotel_provider=self._hotel_provider,
+                ),
+                arguments=arguments,
+            )
+            expected_definition_digest = hotel_definition_digest(fresh_agent)
+            expected_tool_call_id = f"commit-remedy-{recovery_id}"
+            run_config = configure_sdk_stub_tracing()
+        else:
+            self._raise_incompatible(recovery_id, "execution_mode")
+        fresh_context = HotelAgentContext(
+            recovery_id=recovery_id,
+            store=self._store,
+            hotel_provider=self._hotel_provider,
+            approved_remedy_digest=claim.request.remedy_digest,
+            execution_mode=envelope.execution_mode,
+            root_trace_id=envelope.root_trace_id,
+            sdk_version=envelope.sdk_version,
+            protocol_version=envelope.protocol_version,
+            agent_graph_version=envelope.agent_graph_version,
+            definition_digest=envelope.definition_digest,
+        )
+        if envelope.execution_mode is ExecutionMode.SDK_STUB:
+            fresh_agent = build_hotel_agent(
+                context=fresh_context,
+                arguments=arguments,
+            )
+
         expected_markers = {
-            "sdk_version": self._version_policy.sdk_version,
-            "protocol_version": self._version_policy.protocol_version,
-            "agent_graph_version": self._version_policy.agent_graph_version,
-            "definition_digest": hotel_definition_digest(fresh_agent),
-            "execution_mode": ExecutionMode.SDK_STUB,
-            "tool_call_id": f"commit-remedy-{recovery_id}",
+            "sdk_version": expected_policy.sdk_version,
+            "protocol_version": expected_policy.protocol_version,
+            "agent_graph_version": expected_policy.agent_graph_version,
+            "definition_digest": expected_definition_digest,
+            "execution_mode": recovery.execution_mode,
+            "tool_call_id": expected_tool_call_id,
             "action_digest": expected_action_digest,
             "remedy_id": arguments.remedy.remedy_id,
             "consent_digest": claim.request.remedy_digest,
@@ -509,8 +820,23 @@ class RecoveryOrchestrator:
         )
         if envelope.status not in allowed_envelope_statuses:
             self._raise_incompatible(recovery_id, "approval_status")
-        if not is_valid_qa_trace_id(envelope.root_trace_id):
+        trace_id_valid = (
+            is_valid_openai_trace_id(envelope.root_trace_id)
+            if envelope.execution_mode is ExecutionMode.OPENAI_LIVE
+            else is_valid_qa_trace_id(envelope.root_trace_id)
+        )
+        if not trace_id_valid:
             self._raise_incompatible(recovery_id, "root_trace_id")
+        if envelope.execution_mode is ExecutionMode.OPENAI_LIVE:
+            requested_models = tuple(
+                item.requested_model for item in envelope.model_metadata[:3]
+            )
+            if requested_models != (
+                "gpt-5.6-luna",
+                "gpt-5.6-luna",
+                "gpt-5.6-terra",
+            ):
+                self._raise_incompatible(recovery_id, "model_metadata")
         if not isinstance(envelope.state_json, dict) or not envelope.state_json:
             self._raise_incompatible(recovery_id, "state_json")
         recomputed_consent_digest = remedy_consent_digest(
@@ -612,15 +938,43 @@ class RecoveryOrchestrator:
                 always_reject=False,
                 rejection_message=DECLINE_MESSAGE,
             )
-        completed = await Runner.run(
-            fresh_agent,
-            state,
-            run_config=configure_sdk_stub_tracing(),
-        )
+        try:
+            if envelope.execution_mode is ExecutionMode.OPENAI_LIVE:
+                with self._live_trace_factory(
+                    trace_id=envelope.root_trace_id,
+                    group_id=recovery_id,
+                ):
+                    completed = await Runner.run(
+                        fresh_agent,
+                        state,
+                        run_config=run_config,
+                    )
+            else:
+                completed = await Runner.run(
+                    fresh_agent,
+                    state,
+                    run_config=run_config,
+                )
+        finally:
+            if recorder is not None:
+                self._store.update_pending_model_metadata(
+                    recovery_id,
+                    recorder.snapshot(),
+                )
         if not approve:
             if self._store.count_executions(recovery_id) != execution_count_before:
                 raise RuntimeError("SDK rejection unexpectedly changed execution evidence")
-            if completed.final_output != CLOSED_WITHOUT_ACTION_MESSAGE:
+            if envelope.execution_mode is ExecutionMode.OPENAI_LIVE:
+                if not isinstance(completed.final_output, BrokerOutcome) or (
+                    completed.final_output.status != "closed_without_action"
+                ):
+                    raise RuntimeError("Live rejection did not close without action")
+            elif completed.final_output != CLOSED_WITHOUT_ACTION_MESSAGE:
                 raise RuntimeError("Deterministic rejection did not close without action")
             self._store.record_exact_interruption_rejected(claim)
+        elif envelope.execution_mode is ExecutionMode.OPENAI_LIVE:
+            if not isinstance(completed.final_output, BrokerOutcome) or (
+                completed.final_output.status != "completed"
+            ):
+                raise RuntimeError("Live approval did not return completed broker output")
         return completed

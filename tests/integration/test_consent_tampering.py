@@ -97,7 +97,7 @@ def test_pending_snapshot_persists_exact_public_consent_without_sdk_state(
     assert "statejson" not in public_keys
     assert "consumer_proof" not in public_keys
     assert "provider_proof" not in public_keys
-    assert "prompt" not in public_keys
+    assert '"prompt"' not in public_keys
 
     with sqlite3.connect(database_path) as connection:
         assert connection.execute(
@@ -251,6 +251,7 @@ def test_task4_pending_rows_are_preserved_but_marked_incompatible(tmp_path) -> N
             "action_digest",
             "remedy_id",
             "consent_digest",
+            "model_metadata_json",
             "state_json",
             "status",
             "created_at",

@@ -79,7 +79,7 @@ def test_public_decline_closes_without_action_and_leaks_no_internal_state(tmp_pa
             "consumer_proof",
             "provider_proof",
             "rejection_message",
-            "prompt",
+            '"prompt"',
             "evidence_json",
         ):
             assert forbidden not in public_json

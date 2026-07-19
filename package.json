@@ -9,6 +9,8 @@
     "build": "npm --workspace web run build",
     "check": "npm --workspace web run check && uv run ruff check server tests && uv run mypy server && uv run pytest -q",
     "smoke:stub": "node scripts/smoke-stub.mjs",
+    "smoke:live": "uv run python -m scripts.smoke_live",
+    "smoke:live:3": "uv run python -m scripts.smoke_live_three",
     "test": "npm --workspace web test -- --run"
   },
   "engines": {

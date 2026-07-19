@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from agents import Agent, function_tool
+from agents.tool import FunctionTool
 from agents.tool_context import ToolContext
 
 from server.agents.schemas import (
@@ -30,14 +31,16 @@ class HotelAgentContext:
     store: SQLiteStore
     hotel_provider: HotelSimulator
     approved_remedy_digest: str | None = None
+    execution_mode: ExecutionMode = ExecutionMode.SDK_STUB
+    root_trace_id: str | None = None
+    sdk_version: str | None = None
+    protocol_version: str | None = None
+    agent_graph_version: str | None = None
+    definition_digest: str | None = None
 
 
-def build_hotel_agent(
-    *,
-    context: HotelAgentContext,
-    arguments: CommitRemedyArguments,
-) -> Agent[HotelAgentContext]:
-    """Build the root Agent whose commit tool is guarded by an SDK interruption."""
+def build_commit_remedy_tool() -> FunctionTool:
+    """Build the one shared, exact permission-guarded demo-provider commit tool."""
 
     @function_tool(needs_approval=True, failure_error_function=None)
     def commit_remedy(
@@ -72,43 +75,62 @@ def build_hotel_agent(
             tool_call_id=tool_context.tool_call_id,
             remedy_digest=remedy_digest,
         )
-        receipt = RecoveryReceipt(
-            recoveryId=tool_context.context.recovery_id,
-            executionMode=ExecutionMode.SDK_STUB,
-            status="completed",
-            simulated=True,
-            providerExecution=True,
-            modelIds=[],
-            boundary=(
-                "Deterministic Agents SDK model and demo hotel adapter only; "
-                "no OpenAI model call, real booking, or payment change."
-            ),
-            providerResult=dispatch.provider_result,
-            authorizationSource="Approved Agents SDK commit_remedy interruption.",
-            verificationResults=[
-                "Demo provider dispatch returned confirmed.",
-                "Provider result stored under one idempotency key.",
-                "Temporary permission revoked after terminal completion.",
-            ],
-            decision="approved",
-            decisionRemedyDigest=remedy_digest,
-            executionCount=1,
-            providerDispatchStarted=True,
-            exactInterruptionRejected=False,
-            permissionRevoked=True,
-            scopeClosed=True,
-            approvedRemedyDigest=remedy_digest,
-        )
-        execution = tool_context.context.store.get_completed_execution(
-            tool_context.context.recovery_id
-        )
-        if execution is None:
-            raise RuntimeError("Durable provider result was not recorded")
-        tool_context.context.store.finalize_completed_execution(
-            execution,
-            receipt=receipt,
-        )
+        # Preserve the established stub crash/reconciliation seam. The live lane
+        # finalizes after the resumed broker response so every returned model ID is
+        # included in its receipt.
+        if tool_context.context.execution_mode is ExecutionMode.SDK_STUB:
+            receipt = RecoveryReceipt(
+                recoveryId=tool_context.context.recovery_id,
+                executionMode=ExecutionMode.SDK_STUB,
+                status="completed",
+                simulated=True,
+                providerExecution=True,
+                modelIds=[],
+                rootTraceId=tool_context.context.root_trace_id,
+                sdkVersion=tool_context.context.sdk_version,
+                protocolVersion=tool_context.context.protocol_version,
+                agentGraphVersion=tool_context.context.agent_graph_version,
+                promptToolSchemaHash=tool_context.context.definition_digest,
+                boundary=(
+                    "Deterministic Agents SDK model and demo hotel adapter only; "
+                    "no OpenAI model call, real booking, or payment change."
+                ),
+                providerResult=dispatch.provider_result,
+                authorizationSource="Approved Agents SDK commit_remedy interruption.",
+                verificationResults=[
+                    "Demo provider dispatch returned confirmed.",
+                    "Provider result stored under one idempotency key.",
+                    "Temporary permission revoked after terminal completion.",
+                ],
+                decision="approved",
+                decisionRemedyDigest=remedy_digest,
+                executionCount=1,
+                providerDispatchStarted=True,
+                exactInterruptionRejected=False,
+                permissionRevoked=True,
+                scopeClosed=True,
+                approvedRemedyDigest=remedy_digest,
+            )
+            execution = tool_context.context.store.get_completed_execution(
+                tool_context.context.recovery_id
+            )
+            if execution is None:
+                raise RuntimeError("Durable provider result was not recorded")
+            tool_context.context.store.finalize_completed_execution(
+                execution,
+                receipt=receipt,
+            )
         return dispatch.model_dump_json()
+
+    return commit_remedy
+
+
+def build_hotel_agent(
+    *,
+    context: HotelAgentContext,
+    arguments: CommitRemedyArguments,
+) -> Agent[HotelAgentContext]:
+    """Build the root Agent whose commit tool is guarded by an SDK interruption."""
 
     model = DeterministicApprovalModel(
         arguments=arguments,
@@ -118,5 +140,5 @@ def build_hotel_agent(
         name=HOTEL_AGENT_NAME,
         instructions=HOTEL_AGENT_INSTRUCTIONS,
         model=model,
-        tools=[commit_remedy],
+        tools=[build_commit_remedy_tool()],
     )

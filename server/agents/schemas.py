@@ -42,6 +42,11 @@ class CommitRemedyArguments(StubSchema):
     remedy: BrokerRemedy
 
 
+class BrokerOutcome(StubSchema):
+    status: Literal["completed", "closed_without_action"]
+    summary: str
+
+
 def deterministic_hotel_arguments() -> CommitRemedyArguments:
     """Return the fixed, typed hotel evidence used by the keyless SDK model."""
 

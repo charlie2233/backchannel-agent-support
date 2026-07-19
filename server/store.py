@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -13,6 +14,7 @@ from typing import Any, Literal, cast
 
 from pydantic import JsonValue
 
+from server.agents.live_models import ModelResponseMetadata
 from server.agents.schemas import CommitRemedyArguments
 from server.digest import remedy_consent_digest
 from server.models import (
@@ -89,6 +91,7 @@ CREATE TABLE IF NOT EXISTS pending_approvals (
     action_digest TEXT NOT NULL,
     remedy_id TEXT NOT NULL,
     consent_digest TEXT NOT NULL,
+    model_metadata_json TEXT NOT NULL DEFAULT '[]',
     state_json TEXT NOT NULL,
     status TEXT NOT NULL,
     created_at TEXT NOT NULL,
@@ -217,6 +220,7 @@ class PendingApprovalEnvelope:
     remedy_id: str
     consent_digest: str
     state_json: dict[str, Any]
+    model_metadata: tuple[ModelResponseMetadata, ...] = ()
     status: str = "pending"
 
 
@@ -324,10 +328,11 @@ class SQLiteStore:
                 """
             )
             self._migrate_task6_receipts(connection)
+            self._migrate_task7_receipt_provenance(connection)
 
     @staticmethod
     def _migrate_task3_pending_approvals(connection: sqlite3.Connection) -> None:
-        """Rebuild every legacy envelope table to the exact Task 5 contract."""
+        """Rebuild every legacy envelope table to the exact Task 7 contract."""
 
         columns = {
             cast(str, row["name"])
@@ -335,7 +340,7 @@ class SQLiteStore:
                 "PRAGMA table_info(pending_approvals)"
             ).fetchall()
         }
-        task5_columns = {
+        task7_columns = {
             "tool_call_id",
             "recovery_id",
             "sdk_version",
@@ -347,12 +352,13 @@ class SQLiteStore:
             "action_digest",
             "remedy_id",
             "consent_digest",
+            "model_metadata_json",
             "state_json",
             "status",
             "created_at",
             "updated_at",
         }
-        if columns == task5_columns:
+        if columns == task7_columns:
             return
 
         required_legacy_columns = {
@@ -387,15 +393,20 @@ class SQLiteStore:
             "COALESCE((SELECT execution_mode FROM recoveries "
             "WHERE recoveries.id = pending_approvals.recovery_id), 'sdk_stub')",
         )
+        sdk_version_source = (
+            legacy_value("sdk_version")
+            if {"action_digest", "remedy_id", "consent_digest"} <= columns
+            else "'legacy-incompatible'"
+        )
 
         connection.commit()
         connection.execute("PRAGMA foreign_keys = OFF")
         try:
             connection.execute("BEGIN IMMEDIATE")
-            connection.execute("DROP TABLE IF EXISTS pending_approvals_task5")
+            connection.execute("DROP TABLE IF EXISTS pending_approvals_task7")
             connection.execute(
                 """
-                CREATE TABLE pending_approvals_task5 (
+                CREATE TABLE pending_approvals_task7 (
                     tool_call_id TEXT PRIMARY KEY,
                     recovery_id TEXT NOT NULL REFERENCES recoveries(id) ON DELETE CASCADE,
                     sdk_version TEXT NOT NULL,
@@ -407,6 +418,7 @@ class SQLiteStore:
                     action_digest TEXT NOT NULL,
                     remedy_id TEXT NOT NULL,
                     consent_digest TEXT NOT NULL,
+                    model_metadata_json TEXT NOT NULL,
                     state_json TEXT NOT NULL,
                     status TEXT NOT NULL,
                     created_at TEXT NOT NULL,
@@ -416,17 +428,17 @@ class SQLiteStore:
             )
             connection.execute(
                 f"""
-                INSERT INTO pending_approvals_task5 (
+                INSERT INTO pending_approvals_task7 (
                     tool_call_id, recovery_id, sdk_version, protocol_version,
                     agent_graph_version, definition_digest, root_trace_id,
                     execution_mode, action_digest, remedy_id, consent_digest,
-                    state_json, status,
+                    model_metadata_json, state_json, status,
                     created_at, updated_at
                 )
                 SELECT
                     tool_call_id,
                     recovery_id,
-                    'legacy-incompatible',
+                    {sdk_version_source},
                     {legacy_value("protocol_version")},
                     {legacy_value("agent_graph_version")},
                     {legacy_value("definition_digest")},
@@ -435,6 +447,7 @@ class SQLiteStore:
                     {action_source},
                     {legacy_value("remedy_id")},
                     {legacy_value("consent_digest")},
+                    {legacy_value("model_metadata_json", "'[]'")},
                     {state_source},
                     status,
                     created_at,
@@ -444,7 +457,7 @@ class SQLiteStore:
             )
             connection.execute("DROP TABLE pending_approvals")
             connection.execute(
-                "ALTER TABLE pending_approvals_task5 RENAME TO pending_approvals"
+                "ALTER TABLE pending_approvals_task7 RENAME TO pending_approvals"
             )
             violations = connection.execute("PRAGMA foreign_key_check").fetchall()
             if violations:
@@ -874,6 +887,51 @@ class SQLiteStore:
                 )
 
     @staticmethod
+    def _migrate_task7_receipt_provenance(connection: sqlite3.Connection) -> None:
+        """Backfill safe Task 4-6 envelope markers without changing receipt claims."""
+
+        rows = connection.execute(
+            """
+            SELECT receipts.recovery_id, receipts.receipt_json, pending_approvals.*
+            FROM receipts
+            JOIN pending_approvals
+              ON pending_approvals.recovery_id = receipts.recovery_id
+            """
+        ).fetchall()
+        for row in rows:
+            raw = json.loads(cast(str, row["receipt_json"]))
+            if not isinstance(raw, dict):
+                raise RuntimeError("Stored receipt is not a JSON object")
+            raw_metadata = json.loads(cast(str, row["model_metadata_json"]))
+            if not isinstance(raw_metadata, list):
+                raise RuntimeError("Stored model metadata is not a JSON array")
+            metadata = tuple(
+                ModelResponseMetadata.from_json_value(item) for item in raw_metadata
+            )
+            definition_digest = cast(str, row["definition_digest"])
+            raw.update(
+                {
+                    "rootTraceId": cast(str, row["root_trace_id"]),
+                    "modelIds": list(
+                        dict.fromkeys(item.returned_model for item in metadata)
+                    ),
+                    "sdkVersion": cast(str, row["sdk_version"]),
+                    "protocolVersion": cast(str, row["protocol_version"]),
+                    "agentGraphVersion": cast(str, row["agent_graph_version"]),
+                }
+            )
+            if re.fullmatch(r"[0-9a-f]{64}", definition_digest):
+                raw["promptToolSchemaHash"] = definition_digest
+            migrated = RecoveryReceipt.model_validate(raw)
+            connection.execute(
+                "UPDATE receipts SET receipt_json = ? WHERE recovery_id = ?",
+                (
+                    migrated.model_dump_json(by_alias=True, exclude_none=True),
+                    cast(str, row["recovery_id"]),
+                ),
+            )
+
+    @staticmethod
     def _migrate_task2_recovery_constraints(connection: sqlite3.Connection) -> None:
         """Expand Task 2 CHECK constraints while preserving rows and foreign keys."""
 
@@ -960,7 +1018,15 @@ class SQLiteStore:
         row: sqlite3.Row,
         *,
         pending_approval: PendingApprovalView | None = None,
+        envelope: PendingApprovalEnvelope | None = None,
     ) -> RecoverySnapshot:
+        if envelope is not None and envelope.sdk_version == "legacy-incompatible":
+            envelope = None
+        model_ids = (
+            list(dict.fromkeys(item.returned_model for item in envelope.model_metadata))
+            if envelope is not None
+            else []
+        )
         return RecoverySnapshot(
             recoveryId=cast(str, row["id"]),
             scenarioId=ScenarioId(cast(str, row["scenario_id"])),
@@ -971,6 +1037,16 @@ class SQLiteStore:
             createdAt=datetime.fromisoformat(cast(str, row["created_at"])),
             updatedAt=datetime.fromisoformat(cast(str, row["updated_at"])),
             pendingApproval=pending_approval,
+            rootTraceId=envelope.root_trace_id if envelope is not None else None,
+            modelIds=model_ids,
+            sdkVersion=envelope.sdk_version if envelope is not None else None,
+            protocolVersion=(envelope.protocol_version if envelope is not None else None),
+            agentGraphVersion=(
+                envelope.agent_graph_version if envelope is not None else None
+            ),
+            promptToolSchemaHash=(
+                envelope.definition_digest if envelope is not None else None
+            ),
         )
 
     @staticmethod
@@ -990,6 +1066,12 @@ class SQLiteStore:
         state_json = json.loads(cast(str, row["state_json"]))
         if not isinstance(state_json, dict):
             raise ValueError("Serialized SDK state must be a JSON object")
+        raw_model_metadata = json.loads(cast(str, row["model_metadata_json"]))
+        if not isinstance(raw_model_metadata, list):
+            raise ValueError("Stored model metadata must be a JSON array")
+        model_metadata = tuple(
+            ModelResponseMetadata.from_json_value(item) for item in raw_model_metadata
+        )
         return PendingApprovalEnvelope(
             tool_call_id=cast(str, row["tool_call_id"]),
             recovery_id=cast(str, row["recovery_id"]),
@@ -1002,6 +1084,7 @@ class SQLiteStore:
             action_digest=cast(str, row["action_digest"]),
             remedy_id=cast(str, row["remedy_id"]),
             consent_digest=cast(str, row["consent_digest"]),
+            model_metadata=model_metadata,
             state_json=state_json,
             status=cast(str, row["status"]),
         )
@@ -1115,7 +1198,11 @@ class SQLiteStore:
         if (
             cast(str, recovery["status"]) != RecoveryStatus.PENDING_APPROVAL.value
             or cast(str, recovery["scenario_id"]) != ScenarioId.HOTEL.value
-            or cast(str, recovery["execution_mode"]) != ExecutionMode.SDK_STUB.value
+            or cast(str, recovery["execution_mode"])
+            not in {
+                ExecutionMode.SDK_STUB.value,
+                ExecutionMode.OPENAI_LIVE.value,
+            }
         ):
             raise ApprovalDecisionError(
                 "decision_unavailable", recovery_id, status_code=409
@@ -1135,6 +1222,10 @@ class SQLiteStore:
             raise ApprovalDecisionError(
                 "resume_incompatible", recovery_id, status_code=409
             ) from None
+        if pending.execution_mode.value != cast(str, recovery["execution_mode"]):
+            raise ApprovalDecisionError(
+                "resume_incompatible", recovery_id, status_code=409
+            )
         allowed_pending_statuses = (
             {"pending", "approved"}
             if request.decision == "approve"
@@ -1518,8 +1609,8 @@ class SQLiteStore:
                         tool_call_id, recovery_id, sdk_version, protocol_version,
                         agent_graph_version, definition_digest, root_trace_id,
                         execution_mode, action_digest, remedy_id, consent_digest,
-                        state_json, status, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        model_metadata_json, state_json, status, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         pending_approval.tool_call_id,
@@ -1533,6 +1624,15 @@ class SQLiteStore:
                         pending_approval.action_digest,
                         pending_approval.remedy_id,
                         pending_approval.consent_digest,
+                        json.dumps(
+                            [
+                                item.to_json_value()
+                                for item in pending_approval.model_metadata
+                            ],
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        ),
                         pending_state_json,
                         pending_approval.status,
                         now.isoformat(),
@@ -1582,9 +1682,27 @@ class SQLiteStore:
                 == RecoveryStatus.PENDING_APPROVAL.value
                 else None
             )
+            envelope_row = connection.execute(
+                """
+                SELECT * FROM pending_approvals
+                WHERE recovery_id = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (recovery_id,),
+            ).fetchone()
+            envelope = (
+                self._pending_approval_from_row(envelope_row)
+                if envelope_row is not None
+                else None
+            )
         if row is None:
             raise RecoveryNotFoundError("Recovery not found")
-        return self._recovery_from_row(row, pending_approval=pending_view)
+        return self._recovery_from_row(
+            row,
+            pending_approval=pending_view,
+            envelope=envelope,
+        )
 
     def get_remedy_consent(self, recovery_id: str) -> RemedyConsentRecord:
         """Load authoritative consent and evidence without serializing it publicly."""
@@ -1968,7 +2086,10 @@ class SQLiteStore:
                 cast(str, recovery["status"])
                 != RecoveryStatus.PENDING_APPROVAL.value
                 or cast(str, recovery["execution_mode"])
-                != ExecutionMode.SDK_STUB.value
+                not in {
+                    ExecutionMode.SDK_STUB.value,
+                    ExecutionMode.OPENAI_LIVE.value,
+                }
             ):
                 raise ApprovalDecisionError(
                     "decision_unavailable", claim.recovery_id, status_code=409
@@ -1987,6 +2108,7 @@ class SQLiteStore:
                 raise ApprovalDecisionError(
                     "resume_incompatible", claim.recovery_id, status_code=409
                 )
+            envelope = self._pending_approval_from_row(pending)
             scope = connection.execute(
                 "SELECT * FROM permission_scopes WHERE recovery_id = ?",
                 (claim.recovery_id,),
@@ -2054,13 +2176,25 @@ class SQLiteStore:
             )
             receipt = RecoveryReceipt(
                 recoveryId=claim.recovery_id,
-                executionMode=ExecutionMode.SDK_STUB,
+                executionMode=envelope.execution_mode,
                 status=terminal_status.value,
                 simulated=True,
                 providerExecution=provider_execution,
-                modelIds=[],
+                modelIds=list(
+                    dict.fromkeys(
+                        item.returned_model for item in envelope.model_metadata
+                    )
+                ),
+                rootTraceId=envelope.root_trace_id,
+                sdkVersion=envelope.sdk_version,
+                protocolVersion=envelope.protocol_version,
+                agentGraphVersion=envelope.agent_graph_version,
+                promptToolSchemaHash=envelope.definition_digest,
                 boundary=(
-                    "Deterministic Agents SDK model and demo hotel adapter only; "
+                    "Live OpenAI model orchestration and demo hotel adapter only; "
+                    "no real booking or payment change."
+                    if envelope.execution_mode is ExecutionMode.OPENAI_LIVE
+                    else "Deterministic Agents SDK model and demo hotel adapter only; "
                     "no OpenAI model call, real booking, or payment change."
                 ),
                 providerResult=provider_result,
@@ -2223,6 +2357,64 @@ class SQLiteStore:
         if len(rows) != 1:
             raise ValueError("Recovery has an ambiguous pending approval state")
         return self._pending_approval_from_row(rows[0])
+
+    def update_pending_model_metadata(
+        self,
+        recovery_id: str,
+        metadata: tuple[ModelResponseMetadata, ...],
+    ) -> None:
+        """Persist only allowlisted response identifiers for a live resume."""
+
+        serialized = json.dumps(
+            [item.to_json_value() for item in metadata],
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        now = self._now()
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                """
+                UPDATE pending_approvals
+                SET model_metadata_json = ?, updated_at = ?
+                WHERE recovery_id = ?
+                """,
+                (serialized, now.isoformat(), recovery_id),
+            )
+            if cursor.rowcount != 1:
+                raise RecoveryNotFoundError("Pending approval not found")
+
+    def delete_unstarted_recovery(self, recovery_id: str) -> bool:
+        """Remove only this run's pre-pending orphan after a live model failure."""
+
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            recovery = connection.execute(
+                "SELECT status FROM recoveries WHERE id = ?",
+                (recovery_id,),
+            ).fetchone()
+            if recovery is None:
+                return False
+            if cast(str, recovery["status"]) != RecoveryStatus.IN_PROGRESS.value:
+                return False
+            protected_tables = (
+                "pending_approvals",
+                "approval_decisions",
+                "executions",
+                "receipts",
+            )
+            for table in protected_tables:
+                if connection.execute(
+                    f"SELECT 1 FROM {table} WHERE recovery_id = ? LIMIT 1",
+                    (recovery_id,),
+                ).fetchone() is not None:
+                    return False
+            cursor = connection.execute(
+                "DELETE FROM recoveries WHERE id = ? AND status = ?",
+                (recovery_id, RecoveryStatus.IN_PROGRESS.value),
+            )
+            return cursor.rowcount == 1
 
     def get_permission_scope(self, recovery_id: str) -> PermissionScopeRecord:
         """Load the internal exact temporary-permission state for verification."""

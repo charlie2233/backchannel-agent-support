@@ -71,6 +71,12 @@ function pendingSnapshot(pendingApproval: object | null = {
     createdAt: "2026-07-18T20:00:00Z",
     updatedAt: "2026-07-18T20:00:01Z",
     pendingApproval,
+    rootTraceId: "qa_trace_11111111111111111111111111111111",
+    modelIds: [],
+    sdkVersion: "0.18.3",
+    protocolVersion: "backchannel.approval.v1",
+    agentGraphVersion: "backchannel.hotel-agent.v1",
+    promptToolSchemaHash: "b".repeat(64),
   };
 }
 
@@ -96,6 +102,11 @@ function declinedReceipt(status: "closed_without_action" | "outcome_unknown") {
     simulated: true,
     providerExecution: uncertain,
     modelIds: [],
+    rootTraceId: "qa_trace_11111111111111111111111111111111",
+    sdkVersion: "0.18.3",
+    protocolVersion: "backchannel.approval.v1",
+    agentGraphVersion: "backchannel.hotel-agent.v1",
+    promptToolSchemaHash: "b".repeat(64),
     boundary: "Demo provider adapter boundary.",
     providerResult: uncertain
       ? "Dispatch evidence exists; provider result could not be verified."

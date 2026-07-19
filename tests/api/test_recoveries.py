@@ -37,7 +37,7 @@ def test_scenarios_are_exactly_the_two_replay_definitions(client: TestClient) ->
     ("payload", "expected_status"),
     [
         ({"scenarioId": "unknown", "executionMode": "replay_fixture"}, 422),
-        ({"scenarioId": "hotel", "executionMode": "openai_live"}, 422),
+        ({"scenarioId": "hotel", "executionMode": "openai_live"}, 503),
         ({"scenarioId": "api-quota", "executionMode": "sdk_stub"}, 422),
         ({"scenarioId": "hotel", "executionMode": "unknown"}, 422),
     ],

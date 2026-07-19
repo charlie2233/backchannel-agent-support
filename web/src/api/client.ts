@@ -162,10 +162,20 @@ export function isRecoverySnapshot(value: unknown): value is RecoverySnapshot {
       "createdAt",
       "updatedAt",
       "pendingApproval",
+      "rootTraceId",
+      "modelIds",
+      "sdkVersion",
+      "protocolVersion",
+      "agentGraphVersion",
+      "promptToolSchemaHash",
     ])
   ) {
     return false;
   }
+  if (!isStringArray(value.modelIds)) {
+    return false;
+  }
+  const modelIds = value.modelIds;
   const statusIsValid =
     value.status === "in_progress" ||
     value.status === "pending_approval" ||
@@ -174,6 +184,24 @@ export function isRecoverySnapshot(value: unknown): value is RecoverySnapshot {
     value.status === "outcome_unknown";
   const approvalIsValid =
     value.pendingApproval === null || isPendingApproval(value.pendingApproval);
+  const provenanceIsValid =
+    (value.rootTraceId === null || typeof value.rootTraceId === "string") &&
+    isStringArray(modelIds) &&
+    (value.sdkVersion === null || typeof value.sdkVersion === "string") &&
+    (value.protocolVersion === null || typeof value.protocolVersion === "string") &&
+    (value.agentGraphVersion === null || typeof value.agentGraphVersion === "string") &&
+    (value.promptToolSchemaHash === null ||
+      (typeof value.promptToolSchemaHash === "string" &&
+        /^[0-9a-f]{64}$/.test(value.promptToolSchemaHash)));
+  const liveProvenanceIsValid =
+    value.executionMode !== "openai_live" ||
+    (typeof value.rootTraceId === "string" &&
+      /^trace_[0-9a-f]{32}$/.test(value.rootTraceId) &&
+      modelIds.length > 0 &&
+      typeof value.sdkVersion === "string" &&
+      typeof value.protocolVersion === "string" &&
+      typeof value.agentGraphVersion === "string" &&
+      typeof value.promptToolSchemaHash === "string");
   return (
     typeof value.recoveryId === "string" &&
     (value.scenarioId === "hotel" || value.scenarioId === "api-quota") &&
@@ -188,6 +216,9 @@ export function isRecoverySnapshot(value: unknown): value is RecoverySnapshot {
     isUtcTimestamp(value.createdAt) &&
     isUtcTimestamp(value.updatedAt) &&
     approvalIsValid &&
+    provenanceIsValid &&
+    liveProvenanceIsValid &&
+    (value.executionMode === "openai_live" || modelIds.length === 0) &&
     (value.status === "pending_approval" || value.pendingApproval === null)
   );
 }
@@ -324,6 +355,11 @@ function isRecoveryReceipt(value: unknown): value is RecoveryReceipt {
       "simulated",
       "providerExecution",
       "modelIds",
+      "rootTraceId",
+      "sdkVersion",
+      "protocolVersion",
+      "agentGraphVersion",
+      "promptToolSchemaHash",
       "boundary",
       "providerResult",
       "authorizationSource",
@@ -340,6 +376,10 @@ function isRecoveryReceipt(value: unknown): value is RecoveryReceipt {
   ) {
     return false;
   }
+  if (!isStringArray(value.modelIds)) {
+    return false;
+  }
+  const modelIds = value.modelIds;
   const executionModeIsValid =
     value.executionMode === "openai_live" ||
     value.executionMode === "sdk_stub" ||
@@ -354,7 +394,14 @@ function isRecoveryReceipt(value: unknown): value is RecoveryReceipt {
     statusIsTerminal &&
     typeof value.simulated === "boolean" &&
     typeof value.providerExecution === "boolean" &&
-    isStringArray(value.modelIds) &&
+    isStringArray(modelIds) &&
+    (value.rootTraceId === null || typeof value.rootTraceId === "string") &&
+    (value.sdkVersion === null || typeof value.sdkVersion === "string") &&
+    (value.protocolVersion === null || typeof value.protocolVersion === "string") &&
+    (value.agentGraphVersion === null || typeof value.agentGraphVersion === "string") &&
+    (value.promptToolSchemaHash === null ||
+      (typeof value.promptToolSchemaHash === "string" &&
+        /^[0-9a-f]{64}$/.test(value.promptToolSchemaHash))) &&
     typeof value.boundary === "string" &&
     typeof value.providerResult === "string" &&
     typeof value.authorizationSource === "string" &&
@@ -373,7 +420,26 @@ function isRecoveryReceipt(value: unknown): value is RecoveryReceipt {
     return false;
   }
 
-  if (value.executionMode !== "sdk_stub") {
+  if (value.executionMode === "openai_live") {
+    if (
+      typeof value.rootTraceId !== "string" ||
+      !/^trace_[0-9a-f]{32}$/.test(value.rootTraceId) ||
+      modelIds.length === 0 ||
+      typeof value.sdkVersion !== "string" ||
+      typeof value.protocolVersion !== "string" ||
+      typeof value.agentGraphVersion !== "string" ||
+      typeof value.promptToolSchemaHash !== "string" ||
+      !value.permissionRevoked ||
+      !value.scopeClosed ||
+      value.decisionRemedyDigest === null
+    ) {
+      return false;
+    }
+  } else if (modelIds.length > 0) {
+    return false;
+  }
+
+  if (value.executionMode === "replay_fixture") {
     return true;
   }
   if (!value.permissionRevoked || !value.scopeClosed || value.decisionRemedyDigest === null) {

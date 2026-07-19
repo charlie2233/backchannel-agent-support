@@ -62,6 +62,12 @@ export interface RecoverySnapshot {
   createdAt: string;
   updatedAt: string;
   pendingApproval: PendingApproval | null;
+  rootTraceId?: string | null;
+  modelIds?: string[];
+  sdkVersion?: string | null;
+  protocolVersion?: string | null;
+  agentGraphVersion?: string | null;
+  promptToolSchemaHash?: string | null;
 }
 
 export interface DecisionRequest {
@@ -101,6 +107,11 @@ export interface RecoveryReceipt {
   simulated: boolean;
   providerExecution: boolean;
   modelIds: string[];
+  rootTraceId?: string | null;
+  sdkVersion?: string | null;
+  protocolVersion?: string | null;
+  agentGraphVersion?: string | null;
+  promptToolSchemaHash?: string | null;
   boundary: string;
   providerResult: string;
   authorizationSource: string;

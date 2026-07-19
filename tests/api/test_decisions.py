@@ -224,16 +224,20 @@ def test_public_sdk_stub_creation_and_typed_approval_complete_once(
     assert "provider_proof" not in public_output
 
 
-def test_openai_live_creation_remains_rejected(sdk_client) -> None:
-    client, store, _provider = sdk_client
+def test_openai_live_creation_without_key_returns_stable_unavailable_code(
+    sdk_client,
+) -> None:
+    client, store, provider = sdk_client
 
     response = client.post(
         "/api/recoveries",
         json={"scenarioId": "hotel", "executionMode": "openai_live"},
     )
 
-    assert response.status_code == 422
+    assert response.status_code == 503
+    assert response.json() == {"detail": {"code": "live_unavailable"}}
     assert store.count_recoveries() == 0
+    assert provider.dispatch_count == 0
 
 
 def test_exact_duplicate_replays_stored_response_without_redispatch(sdk_client) -> None:

@@ -6,7 +6,9 @@ from uuid import UUID
 from fastapi import FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from openai import AsyncOpenAI
 
+from server.agents.live_models import ResponseMetadataRecorder, SafeOpenAIResponsesProvider
 from server.config import RuntimeSettings
 from server.events import stream_recovery_events
 from server.models import (
@@ -24,6 +26,7 @@ from server.models import (
     ScenarioResponse,
 )
 from server.orchestrator import (
+    LiveUnavailableError,
     RecoveryOrchestrator,
     ResumeIncompatibleError,
     UnsupportedOrchestrationError,
@@ -48,9 +51,25 @@ def create_app(
     recovery_orchestrator = orchestrator
     if recovery_orchestrator is None:
         provider = hotel_provider or HotelSimulator(store=recovery_store)
+        live_client = AsyncOpenAI() if runtime_settings.live_ready else None
+
+        def live_provider_factory(
+            recorder: ResponseMetadataRecorder,
+        ) -> SafeOpenAIResponsesProvider:
+            if live_client is None:
+                raise LiveUnavailableError
+            return SafeOpenAIResponsesProvider(
+                client=live_client,
+                recorder=recorder,
+            )
+
         recovery_orchestrator = RecoveryOrchestrator(
             store=recovery_store,
             hotel_provider=provider,
+            live_ready=runtime_settings.live_ready,
+            live_model_provider_factory=(
+                live_provider_factory if runtime_settings.live_ready else None
+            ),
         )
     application = FastAPI(title="Backchannel API", version="0.3.0")
     application.state.recovery_store = recovery_store
@@ -105,11 +124,6 @@ def create_app(
                     status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                     detail=str(error),
                 ) from error
-        if payload.execution_mode is not ExecutionMode.SDK_STUB:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail="Public recovery creation does not support openai_live",
-            )
         try:
             pending = await recovery_orchestrator.start(
                 payload.scenario_id,
@@ -120,6 +134,11 @@ def create_app(
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=str(error),
+            ) from error
+        except LiveUnavailableError as error:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={"code": error.code},
             ) from error
 
     @application.post(
@@ -142,6 +161,11 @@ def create_app(
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=error.public_detail,
+            ) from error
+        except LiveUnavailableError as error:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={"code": error.code, "recoveryId": recovery_key},
             ) from error
 
     @application.get(

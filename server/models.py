@@ -220,6 +220,39 @@ class RecoverySnapshot(ApiModel):
     pending_approval: PendingApprovalView | None = Field(
         default=None, alias="pendingApproval"
     )
+    root_trace_id: str | None = Field(default=None, alias="rootTraceId")
+    model_ids: list[str] = Field(default_factory=list, alias="modelIds")
+    sdk_version: str | None = Field(default=None, alias="sdkVersion")
+    protocol_version: str | None = Field(default=None, alias="protocolVersion")
+    agent_graph_version: str | None = Field(default=None, alias="agentGraphVersion")
+    prompt_tool_schema_hash: str | None = Field(
+        default=None,
+        alias="promptToolSchemaHash",
+        pattern=r"^[0-9a-f]{64}$",
+    )
+
+    @model_validator(mode="after")
+    def enforce_snapshot_provenance(self) -> Self:
+        if self.execution_mode is ExecutionMode.OPENAI_LIVE:
+            if (
+                self.status is RecoveryStatus.IN_PROGRESS
+                and self.root_trace_id is None
+                and not self.model_ids
+            ):
+                return self
+            if (
+                self.root_trace_id is None
+                or not self.root_trace_id.startswith("trace_")
+                or not self.model_ids
+                or self.sdk_version is None
+                or self.protocol_version is None
+                or self.agent_graph_version is None
+                or self.prompt_tool_schema_hash is None
+            ):
+                raise ValueError("OpenAI live snapshots require complete live provenance")
+        elif self.model_ids:
+            raise ValueError("Stub and replay snapshots cannot claim returned model IDs")
+        return self
 
 
 class RecoveryEvent(ApiModel):
@@ -238,6 +271,15 @@ class RecoveryReceipt(ApiModel):
     simulated: bool
     provider_execution: bool = Field(alias="providerExecution")
     model_ids: list[str] = Field(alias="modelIds")
+    root_trace_id: str | None = Field(default=None, alias="rootTraceId")
+    sdk_version: str | None = Field(default=None, alias="sdkVersion")
+    protocol_version: str | None = Field(default=None, alias="protocolVersion")
+    agent_graph_version: str | None = Field(default=None, alias="agentGraphVersion")
+    prompt_tool_schema_hash: str | None = Field(
+        default=None,
+        alias="promptToolSchemaHash",
+        pattern=r"^[0-9a-f]{64}$",
+    )
     boundary: str
     provider_result: str = Field(alias="providerResult")
     authorization_source: str = Field(alias="authorizationSource")
@@ -278,6 +320,59 @@ class RecoveryReceipt(ApiModel):
                 "Replay receipts require simulated evidence, no provider execution, "
                 "and no model IDs"
             )
+        if self.execution_mode is ExecutionMode.OPENAI_LIVE:
+            if (
+                not self.simulated
+                or not self.model_ids
+                or self.root_trace_id is None
+                or not self.root_trace_id.startswith("trace_")
+                or self.sdk_version is None
+                or self.protocol_version is None
+                or self.agent_graph_version is None
+                or self.prompt_tool_schema_hash is None
+                or self.decision is None
+                or self.decision_remedy_digest is None
+                or not self.permission_revoked
+                or not self.scope_closed
+            ):
+                raise ValueError(
+                    "OpenAI live terminal receipts require model and closed-scope provenance"
+                )
+            if self.decision == "approved":
+                if (
+                    self.status != RecoveryStatus.COMPLETED.value
+                    or not self.provider_execution
+                    or self.execution_count != 1
+                    or not self.provider_dispatch_started
+                    or self.exact_interruption_rejected
+                    or self.approved_remedy_digest != self.decision_remedy_digest
+                ):
+                    raise ValueError(
+                        "Approved live receipts require one demo-provider dispatch and digest"
+                    )
+            elif self.status == RecoveryStatus.CLOSED_WITHOUT_ACTION.value:
+                if (
+                    self.provider_execution
+                    or self.execution_count != 0
+                    or self.provider_dispatch_started
+                    or not self.exact_interruption_rejected
+                    or self.approved_remedy_digest is not None
+                ):
+                    raise ValueError(
+                        "Closed live receipts require exact rejection and zero dispatch"
+                    )
+            elif self.status == RecoveryStatus.OUTCOME_UNKNOWN.value:
+                if (
+                    self.execution_count < 1
+                    or not self.provider_dispatch_started
+                    or not self.exact_interruption_rejected
+                    or self.approved_remedy_digest is not None
+                ):
+                    raise ValueError(
+                        "Outcome-unknown live receipts require dispatch evidence"
+                    )
+            else:
+                raise ValueError("Declined live receipt has an invalid terminal status")
         if self.execution_mode is ExecutionMode.SDK_STUB:
             if not self.simulated or self.model_ids:
                 raise ValueError(

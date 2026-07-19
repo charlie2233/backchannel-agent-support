@@ -26,6 +26,11 @@ function cancellationReceipt(executionCount = 0) {
     simulated: true,
     providerExecution: false,
     modelIds: [],
+    rootTraceId: "qa_trace_11111111111111111111111111111111",
+    sdkVersion: "0.18.3",
+    protocolVersion: "backchannel.approval.v1",
+    agentGraphVersion: "backchannel.hotel-agent.v1",
+    promptToolSchemaHash: "b".repeat(64),
     boundary: "Demo adapter boundary.",
     providerResult: "Exact interruption rejected before provider dispatch.",
     authorizationSource: "Explicit operator decline.",
@@ -45,6 +50,37 @@ function cancellationReceipt(executionCount = 0) {
     permissionRevoked: true,
     scopeClosed: true,
     approvedRemedyDigest: null,
+  };
+}
+
+function liveApprovedReceipt() {
+  return {
+    recoveryId,
+    executionMode: "openai_live",
+    status: "completed",
+    simulated: true,
+    providerExecution: true,
+    modelIds: [
+      "gpt-5.6-luna-2026-07-15-returned",
+      "gpt-5.6-terra-2026-07-15-returned",
+    ],
+    rootTraceId: "trace_11111111111111111111111111111111",
+    sdkVersion: "0.18.3",
+    protocolVersion: "backchannel.approval.v1",
+    agentGraphVersion: "backchannel.hotel-live-agent.v1",
+    promptToolSchemaHash: "c".repeat(64),
+    boundary: "Live models and demo adapter only.",
+    providerResult: "Demo adapter confirmed.",
+    authorizationSource: "Exact approved interruption.",
+    verificationResults: ["Temporary permission revoked."],
+    decision: "approved",
+    decisionRemedyDigest: digest,
+    executionCount: 1,
+    providerDispatchStarted: true,
+    exactInterruptionRejected: false,
+    permissionRevoked: true,
+    scopeClosed: true,
+    approvedRemedyDigest: digest,
   };
 }
 
@@ -148,6 +184,27 @@ describe("decision and receipt contracts", () => {
     );
   });
 
+  it.each([
+    { executionCount: 0 },
+    { providerDispatchStarted: false },
+    { providerExecution: false },
+    { exactInterruptionRejected: true },
+    { permissionRevoked: false },
+    { approvedRemedyDigest: null },
+    { decision: "declined" },
+  ])("rejects impossible live approved evidence %#", async (invalidUpdate) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({ ...liveApprovedReceipt(), ...invalidUpdate }),
+      ),
+    );
+
+    await expect(getReceipt(recoveryId)).rejects.toThrow(
+      "terminal evidence contract",
+    );
+  });
+
   it("recognizes both terminal snapshot statuses without accepting pending consent", () => {
     const base = {
       recoveryId,
@@ -158,6 +215,12 @@ describe("decision and receipt contracts", () => {
       createdAt: "2026-07-18T20:00:00Z",
       updatedAt: "2026-07-18T20:00:03Z",
       pendingApproval: null,
+      rootTraceId: "qa_trace_11111111111111111111111111111111",
+      modelIds: [],
+      sdkVersion: "0.18.3",
+      protocolVersion: "backchannel.approval.v1",
+      agentGraphVersion: "backchannel.hotel-agent.v1",
+      promptToolSchemaHash: "b".repeat(64),
     };
     expect(isRecoverySnapshot({ ...base, status: "closed_without_action" })).toBe(true);
     expect(isRecoverySnapshot({ ...base, status: "outcome_unknown" })).toBe(true);
@@ -168,5 +231,30 @@ describe("decision and receipt contracts", () => {
         pendingApproval: { impossible: true },
       }),
     ).toBe(false);
+  });
+
+  it("accepts server-returned live provenance without hard-coded model aliases", () => {
+    expect(
+      isRecoverySnapshot({
+        recoveryId,
+        scenarioId: "hotel",
+        executionMode: "openai_live",
+        status: "pending_approval",
+        currentStep: 3,
+        currentStepSummary: "Exact approval pending.",
+        createdAt: "2026-07-18T20:00:00Z",
+        updatedAt: "2026-07-18T20:00:03Z",
+        pendingApproval: null,
+        rootTraceId: "trace_11111111111111111111111111111111",
+        modelIds: [
+          "gpt-5.6-luna-2026-07-15-returned",
+          "gpt-5.6-terra-2026-07-15-returned",
+        ],
+        sdkVersion: "0.18.3",
+        protocolVersion: "backchannel.approval.v1",
+        agentGraphVersion: "backchannel.hotel-live-agent.v1",
+        promptToolSchemaHash: "c".repeat(64),
+      }),
+    ).toBe(true);
   });
 });
