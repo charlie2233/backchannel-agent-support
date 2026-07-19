@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from agents import Agent, function_tool
+from agents.model_settings import ModelSettings
+from agents.tool import FunctionTool
 from agents.tool_context import ToolContext
 
 from server.agents.schemas import (
@@ -17,8 +19,16 @@ from server.agents.stub_model import DeterministicApprovalModel
 from server.agents.versioning import (
     HOTEL_AGENT_INSTRUCTIONS,
     HOTEL_AGENT_NAME,
+    LIVE_BROKER_INSTRUCTIONS,
+    LIVE_BROKER_MODEL,
+    LIVE_BROKER_NAME,
+    LIVE_CONSUMER_INSTRUCTIONS,
+    LIVE_CONSUMER_MODEL,
+    LIVE_CONSUMER_NAME,
+    LIVE_PROVIDER_INSTRUCTIONS,
+    LIVE_PROVIDER_MODEL,
+    LIVE_PROVIDER_NAME,
 )
-from server.models import ExecutionMode, RecoveryReceipt
 from server.providers.hotel_simulator import HotelDispatchRequest, HotelSimulator
 from server.store import SQLiteStore
 
@@ -31,12 +41,15 @@ class HotelAgentContext:
     approved_remedy_digest: str | None = None
 
 
-def build_hotel_agent(
-    *,
-    context: HotelAgentContext,
-    arguments: CommitRemedyArguments,
-) -> Agent[HotelAgentContext]:
-    """Build the root Agent whose commit tool is guarded by an SDK interruption."""
+@dataclass(frozen=True, slots=True)
+class LiveHotelAgents:
+    consumer: Agent[HotelAgentContext]
+    provider: Agent[HotelAgentContext]
+    broker: Agent[HotelAgentContext]
+
+
+def _commit_remedy_tool() -> FunctionTool:
+    """Build the one exact approval-gated demo-provider commit tool."""
 
     @function_tool(needs_approval=True, failure_error_function=None)
     def commit_remedy(
@@ -69,25 +82,6 @@ def build_hotel_agent(
             tool_call_id=tool_context.tool_call_id,
             remedy_digest=remedy_digest,
         )
-        receipt = RecoveryReceipt(
-            recoveryId=tool_context.context.recovery_id,
-            executionMode=ExecutionMode.SDK_STUB,
-            status="completed",
-            simulated=True,
-            providerExecution=True,
-            modelIds=[],
-            boundary=(
-                "Deterministic Agents SDK model and demo hotel adapter only; "
-                "no OpenAI model call, real booking, or payment change."
-            ),
-            providerResult=dispatch.provider_result,
-            authorizationSource="Approved Agents SDK commit_remedy interruption.",
-            verificationResults=[
-                "Demo provider dispatch returned confirmed.",
-                "Provider result stored under one idempotency key.",
-            ],
-            approvedRemedyDigest=remedy_digest,
-        )
         execution = tool_context.context.store.get_completed_execution(
             tool_context.context.recovery_id
         )
@@ -95,9 +89,21 @@ def build_hotel_agent(
             raise RuntimeError("Durable provider result was not recorded")
         tool_context.context.store.finalize_completed_execution(
             execution,
-            receipt=receipt,
+            receipt=tool_context.context.store.completed_receipt_for_execution(
+                execution
+            ),
         )
         return dispatch.model_dump_json()
+
+    return commit_remedy
+
+
+def build_hotel_agent(
+    *,
+    context: HotelAgentContext,
+    arguments: CommitRemedyArguments,
+) -> Agent[HotelAgentContext]:
+    """Build the deterministic root Agent guarded by the shared interruption."""
 
     model = DeterministicApprovalModel(
         arguments=arguments,
@@ -107,5 +113,34 @@ def build_hotel_agent(
         name=HOTEL_AGENT_NAME,
         instructions=HOTEL_AGENT_INSTRUCTIONS,
         model=model,
-        tools=[commit_remedy],
+        tools=[_commit_remedy_tool()],
+    )
+
+
+def build_live_hotel_agents(*, context: HotelAgentContext) -> LiveHotelAgents:
+    """Build the typed live proof agents and forced-tool broker graph."""
+
+    return LiveHotelAgents(
+        consumer=Agent[HotelAgentContext](
+            name=LIVE_CONSUMER_NAME,
+            instructions=LIVE_CONSUMER_INSTRUCTIONS,
+            model=LIVE_CONSUMER_MODEL,
+            output_type=ConsumerProof,
+        ),
+        provider=Agent[HotelAgentContext](
+            name=LIVE_PROVIDER_NAME,
+            instructions=LIVE_PROVIDER_INSTRUCTIONS,
+            model=LIVE_PROVIDER_MODEL,
+            output_type=ProviderProof,
+        ),
+        broker=Agent[HotelAgentContext](
+            name=LIVE_BROKER_NAME,
+            instructions=LIVE_BROKER_INSTRUCTIONS,
+            model=LIVE_BROKER_MODEL,
+            model_settings=ModelSettings(
+                tool_choice="commit_remedy",
+                parallel_tool_calls=False,
+            ),
+            tools=[_commit_remedy_tool()],
+        ),
     )

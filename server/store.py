@@ -17,6 +17,8 @@ from pydantic import JsonValue
 from server.agents.schemas import CommitRemedyArguments
 from server.digest import remedy_consent_digest
 from server.models import (
+    OPENAI_LIVE_BOUNDARY,
+    SDK_STUB_BOUNDARY,
     ApprovalDecisionRequest,
     ApprovalDecisionResponse,
     DecisionAction,
@@ -54,6 +56,11 @@ CREATE TABLE IF NOT EXISTS recoveries (
     current_step_summary TEXT NOT NULL,
     model_ids_json TEXT NOT NULL DEFAULT '[]',
     root_trace_id TEXT,
+    model_call INTEGER NOT NULL DEFAULT 0 CHECK (model_call IN (0, 1)),
+    sdk_version TEXT,
+    protocol_version TEXT,
+    agent_graph_version TEXT,
+    definition_digest TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -87,6 +94,7 @@ CREATE TABLE IF NOT EXISTS pending_approvals (
     agent_graph_version TEXT NOT NULL,
     definition_digest TEXT NOT NULL,
     root_trace_id TEXT NOT NULL,
+    model_ids_json TEXT NOT NULL,
     execution_mode TEXT NOT NULL,
     action_digest TEXT NOT NULL,
     remedy_id TEXT NOT NULL,
@@ -214,6 +222,7 @@ class PendingApprovalEnvelope:
     agent_graph_version: str
     definition_digest: str
     root_trace_id: str
+    model_ids: tuple[str, ...]
     execution_mode: ExecutionMode
     action_digest: str
     remedy_id: str
@@ -235,6 +244,21 @@ class DurableExecution:
     tool_call_id: str | None
     remedy_digest: str | None
     result_json: dict[str, Any] | None
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryProvenance:
+    """Durable mode and SDK markers used by snapshots and crash reconciliation."""
+
+    recovery_id: str
+    execution_mode: ExecutionMode
+    model_ids: tuple[str, ...]
+    root_trace_id: str | None
+    model_call: bool
+    sdk_version: str | None
+    protocol_version: str | None
+    agent_graph_version: str | None
+    definition_digest: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -325,6 +349,18 @@ class SQLiteStore:
             )
         if "root_trace_id" not in columns:
             connection.execute("ALTER TABLE recoveries ADD COLUMN root_trace_id TEXT")
+        additions = {
+            "model_call": "INTEGER NOT NULL DEFAULT 0",
+            "sdk_version": "TEXT",
+            "protocol_version": "TEXT",
+            "agent_graph_version": "TEXT",
+            "definition_digest": "TEXT",
+        }
+        for column, column_type in additions.items():
+            if column not in columns:
+                connection.execute(
+                    f"ALTER TABLE recoveries ADD COLUMN {column} {column_type}"
+                )
         connection.execute(
             """
             UPDATE recoveries
@@ -339,6 +375,31 @@ class SQLiteStore:
                   SELECT 1 FROM pending_approvals
                   WHERE pending_approvals.recovery_id = recoveries.id
               )
+            """
+        )
+        connection.execute(
+            """
+            UPDATE recoveries
+            SET sdk_version = (
+                    SELECT pending_approvals.sdk_version FROM pending_approvals
+                    WHERE pending_approvals.recovery_id = recoveries.id
+                ),
+                protocol_version = (
+                    SELECT pending_approvals.protocol_version FROM pending_approvals
+                    WHERE pending_approvals.recovery_id = recoveries.id
+                ),
+                agent_graph_version = (
+                    SELECT pending_approvals.agent_graph_version FROM pending_approvals
+                    WHERE pending_approvals.recovery_id = recoveries.id
+                ),
+                definition_digest = (
+                    SELECT pending_approvals.definition_digest FROM pending_approvals
+                    WHERE pending_approvals.recovery_id = recoveries.id
+                )
+            WHERE EXISTS (
+                SELECT 1 FROM pending_approvals
+                WHERE pending_approvals.recovery_id = recoveries.id
+            )
             """
         )
         connection.execute(
@@ -359,7 +420,7 @@ class SQLiteStore:
                 "PRAGMA table_info(pending_approvals)"
             ).fetchall()
         }
-        task5_columns = {
+        task7_columns = {
             "tool_call_id",
             "recovery_id",
             "sdk_version",
@@ -367,6 +428,7 @@ class SQLiteStore:
             "agent_graph_version",
             "definition_digest",
             "root_trace_id",
+            "model_ids_json",
             "execution_mode",
             "action_digest",
             "remedy_id",
@@ -376,7 +438,7 @@ class SQLiteStore:
             "created_at",
             "updated_at",
         }
-        if columns == task5_columns:
+        if columns == task7_columns:
             return
 
         required_legacy_columns = {
@@ -427,6 +489,7 @@ class SQLiteStore:
                     agent_graph_version TEXT NOT NULL,
                     definition_digest TEXT NOT NULL,
                     root_trace_id TEXT NOT NULL,
+                    model_ids_json TEXT NOT NULL,
                     execution_mode TEXT NOT NULL,
                     action_digest TEXT NOT NULL,
                     remedy_id TEXT NOT NULL,
@@ -443,7 +506,7 @@ class SQLiteStore:
                 INSERT INTO pending_approvals_task5 (
                     tool_call_id, recovery_id, sdk_version, protocol_version,
                     agent_graph_version, definition_digest, root_trace_id,
-                    execution_mode, action_digest, remedy_id, consent_digest,
+                    model_ids_json, execution_mode, action_digest, remedy_id, consent_digest,
                     state_json, status,
                     created_at, updated_at
                 )
@@ -455,6 +518,7 @@ class SQLiteStore:
                     {legacy_value("agent_graph_version")},
                     {legacy_value("definition_digest")},
                     {legacy_value("root_trace_id")},
+                    {legacy_value("model_ids_json", "'[]'")},
                     {execution_mode_source},
                     {action_source},
                     {legacy_value("remedy_id")},
@@ -812,6 +876,11 @@ class SQLiteStore:
         state_json = json.loads(cast(str, row["state_json"]))
         if not isinstance(state_json, dict):
             raise ValueError("Serialized SDK state must be a JSON object")
+        model_ids = json.loads(cast(str, row["model_ids_json"]))
+        if not isinstance(model_ids, list) or not all(
+            isinstance(model_id, str) for model_id in model_ids
+        ):
+            raise ValueError("Pending approval model IDs must be a string array")
         return PendingApprovalEnvelope(
             tool_call_id=cast(str, row["tool_call_id"]),
             recovery_id=cast(str, row["recovery_id"]),
@@ -820,6 +889,7 @@ class SQLiteStore:
             agent_graph_version=cast(str, row["agent_graph_version"]),
             definition_digest=cast(str, row["definition_digest"]),
             root_trace_id=cast(str, row["root_trace_id"]),
+            model_ids=tuple(model_ids),
             execution_mode=ExecutionMode(cast(str, row["execution_mode"])),
             action_digest=cast(str, row["action_digest"]),
             remedy_id=cast(str, row["remedy_id"]),
@@ -933,7 +1003,8 @@ class SQLiteStore:
         if (
             cast(str, recovery["status"]) != RecoveryStatus.PENDING_APPROVAL.value
             or cast(str, recovery["scenario_id"]) != ScenarioId.HOTEL.value
-            or cast(str, recovery["execution_mode"]) != ExecutionMode.SDK_STUB.value
+            or cast(str, recovery["execution_mode"])
+            not in {ExecutionMode.SDK_STUB.value, ExecutionMode.OPENAI_LIVE.value}
         ):
             raise ApprovalDecisionError(
                 "decision_unavailable", recovery_id, status_code=409
@@ -1086,6 +1157,25 @@ class SQLiteStore:
             result_json=result_json,
         )
 
+    @staticmethod
+    def _provenance_from_row(row: sqlite3.Row) -> RecoveryProvenance:
+        model_ids = json.loads(cast(str, row["model_ids_json"]))
+        if not isinstance(model_ids, list) or not all(
+            isinstance(model_id, str) for model_id in model_ids
+        ):
+            raise ValueError("Recovery model IDs must be a string array")
+        return RecoveryProvenance(
+            recovery_id=cast(str, row["id"]),
+            execution_mode=ExecutionMode(cast(str, row["execution_mode"])),
+            model_ids=tuple(model_ids),
+            root_trace_id=cast(str | None, row["root_trace_id"]),
+            model_call=bool(cast(int, row["model_call"])),
+            sdk_version=cast(str | None, row["sdk_version"]),
+            protocol_version=cast(str | None, row["protocol_version"]),
+            agent_graph_version=cast(str | None, row["agent_graph_version"]),
+            definition_digest=cast(str | None, row["definition_digest"]),
+        )
+
     def create_recovery(
         self,
         *,
@@ -1096,16 +1186,47 @@ class SQLiteStore:
         current_step_summary: str,
         model_ids: list[str] | None = None,
         root_trace_id: str | None = None,
+        model_call: bool = False,
+        sdk_version: str | None = None,
+        protocol_version: str | None = None,
+        agent_graph_version: str | None = None,
+        definition_digest: str | None = None,
     ) -> RecoverySnapshot:
         selected_model_ids = list(model_ids or [])
         if execution_mode is ExecutionMode.REPLAY_FIXTURE:
-            if selected_model_ids or root_trace_id is not None:
+            if (
+                selected_model_ids
+                or root_trace_id is not None
+                or model_call
+                or any(
+                    marker is not None
+                    for marker in (
+                        sdk_version,
+                        protocol_version,
+                        agent_graph_version,
+                        definition_digest,
+                    )
+                )
+            ):
                 raise ValueError("Replay recoveries cannot carry model or trace provenance")
         elif execution_mode is ExecutionMode.SDK_STUB:
-            if selected_model_ids:
+            if selected_model_ids or model_call:
                 raise ValueError("SDK stub recoveries cannot carry model IDs")
             root_trace_id = root_trace_id or f"qa_trace_{uuid4().hex}"
-        elif not selected_model_ids or root_trace_id is None:
+        elif (
+            selected_model_ids != ["gpt-5.6-luna", "gpt-5.6-terra"]
+            or root_trace_id is None
+            or not model_call
+            or any(
+                marker is None
+                for marker in (
+                    sdk_version,
+                    protocol_version,
+                    agent_graph_version,
+                    definition_digest,
+                )
+            )
+        ):
             raise ValueError("OpenAI live recoveries require model and trace provenance")
         now = self._now()
         created_data = json.dumps(
@@ -1124,8 +1245,10 @@ class SQLiteStore:
                 INSERT INTO recoveries (
                     id, scenario_id, execution_mode, status, current_step,
                     current_step_summary, model_ids_json, root_trace_id,
+                    model_call, sdk_version, protocol_version,
+                    agent_graph_version, definition_digest,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     recovery_id,
@@ -1136,6 +1259,11 @@ class SQLiteStore:
                     current_step_summary,
                     json.dumps(selected_model_ids, separators=(",", ":")),
                     root_trace_id,
+                    int(model_call),
+                    sdk_version,
+                    protocol_version,
+                    agent_graph_version,
+                    definition_digest,
                     now.isoformat(),
                     now.isoformat(),
                 ),
@@ -1166,7 +1294,7 @@ class SQLiteStore:
         now = self._now()
         event_json = json.dumps(event_data, separators=(",", ":"), sort_keys=True)
         receipt_json = (
-            receipt.model_dump_json(by_alias=True, exclude_none=True)
+            receipt.model_dump_json(by_alias=True)
             if receipt is not None
             else None
         )
@@ -1195,7 +1323,7 @@ class SQLiteStore:
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
-                "SELECT id, execution_mode FROM recoveries WHERE id = ?", (recovery_id,)
+                "SELECT * FROM recoveries WHERE id = ?", (recovery_id,)
             ).fetchone()
             if existing is None:
                 raise RecoveryNotFoundError("Recovery not found")
@@ -1219,6 +1347,35 @@ class SQLiteStore:
                 existing_mode = ExecutionMode(cast(str, existing["execution_mode"]))
                 if pending_approval.execution_mode is not existing_mode:
                     raise ValueError("Pending approval execution mode does not match recovery")
+                stored_model_ids = json.loads(cast(str, existing["model_ids_json"]))
+                marker_pairs = {
+                    "model_ids": (stored_model_ids, list(pending_approval.model_ids)),
+                    "root_trace_id": (
+                        cast(str | None, existing["root_trace_id"]),
+                        pending_approval.root_trace_id,
+                    ),
+                    "sdk_version": (
+                        cast(str | None, existing["sdk_version"]),
+                        pending_approval.sdk_version,
+                    ),
+                    "protocol_version": (
+                        cast(str | None, existing["protocol_version"]),
+                        pending_approval.protocol_version,
+                    ),
+                    "agent_graph_version": (
+                        cast(str | None, existing["agent_graph_version"]),
+                        pending_approval.agent_graph_version,
+                    ),
+                    "definition_digest": (
+                        cast(str | None, existing["definition_digest"]),
+                        pending_approval.definition_digest,
+                    ),
+                }
+                for marker, (stored, pending) in marker_pairs.items():
+                    if stored is not None and stored != pending:
+                        raise ValueError(
+                            f"Pending approval {marker} does not match recovery"
+                        )
             next_sequence = cast(
                 int,
                 connection.execute(
@@ -1302,9 +1459,9 @@ class SQLiteStore:
                     INSERT INTO pending_approvals (
                         tool_call_id, recovery_id, sdk_version, protocol_version,
                         agent_graph_version, definition_digest, root_trace_id,
-                        execution_mode, action_digest, remedy_id, consent_digest,
+                        model_ids_json, execution_mode, action_digest, remedy_id, consent_digest,
                         state_json, status, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         pending_approval.tool_call_id,
@@ -1314,6 +1471,7 @@ class SQLiteStore:
                         pending_approval.agent_graph_version,
                         pending_approval.definition_digest,
                         pending_approval.root_trace_id,
+                        json.dumps(pending_approval.model_ids, separators=(",", ":")),
                         pending_approval.execution_mode.value,
                         pending_approval.action_digest,
                         pending_approval.remedy_id,
@@ -1355,6 +1513,56 @@ class SQLiteStore:
         if row is None:
             raise RecoveryNotFoundError("Recovery not found")
         return self._recovery_from_row(row, pending_approval=pending_view)
+
+    def get_recovery_provenance(self, recovery_id: str) -> RecoveryProvenance:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM recoveries WHERE id = ?", (recovery_id,)
+            ).fetchone()
+        if row is None:
+            raise RecoveryNotFoundError("Recovery not found")
+        return self._provenance_from_row(row)
+
+    def completed_receipt_for_execution(
+        self,
+        execution: DurableExecution,
+    ) -> RecoveryReceipt:
+        """Build a terminal receipt only from durable result and recovery provenance."""
+
+        if execution.result_json is None or execution.remedy_digest is None:
+            raise ValueError("Completed durable execution is missing receipt evidence")
+        provider_result = execution.result_json.get("provider_result")
+        if not isinstance(provider_result, str):
+            raise ValueError("Completed durable execution has no provider result")
+        provenance = self.get_recovery_provenance(execution.recovery_id)
+        if provenance.execution_mode is ExecutionMode.REPLAY_FIXTURE:
+            raise ValueError("Replay fixtures cannot create provider execution receipts")
+        return RecoveryReceipt(
+            recoveryId=execution.recovery_id,
+            executionMode=provenance.execution_mode,
+            status="completed",
+            simulated=True,
+            providerExecution=True,
+            modelCall=provenance.model_call,
+            modelIds=list(provenance.model_ids),
+            rootTraceId=provenance.root_trace_id,
+            sdkVersion=provenance.sdk_version,
+            protocolVersion=provenance.protocol_version,
+            agentGraphVersion=provenance.agent_graph_version,
+            definitionDigest=provenance.definition_digest,
+            boundary=(
+                OPENAI_LIVE_BOUNDARY
+                if provenance.execution_mode is ExecutionMode.OPENAI_LIVE
+                else SDK_STUB_BOUNDARY
+            ),
+            providerResult=provider_result,
+            authorizationSource="Approved Agents SDK commit_remedy interruption.",
+            verificationResults=[
+                "Demo provider dispatch returned confirmed.",
+                "Provider result stored under one idempotency key.",
+            ],
+            approvedRemedyDigest=execution.remedy_digest,
+        )
 
     def get_remedy_consent(self, recovery_id: str) -> RemedyConsentRecord:
         """Load authoritative consent and evidence without serializing it publicly."""
@@ -1611,7 +1819,7 @@ class SQLiteStore:
                 return durable_claim.response
 
             recovery = connection.execute(
-                "SELECT status, execution_mode FROM recoveries WHERE id = ?",
+                "SELECT * FROM recoveries WHERE id = ?",
                 (claim.recovery_id,),
             ).fetchone()
             pending = connection.execute(
@@ -1677,16 +1885,24 @@ class SQLiteStore:
                 ]
                 summary = "Decline recorded; prior provider outcome remains unknown."
 
+            provenance = self._provenance_from_row(recovery)
             receipt = RecoveryReceipt(
                 recoveryId=claim.recovery_id,
-                executionMode=ExecutionMode(cast(str, recovery["execution_mode"])),
+                executionMode=provenance.execution_mode,
                 status=decision_status,
                 simulated=True,
                 providerExecution=None if may_have_begun else False,
-                modelIds=[],
+                modelCall=provenance.model_call,
+                modelIds=list(provenance.model_ids),
+                rootTraceId=provenance.root_trace_id,
+                sdkVersion=provenance.sdk_version,
+                protocolVersion=provenance.protocol_version,
+                agentGraphVersion=provenance.agent_graph_version,
+                definitionDigest=provenance.definition_digest,
                 boundary=(
-                    "Deterministic Agents SDK model and demo hotel adapter only; "
-                    "no OpenAI model call, real booking, or payment change."
+                    OPENAI_LIVE_BOUNDARY
+                    if provenance.execution_mode is ExecutionMode.OPENAI_LIVE
+                    else SDK_STUB_BOUNDARY
                 ),
                 providerResult=provider_result,
                 authorizationSource=authorization_source,
@@ -2005,7 +2221,7 @@ class SQLiteStore:
         if not isinstance(provider_result, str) or receipt.provider_result != provider_result:
             raise ReceiptTransitionError("Execution receipt provider result mismatch")
         now = self._now()
-        receipt_json = receipt.model_dump_json(by_alias=True, exclude_none=True)
+        receipt_json = receipt.model_dump_json(by_alias=True)
         terminal_data: dict[str, JsonValue] = {
             "recoveryId": execution.recovery_id,
             "executionMode": receipt.execution_mode.value,

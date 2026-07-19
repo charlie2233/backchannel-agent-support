@@ -35,6 +35,16 @@ class ProviderBoundary(StrEnum):
     DEMO_ADAPTER_ONLY = "demo_adapter_only"
 
 
+SDK_STUB_BOUNDARY = (
+    "Deterministic Agents SDK model and demo hotel adapter only; "
+    "no OpenAI model call, real booking, or payment change."
+)
+OPENAI_LIVE_BOUNDARY = (
+    "OpenAI agent model calls and demo hotel adapter only; "
+    "no real booking or payment change."
+)
+
+
 class ScenarioId(StrEnum):
     HOTEL = "hotel"
     API_QUOTA = "api-quota"
@@ -279,7 +289,17 @@ class RecoveryReceipt(ApiModel):
     ]
     simulated: bool
     provider_execution: bool | None = Field(alias="providerExecution")
+    model_call: bool = Field(default=False, alias="modelCall")
     model_ids: list[str] = Field(alias="modelIds")
+    root_trace_id: str | None = Field(default=None, alias="rootTraceId")
+    sdk_version: str | None = Field(default=None, alias="sdkVersion")
+    protocol_version: str | None = Field(default=None, alias="protocolVersion")
+    agent_graph_version: str | None = Field(default=None, alias="agentGraphVersion")
+    definition_digest: str | None = Field(
+        default=None,
+        alias="definitionDigest",
+        pattern=r"^[0-9a-f]{64}$",
+    )
     boundary: str
     provider_result: str = Field(alias="providerResult")
     authorization_source: str = Field(alias="authorizationSource")
@@ -297,7 +317,13 @@ class RecoveryReceipt(ApiModel):
                 self.status != "simulated_completed"
                 or not self.simulated
                 or self.provider_execution is not False
+                or self.model_call
                 or self.model_ids
+                or self.root_trace_id is not None
+                or self.sdk_version is not None
+                or self.protocol_version is not None
+                or self.agent_graph_version is not None
+                or self.definition_digest is not None
                 or self.approved_remedy_digest is not None
             ):
                 raise ValueError(
@@ -307,19 +333,49 @@ class RecoveryReceipt(ApiModel):
             return self
         if self.status == "simulated_completed":
             raise ValueError("Only replay fixtures may use simulated-completed receipts")
-        if self.execution_mode is ExecutionMode.SDK_STUB and (
-            not self.simulated or self.model_ids
-        ):
-            raise ValueError("SDK stub receipts require simulated evidence and no model IDs")
+        version_markers = (
+            self.sdk_version,
+            self.protocol_version,
+            self.agent_graph_version,
+            self.definition_digest,
+        )
+        if self.execution_mode is ExecutionMode.SDK_STUB:
+            if (
+                not self.simulated
+                or self.model_call
+                or self.model_ids
+                or self.root_trace_id is None
+                or not self.root_trace_id.startswith("qa_trace_")
+                or any(marker is None for marker in version_markers)
+                or self.boundary != SDK_STUB_BOUNDARY
+            ):
+                raise ValueError(
+                    "SDK stub receipts require versioned QA provenance and no model call"
+                )
+        if self.execution_mode is ExecutionMode.OPENAI_LIVE:
+            if (
+                not self.simulated
+                or not self.model_call
+                or self.model_ids != ["gpt-5.6-luna", "gpt-5.6-terra"]
+                or self.root_trace_id is None
+                or not self.root_trace_id.startswith("trace_")
+                or any(marker is None for marker in version_markers)
+                or self.boundary != OPENAI_LIVE_BOUNDARY
+            ):
+                raise ValueError(
+                    "OpenAI live receipts require real model-call, root-trace, version, "
+                    "and demo-provider evidence"
+                )
         if self.status == "completed" and self.provider_execution is not True:
             raise ValueError("Completed receipts require provider execution evidence")
         if (
-            self.execution_mode is ExecutionMode.SDK_STUB
+            self.execution_mode
+            in {ExecutionMode.SDK_STUB, ExecutionMode.OPENAI_LIVE}
             and self.status == "completed"
             and self.approved_remedy_digest is None
         ):
             raise ValueError(
-                "Completed SDK stub receipts require an approved remedy digest"
+                "Completed SDK receipts require an approved remedy digest"
             )
         if self.status == RecoveryStatus.CLOSED_WITHOUT_ACTION.value and (
             self.provider_execution is not False or self.approved_remedy_digest is not None

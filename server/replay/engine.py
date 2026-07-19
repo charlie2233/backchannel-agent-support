@@ -48,6 +48,12 @@ class ReplayEngine:
                 receipt = RecoveryReceipt(
                     recoveryId=recovery_id,
                     executionMode=ExecutionMode.REPLAY_FIXTURE,
+                    modelCall=False,
+                    rootTraceId=None,
+                    sdkVersion=None,
+                    protocolVersion=None,
+                    agentGraphVersion=None,
+                    definitionDigest=None,
                     **scenario.receipt.model_dump(),
                 )
             snapshot = self._store.record_transition(

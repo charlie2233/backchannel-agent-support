@@ -3,6 +3,7 @@
 from typing import Annotated
 from uuid import UUID
 
+from agents.models.interface import ModelProvider
 from fastapi import FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -40,6 +41,7 @@ def create_app(
     store: SQLiteStore | None = None,
     hotel_provider: HotelSimulator | None = None,
     orchestrator: RecoveryOrchestrator | None = None,
+    model_provider: ModelProvider | None = None,
 ) -> FastAPI:
     runtime_settings = settings or RuntimeSettings.from_environment()
     recovery_store = store or SQLiteStore(runtime_settings.database_path)
@@ -52,6 +54,7 @@ def create_app(
             store=recovery_store,
             hotel_provider=provider,
             live_ready=runtime_settings.live_ready,
+            model_provider=model_provider,
         )
     application = FastAPI(title="Backchannel API", version="0.3.0")
     application.state.recovery_store = recovery_store
@@ -106,10 +109,21 @@ def create_app(
                     status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                     detail=str(error),
                 ) from error
-        if payload.execution_mode is not ExecutionMode.SDK_STUB:
+        if (
+            payload.execution_mode is ExecutionMode.OPENAI_LIVE
+            and not runtime_settings.live_ready
+        ):
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail="Public recovery creation does not support openai_live",
+                detail="openai_live requires a server-side live-ready runtime",
+            )
+        if payload.execution_mode not in {
+            ExecutionMode.SDK_STUB,
+            ExecutionMode.OPENAI_LIVE,
+        }:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="Unsupported execution mode",
             )
         try:
             pending = await recovery_orchestrator.start(

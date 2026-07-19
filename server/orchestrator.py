@@ -8,20 +8,50 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, NoReturn
 from uuid import uuid4
 
-from agents import Agent, RunContextWrapper, Runner, RunResult, RunState
+from agents import (
+    Agent,
+    RunContextWrapper,
+    Runner,
+    RunResult,
+    RunState,
+    gen_trace_id,
+    trace,
+)
+from agents.models.interface import ModelProvider
 
-from server.agents.factory import HotelAgentContext, build_hotel_agent
-from server.agents.schemas import CommitRemedyArguments, deterministic_hotel_arguments
+from server.agents.factory import (
+    HotelAgentContext,
+    build_hotel_agent,
+    build_live_hotel_agents,
+)
+from server.agents.schemas import (
+    CommitRemedyArguments,
+    ConsumerProof,
+    ProviderProof,
+    deterministic_hotel_arguments,
+)
 from server.agents.stub_model import (
     DECLINED_REMEDY_CLOSURE,
     EXACT_REMEDY_REJECTION_MESSAGE,
 )
-from server.agents.tracing import configure_sdk_stub_tracing
+from server.agents.tracing import (
+    LIVE_WORKFLOW_NAME,
+    configure_live_tracing,
+    configure_sdk_stub_tracing,
+    live_trace_metadata,
+)
 from server.agents.versioning import (
     HOTEL_START_PROMPT,
+    LIVE_BROKER_MODEL,
+    LIVE_CONSUMER_MODEL,
+    LIVE_CONSUMER_START_PROMPT,
+    LIVE_PROVIDER_START_PROMPT,
     ApprovalVersionPolicy,
     hotel_definition_digest,
+    is_valid_live_trace_id,
     is_valid_qa_trace_id,
+    live_broker_start_prompt,
+    live_hotel_definition_digest,
     new_qa_trace_id,
     remedy_action_digest,
 )
@@ -41,7 +71,7 @@ from server.policy import (
     evaluate_hotel_policy,
     exact_hotel_terms,
 )
-from server.providers.hotel_simulator import HotelDispatchResult, HotelSimulator
+from server.providers.hotel_simulator import HotelSimulator
 from server.store import (
     ApprovalDecisionClaim,
     ApprovalDecisionError,
@@ -88,12 +118,14 @@ class RecoveryOrchestrator:
         hotel_provider: HotelSimulator,
         version_policy: ApprovalVersionPolicy | None = None,
         live_ready: bool = False,
+        model_provider: ModelProvider | None = None,
     ) -> None:
         self._store = store
         self._hotel_provider = hotel_provider
         self._hotel_provider.bind_store(store)
         self._version_policy = version_policy or ApprovalVersionPolicy.current()
         self._live_ready = live_ready
+        self._model_provider = model_provider
         self._reconcile_completed_executions()
         self._reconcile_claimed_decisions()
 
@@ -103,35 +135,8 @@ class RecoveryOrchestrator:
 
         return {}
 
-    @staticmethod
-    def _receipt_for_execution(execution: DurableExecution) -> RecoveryReceipt:
-        if execution.result_json is None:
-            raise ValueError("Completed durable execution is missing its result")
-        dispatch = HotelDispatchResult.model_validate(execution.result_json)
-        return RecoveryReceipt(
-            recoveryId=execution.recovery_id,
-            executionMode=ExecutionMode.SDK_STUB,
-            status="completed",
-            simulated=True,
-            providerExecution=True,
-            modelIds=[],
-            boundary=(
-                "Deterministic Agents SDK model and demo hotel adapter only; "
-                "no OpenAI model call, real booking, or payment change."
-            ),
-            providerResult=dispatch.provider_result,
-            authorizationSource="Approved Agents SDK commit_remedy interruption.",
-            verificationResults=[
-                "Demo provider dispatch returned confirmed.",
-                "Provider result stored under one idempotency key.",
-            ],
-            approvedRemedyDigest=(
-                execution.remedy_digest
-                if execution.remedy_digest is not None
-                and execution.remedy_digest.startswith("sha256:")
-                else None
-            ),
-        )
+    def _receipt_for_execution(self, execution: DurableExecution) -> RecoveryReceipt:
+        return self._store.completed_receipt_for_execution(execution)
 
     @staticmethod
     def _decision_response(claim: ApprovalDecisionClaim) -> ApprovalDecisionResponse:
@@ -205,49 +210,135 @@ class RecoveryOrchestrator:
             raise UnsupportedOrchestrationError(
                 "openai_live requires a server-side live-ready runtime"
             )
-        if (
-            approved_scenario is not ScenarioId.HOTEL
-            or execution_mode is not ExecutionMode.SDK_STUB
-        ):
+        if approved_scenario is not ScenarioId.HOTEL or execution_mode not in {
+            ExecutionMode.SDK_STUB,
+            ExecutionMode.OPENAI_LIVE,
+        }:
             raise UnsupportedOrchestrationError(
-                "Task 3 supports sdk_stub hotel recovery only"
+                "Agents SDK orchestration supports hotel recovery only"
             )
 
         recovery_id = str(uuid4())
-        root_trace_id = new_qa_trace_id()
-        self._store.create_recovery(
-            recovery_id=recovery_id,
-            scenario_id=approved_scenario,
-            execution_mode=execution_mode,
-            current_step=0,
-            current_step_summary="Deterministic Agents SDK recovery started.",
-            model_ids=[],
-            root_trace_id=root_trace_id,
-        )
-        arguments = deterministic_hotel_arguments()
-        action_digest = remedy_action_digest(arguments)
         context = HotelAgentContext(
             recovery_id=recovery_id,
             store=self._store,
             hotel_provider=self._hotel_provider,
         )
-        original_root_agent = build_hotel_agent(
-            context=context,
-            arguments=arguments,
-        )
-        result = await Runner.run(
-            original_root_agent,
-            HOTEL_START_PROMPT,
-            context=context,
-            run_config=configure_sdk_stub_tracing(),
-        )
+        if execution_mode is ExecutionMode.SDK_STUB:
+            root_trace_id = new_qa_trace_id()
+            model_ids: list[str] = []
+            arguments = deterministic_hotel_arguments()
+            original_root_agent = build_hotel_agent(
+                context=context,
+                arguments=arguments,
+            )
+            agent_graph_version = self._version_policy.agent_graph_version
+            definition_digest = hotel_definition_digest(original_root_agent)
+            self._store.create_recovery(
+                recovery_id=recovery_id,
+                scenario_id=approved_scenario,
+                execution_mode=execution_mode,
+                current_step=0,
+                current_step_summary="Deterministic Agents SDK recovery started.",
+                model_ids=model_ids,
+                root_trace_id=root_trace_id,
+                model_call=False,
+                sdk_version=self._version_policy.sdk_version,
+                protocol_version=self._version_policy.protocol_version,
+                agent_graph_version=agent_graph_version,
+                definition_digest=definition_digest,
+            )
+            result = await Runner.run(
+                original_root_agent,
+                HOTEL_START_PROMPT,
+                context=context,
+                run_config=configure_sdk_stub_tracing(),
+            )
+        else:
+            root_trace_id = gen_trace_id()
+            model_ids = [LIVE_CONSUMER_MODEL, LIVE_BROKER_MODEL]
+            live_agents = build_live_hotel_agents(context=context)
+            original_root_agent = live_agents.broker
+            agent_graph_version = self._version_policy.live_agent_graph_version
+            definition_digest = live_hotel_definition_digest(
+                consumer_agent=live_agents.consumer,
+                provider_agent=live_agents.provider,
+                broker_agent=live_agents.broker,
+            )
+            live_run_config = configure_live_tracing(
+                recovery_id=recovery_id,
+                root_trace_id=root_trace_id,
+                model_provider=self._model_provider,
+            )
+            with trace(
+                LIVE_WORKFLOW_NAME,
+                trace_id=root_trace_id,
+                group_id=recovery_id,
+                metadata=live_trace_metadata(),
+            ):
+                consumer_result = await Runner.run(
+                    live_agents.consumer,
+                    LIVE_CONSUMER_START_PROMPT,
+                    context=context,
+                    run_config=live_run_config,
+                )
+                consumer_proof = consumer_result.final_output_as(
+                    ConsumerProof,
+                    raise_if_incorrect_type=True,
+                )
+                provider_result = await Runner.run(
+                    live_agents.provider,
+                    LIVE_PROVIDER_START_PROMPT,
+                    context=context,
+                    run_config=live_run_config,
+                )
+                provider_proof = provider_result.final_output_as(
+                    ProviderProof,
+                    raise_if_incorrect_type=True,
+                )
+                result = await Runner.run(
+                    live_agents.broker,
+                    live_broker_start_prompt(consumer_proof, provider_proof),
+                    context=context,
+                    run_config=live_run_config,
+                )
+            if len(result.interruptions) != 1:
+                raise RuntimeError("Live SDK run did not produce exactly one interruption")
+            live_interruption = result.interruptions[0]
+            try:
+                arguments = CommitRemedyArguments.model_validate_json(
+                    live_interruption.arguments or ""
+                )
+            except ValueError as error:
+                raise RuntimeError("Live broker returned invalid remedy arguments") from error
+            if (
+                arguments.consumer_proof != consumer_proof
+                or arguments.provider_proof != provider_proof
+            ):
+                raise RuntimeError("Live broker changed the validated proof outputs")
+            self._store.create_recovery(
+                recovery_id=recovery_id,
+                scenario_id=approved_scenario,
+                execution_mode=execution_mode,
+                current_step=0,
+                current_step_summary="OpenAI Agents SDK recovery started.",
+                model_ids=model_ids,
+                root_trace_id=root_trace_id,
+                model_call=True,
+                sdk_version=self._version_policy.sdk_version,
+                protocol_version=self._version_policy.protocol_version,
+                agent_graph_version=agent_graph_version,
+                definition_digest=definition_digest,
+            )
+
+        action_digest = remedy_action_digest(arguments)
         if len(result.interruptions) != 1:
-            raise RuntimeError("Deterministic SDK run did not produce exactly one interruption")
+            raise RuntimeError("SDK run did not produce exactly one interruption")
         interruption = result.interruptions[0]
         if interruption.tool_name != "commit_remedy":
-            raise RuntimeError("Deterministic SDK run interrupted on an unexpected tool")
+            raise RuntimeError("SDK run interrupted on an unexpected tool")
         if not interruption.call_id:
-            raise RuntimeError("Deterministic SDK interruption is missing its call ID")
+            raise RuntimeError("SDK interruption is missing its call ID")
 
         state_json = result.to_state().to_json(
             context_serializer=self._context_serializer,
@@ -277,9 +368,10 @@ class RecoveryOrchestrator:
             recovery_id=recovery_id,
             sdk_version=self._version_policy.sdk_version,
             protocol_version=self._version_policy.protocol_version,
-            agent_graph_version=self._version_policy.agent_graph_version,
-            definition_digest=hotel_definition_digest(original_root_agent),
+            agent_graph_version=agent_graph_version,
+            definition_digest=definition_digest,
             root_trace_id=root_trace_id,
+            model_ids=tuple(model_ids),
             execution_mode=execution_mode,
             action_digest=action_digest,
             remedy_id=arguments.remedy.remedy_id,
@@ -375,8 +467,12 @@ class RecoveryOrchestrator:
         """Restore the exact interruption only after a durable decision claim."""
 
         recovery_id = claim.recovery_id
-        arguments = deterministic_hotel_arguments()
-        expected_action_digest = remedy_action_digest(arguments)
+        try:
+            recovery = self._store.get_recovery(recovery_id)
+            envelope = self._store.get_pending_approval(recovery_id)
+            consent = self._store.get_remedy_consent(recovery_id)
+        except (RecoveryNotFoundError, ValueError, TypeError):
+            self._raise_incompatible(recovery_id, "envelope")
         fresh_context = HotelAgentContext(
             recovery_id=recovery_id,
             store=self._store,
@@ -387,21 +483,48 @@ class RecoveryOrchestrator:
                 else None
             ),
         )
-        fresh_agent = build_hotel_agent(context=fresh_context, arguments=arguments)
-        try:
-            recovery = self._store.get_recovery(recovery_id)
-            envelope = self._store.get_pending_approval(recovery_id)
-            consent = self._store.get_remedy_consent(recovery_id)
-        except (RecoveryNotFoundError, ValueError, TypeError):
-            self._raise_incompatible(recovery_id, "envelope")
+        if recovery.execution_mode is ExecutionMode.SDK_STUB:
+            arguments = deterministic_hotel_arguments()
+            fresh_agent = build_hotel_agent(
+                context=fresh_context,
+                arguments=arguments,
+            )
+            expected_agent_graph_version = self._version_policy.agent_graph_version
+            expected_definition_digest = hotel_definition_digest(fresh_agent)
+            expected_model_ids: tuple[str, ...] = ()
+            expected_tool_call_id = f"commit-remedy-{recovery_id}"
+            run_config = configure_sdk_stub_tracing()
+            valid_root_trace = is_valid_qa_trace_id(envelope.root_trace_id)
+        elif recovery.execution_mode is ExecutionMode.OPENAI_LIVE:
+            arguments = consent.evidence
+            live_agents = build_live_hotel_agents(context=fresh_context)
+            fresh_agent = live_agents.broker
+            expected_agent_graph_version = self._version_policy.live_agent_graph_version
+            expected_definition_digest = live_hotel_definition_digest(
+                consumer_agent=live_agents.consumer,
+                provider_agent=live_agents.provider,
+                broker_agent=live_agents.broker,
+            )
+            expected_model_ids = (LIVE_CONSUMER_MODEL, LIVE_BROKER_MODEL)
+            expected_tool_call_id = envelope.tool_call_id
+            run_config = configure_live_tracing(
+                recovery_id=recovery_id,
+                root_trace_id=envelope.root_trace_id,
+                model_provider=self._model_provider,
+            )
+            valid_root_trace = is_valid_live_trace_id(envelope.root_trace_id)
+        else:
+            self._raise_incompatible(recovery_id, "execution_mode")
+        expected_action_digest = remedy_action_digest(arguments)
 
         expected_markers = {
             "sdk_version": self._version_policy.sdk_version,
             "protocol_version": self._version_policy.protocol_version,
-            "agent_graph_version": self._version_policy.agent_graph_version,
-            "definition_digest": hotel_definition_digest(fresh_agent),
-            "execution_mode": ExecutionMode.SDK_STUB,
-            "tool_call_id": f"commit-remedy-{recovery_id}",
+            "agent_graph_version": expected_agent_graph_version,
+            "definition_digest": expected_definition_digest,
+            "execution_mode": recovery.execution_mode,
+            "model_ids": expected_model_ids,
+            "tool_call_id": expected_tool_call_id,
             "action_digest": expected_action_digest,
             "remedy_id": arguments.remedy.remedy_id,
             "consent_digest": claim.request.remedy_digest,
@@ -412,6 +535,7 @@ class RecoveryOrchestrator:
             "agent_graph_version": envelope.agent_graph_version,
             "definition_digest": envelope.definition_digest,
             "execution_mode": envelope.execution_mode,
+            "model_ids": envelope.model_ids,
             "tool_call_id": envelope.tool_call_id,
             "action_digest": envelope.action_digest,
             "remedy_id": envelope.remedy_id,
@@ -428,7 +552,11 @@ class RecoveryOrchestrator:
             self._raise_incompatible(recovery_id, "scenario_id")
         if envelope.status not in {"pending", "approved"}:
             self._raise_incompatible(recovery_id, "approval_status")
-        if not is_valid_qa_trace_id(envelope.root_trace_id):
+        if recovery.model_ids != list(envelope.model_ids):
+            self._raise_incompatible(recovery_id, "recovery_model_ids")
+        if recovery.root_trace_id != envelope.root_trace_id:
+            self._raise_incompatible(recovery_id, "recovery_root_trace_id")
+        if not valid_root_trace:
             self._raise_incompatible(recovery_id, "root_trace_id")
         if not isinstance(envelope.state_json, dict) or not envelope.state_json:
             self._raise_incompatible(recovery_id, "state_json")
@@ -532,7 +660,7 @@ class RecoveryOrchestrator:
         completed = await Runner.run(
             fresh_agent,
             state,
-            run_config=configure_sdk_stub_tracing(),
+            run_config=run_config,
         )
         if claim.request.action is DecisionAction.DECLINE:
             if completed.interruptions:

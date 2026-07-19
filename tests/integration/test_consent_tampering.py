@@ -245,9 +245,10 @@ def test_task4_pending_rows_are_preserved_but_marked_incompatible(tmp_path) -> N
             "sdk_version",
             "protocol_version",
             "agent_graph_version",
-            "definition_digest",
-            "root_trace_id",
-            "execution_mode",
+                "definition_digest",
+                "root_trace_id",
+                "model_ids_json",
+                "execution_mode",
             "action_digest",
             "remedy_id",
             "consent_digest",
@@ -290,7 +291,7 @@ def test_remedy_envelope_and_event_roll_back_as_one_atomic_transition(tmp_path) 
     conflicting_envelope = replace(first_envelope, recovery_id=second_id)
     second_consent = replace(first_consent, recovery_id=second_id)
 
-    with pytest.raises(sqlite3.IntegrityError):
+    with pytest.raises(ValueError, match="does not match recovery"):
         store.record_transition(
             second_id,
             status=RecoveryStatus.PENDING_APPROVAL,

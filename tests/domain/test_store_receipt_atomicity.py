@@ -4,6 +4,7 @@ import sqlite3
 import pytest
 
 from server.models import (
+    SDK_STUB_BOUNDARY,
     ExecutionMode,
     RecoveryReceipt,
     RecoveryStatus,
@@ -18,6 +19,8 @@ from server.store import (
 
 APPROVED_DIGEST = f"sha256:{'a' * 64}"
 OTHER_VALID_DIGEST = f"sha256:{'b' * 64}"
+QA_ROOT = "qa_trace_0123456789abcdef0123456789abcdef"
+DEFINITION_DIGEST = "c" * 64
 
 
 def make_receipt(
@@ -33,8 +36,20 @@ def make_receipt(
         ),
         simulated=True,
         providerExecution=execution_mode is ExecutionMode.SDK_STUB,
+        modelCall=False,
         modelIds=[],
-        boundary="Atomic receipt test boundary.",
+        rootTraceId=(QA_ROOT if execution_mode is ExecutionMode.SDK_STUB else None),
+        sdkVersion=("0.18.3" if execution_mode is ExecutionMode.SDK_STUB else None),
+        protocolVersion=("v1" if execution_mode is ExecutionMode.SDK_STUB else None),
+        agentGraphVersion=("graph-v1" if execution_mode is ExecutionMode.SDK_STUB else None),
+        definitionDigest=(
+            DEFINITION_DIGEST if execution_mode is ExecutionMode.SDK_STUB else None
+        ),
+        boundary=(
+            SDK_STUB_BOUNDARY
+            if execution_mode is ExecutionMode.SDK_STUB
+            else "Atomic receipt test boundary."
+        ),
         providerResult="Atomic receipt test result.",
         authorizationSource="Atomic receipt test authorization.",
         verificationResults=["Atomic receipt test verification."],
@@ -64,6 +79,11 @@ def create_durable_sdk_execution(
         execution_mode=ExecutionMode.SDK_STUB,
         current_step=3,
         current_step_summary="Durable provider result awaiting finalization.",
+        root_trace_id=QA_ROOT,
+        sdk_version="0.18.3",
+        protocol_version="v1",
+        agent_graph_version="graph-v1",
+        definition_digest=DEFINITION_DIGEST,
     )
     provider_result = "Bound demo-provider result."
     execution, dispatched = store.record_completed_execution(
@@ -87,8 +107,14 @@ def create_durable_sdk_execution(
         status="completed",
         simulated=True,
         providerExecution=True,
+        modelCall=False,
         modelIds=[],
-        boundary="Durable evidence test boundary.",
+        rootTraceId=QA_ROOT,
+        sdkVersion="0.18.3",
+        protocolVersion="v1",
+        agentGraphVersion="graph-v1",
+        definitionDigest=DEFINITION_DIGEST,
+        boundary=SDK_STUB_BOUNDARY,
         providerResult=provider_result,
         authorizationSource="Exact approval decision.",
         verificationResults=["Durable provider result verified."],

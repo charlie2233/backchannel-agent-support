@@ -1,12 +1,19 @@
 import pytest
 from pydantic import ValidationError
 
-from server.models import ExecutionMode, RecoveryReceipt
+from server.models import (
+    OPENAI_LIVE_BOUNDARY,
+    SDK_STUB_BOUNDARY,
+    ExecutionMode,
+    RecoveryReceipt,
+)
 
 APPROVED_DIGEST = f"sha256:{'a' * 64}"
 
 
 def receipt_payload(execution_mode: ExecutionMode) -> dict[str, object]:
+    is_live = execution_mode is ExecutionMode.OPENAI_LIVE
+    is_replay = execution_mode is ExecutionMode.REPLAY_FIXTURE
     return {
         "recoveryId": "recovery-123",
         "executionMode": execution_mode,
@@ -16,15 +23,33 @@ def receipt_payload(execution_mode: ExecutionMode) -> dict[str, object]:
             else "completed"
         ),
         "simulated": True,
-        "providerExecution": execution_mode is ExecutionMode.SDK_STUB,
-        "modelIds": [],
-        "boundary": "Mode-specific test boundary.",
+        "providerExecution": not is_replay,
+        "modelCall": is_live,
+        "modelIds": ["gpt-5.6-luna", "gpt-5.6-terra"] if is_live else [],
+        "rootTraceId": (
+            None
+            if is_replay
+            else (
+                "trace_0123456789abcdef0123456789abcdef"
+                if is_live
+                else "qa_trace_0123456789abcdef0123456789abcdef"
+            )
+        ),
+        "sdkVersion": None if is_replay else "0.18.3",
+        "protocolVersion": None if is_replay else "v1",
+        "agentGraphVersion": None if is_replay else "graph-v1",
+        "definitionDigest": None if is_replay else "a" * 64,
+        "boundary": (
+            "Mode-specific replay test boundary."
+            if is_replay
+            else (OPENAI_LIVE_BOUNDARY if is_live else SDK_STUB_BOUNDARY)
+        ),
         "providerResult": "Test result.",
         "authorizationSource": "Test authorization.",
         "verificationResults": ["Test verification."],
         **(
             {"approvedRemedyDigest": APPROVED_DIGEST}
-            if execution_mode is ExecutionMode.SDK_STUB
+            if not is_replay
             else {}
         ),
     }
