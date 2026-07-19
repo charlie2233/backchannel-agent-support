@@ -20,6 +20,9 @@ export const LIVE_ADMISSION_MESSAGES = {
     "The daily live demo budget is currently reached. A replay fixture is starting automatically; you can rerun it explicitly.",
 } as const;
 
+export const DECISION_CAPACITY_MESSAGE =
+  "Live decision processing is currently at capacity. Retry the same decision shortly.";
+
 export type LiveAdmissionCode = keyof typeof LIVE_ADMISSION_MESSAGES;
 
 export class LiveAdmissionError extends Error {
@@ -31,6 +34,15 @@ export class LiveAdmissionError extends Error {
     readonly requestId: string,
   ) {
     super(LIVE_ADMISSION_MESSAGES[code]);
+  }
+}
+
+export class DecisionCapacityError extends Error {
+  readonly name = "DecisionCapacityError";
+  readonly code = "decision_capacity" as const;
+
+  constructor(readonly requestId: string) {
+    super(DECISION_CAPACITY_MESSAGE);
   }
 }
 
@@ -137,7 +149,10 @@ function isLiveAdmissionCode(value: unknown): value is LiveAdmissionCode {
   return typeof value === "string" && value in LIVE_ADMISSION_MESSAGES;
 }
 
-function readLiveAdmissionError(value: unknown): LiveAdmissionError | null {
+function readLiveAdmissionError(
+  value: unknown,
+  status: number,
+): LiveAdmissionError | null {
   if (
     !isRecord(value) ||
     !hasExactKeys(value, [
@@ -154,7 +169,29 @@ function readLiveAdmissionError(value: unknown): LiveAdmissionError | null {
   ) {
     return null;
   }
+  const expectedStatus = value.code === "live_unavailable" ? 422 : 429;
+  if (status !== expectedStatus) {
+    return null;
+  }
   return new LiveAdmissionError(value.code, value.requestId);
+}
+
+function readDecisionCapacityError(
+  value: unknown,
+  status: number,
+): DecisionCapacityError | null {
+  if (
+    status !== 429 ||
+    !isRecord(value) ||
+    !hasExactKeys(value, ["code", "message", "requestId"]) ||
+    value.code !== "decision_capacity" ||
+    value.message !== DECISION_CAPACITY_MESSAGE ||
+    typeof value.requestId !== "string" ||
+    !/^[0-9a-f]{32}$/.test(value.requestId)
+  ) {
+    return null;
+  }
+  return new DecisionCapacityError(value.requestId);
 }
 
 export async function getHealth(signal?: AbortSignal): Promise<HealthStatus> {
@@ -278,7 +315,7 @@ export async function createRecovery(
     } catch {
       // A malformed error response is handled by the generic status-only path.
     }
-    const admissionError = readLiveAdmissionError(body);
+    const admissionError = readLiveAdmissionError(body, response.status);
     if (admissionError !== null) {
       throw admissionError;
     }
@@ -338,6 +375,16 @@ export async function postDecision(
     },
   );
   if (!response.ok) {
+    let body: unknown = null;
+    try {
+      body = await response.json();
+    } catch {
+      // A malformed error response is handled by the generic status-only path.
+    }
+    const capacityError = readDecisionCapacityError(body, response.status);
+    if (capacityError !== null) {
+      throw capacityError;
+    }
     throw new Error(`Decision request failed with status ${response.status}`);
   }
   const body: unknown = await response.json();

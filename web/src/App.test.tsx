@@ -168,7 +168,7 @@ describe("Backchannel console", () => {
     expect(screen.getByRole("button", { name: "Run replay fixture" })).toBeVisible();
   });
 
-  it("does not offer or start replay for an arbitrary live failure", async () => {
+  it("does not offer or start replay for an exact-shaped admission envelope at status 500", async () => {
     const requestModes: string[] = [];
     vi.stubGlobal(
       "fetch",
@@ -190,7 +190,18 @@ describe("Backchannel console", () => {
           requestModes.push(
             (JSON.parse(String(init?.body)) as { executionMode: string }).executionMode,
           );
-          return Promise.resolve(new Response(null, { status: 500 }));
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                code: "live_capacity",
+                message:
+                  "Live recovery is currently at capacity. A replay fixture is starting automatically; you can rerun it explicitly.",
+                requestId: "0123456789abcdef0123456789abcdef",
+                fallbackExecutionMode: "replay_fixture",
+              }),
+              { status: 500, headers: { "Content-Type": "application/json" } },
+            ),
+          );
         }
         throw new Error(`Unexpected request: ${url}`);
       }),

@@ -521,7 +521,16 @@ def test_public_live_decision_path_guards_then_reacquires_expired_lease(tmp_path
 
     blocked = client.post(f"/api/recoveries/{recovery_id}/decisions", json=payload)
     assert blocked.status_code == 429
-    assert blocked.json()["code"] == "live_capacity"
+    assert blocked.json() == {
+        "code": "decision_capacity",
+        "message": (
+            "Live decision processing is currently at capacity. "
+            "Retry the same decision shortly."
+        ),
+        "requestId": blocked.headers["x-request-id"],
+    }
+    assert "fallbackExecutionMode" not in blocked.json()
+    assert "replay" not in blocked.text.lower()
     assert orchestrator.calls == []
 
     controls.release_live("capacity-holder", now=later)

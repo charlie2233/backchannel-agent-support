@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from uuid import uuid4
+import hashlib
+import json
+from uuid import UUID, uuid5
 
 from server.models import (
     ExecutionMode,
-    RecoveryReceipt,
     RecoverySnapshot,
+    ReplayScenarioDefinition,
     ScenarioId,
 )
 from server.replay.loader import ScenarioLoader
@@ -16,6 +18,28 @@ from server.store import SQLiteStore
 
 class UnsupportedExecutionModeError(ValueError):
     """Raised when Task 2 is asked to imply an unsupported execution path."""
+
+
+REPLAY_RECOVERY_NAMESPACE = UUID("ef0e1c46-d318-54ea-98c5-f372e00359ba")
+
+
+def replay_definition_digest(scenario: ReplayScenarioDefinition) -> str:
+    """Hash the complete typed fixture definition using canonical JSON."""
+
+    canonical = json.dumps(
+        scenario.model_dump(mode="json", by_alias=True),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def replay_recovery_id(scenario: ReplayScenarioDefinition) -> str:
+    """Return the stable server-owned identity for one exact fixture definition."""
+
+    digest = replay_definition_digest(scenario)
+    return str(uuid5(REPLAY_RECOVERY_NAMESPACE, digest))
 
 
 class ReplayEngine:
@@ -33,36 +57,7 @@ class ReplayEngine:
             raise UnsupportedExecutionModeError("Task 2 supports replay_fixture only")
 
         scenario = self._loader.get(scenario_id)
-        recovery_id = str(uuid4())
-        snapshot = self._store.create_recovery(
-            recovery_id=recovery_id,
-            scenario_id=scenario.id,
-            execution_mode=execution_mode,
-            current_step=scenario.initial_step,
-            current_step_summary=scenario.initial_summary,
+        return self._store.get_or_create_replay(
+            recovery_id=replay_recovery_id(scenario),
+            scenario=scenario,
         )
-        final_event_index = len(scenario.events) - 1
-        for index, event in enumerate(scenario.events):
-            receipt = None
-            if index == final_event_index and scenario.receipt is not None:
-                receipt = RecoveryReceipt(
-                    recoveryId=recovery_id,
-                    executionMode=ExecutionMode.REPLAY_FIXTURE,
-                    modelCall=False,
-                    rootTraceId=None,
-                    sdkVersion=None,
-                    protocolVersion=None,
-                    agentGraphVersion=None,
-                    definitionDigest=None,
-                    **scenario.receipt.model_dump(),
-                )
-            snapshot = self._store.record_transition(
-                recovery_id,
-                status=event.status,
-                current_step=event.current_step,
-                current_step_summary=event.summary,
-                event_type=event.type,
-                event_data=event.data,
-                receipt=receipt,
-            )
-        return snapshot

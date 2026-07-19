@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 
-import { postDecision } from "../api/client";
+import { DecisionCapacityError, postDecision } from "../api/client";
 import type {
   DecisionAction,
   RecoveryScenario,
@@ -92,9 +92,11 @@ export function EvidenceInspector({
             `${action === "approve" ? "Approval" : "Decline"} accepted, but refreshed recovery evidence is unavailable.`,
           );
         }
-      } catch {
+      } catch (caught: unknown) {
         setError(
-          `${action === "approve" ? "Approval" : "Decline"} could not be recorded. Try again with the same decision.`,
+          caught instanceof DecisionCapacityError
+            ? caught.message
+            : `${action === "approve" ? "Approval" : "Decline"} could not be recorded. Try again with the same decision.`,
         );
       } finally {
         setSubmittingAction(null);

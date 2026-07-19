@@ -31,6 +31,23 @@ class DecisionExplodingOrchestrator:
         raise RuntimeError("sk-decision-secret state_json=private-decision-state")
 
 
+class LiveStartExplodingOrchestrator:
+    def __init__(self) -> None:
+        self.recovery_ids: list[str] = []
+
+    async def start(
+        self,
+        _scenario_id: str,
+        *,
+        execution_mode: ExecutionMode,
+        recovery_id: str | None = None,
+    ) -> NoReturn:
+        assert execution_mode is ExecutionMode.OPENAI_LIVE
+        assert recovery_id is not None
+        self.recovery_ids.append(recovery_id)
+        raise RuntimeError("sk-live-start-secret prompt=private-live-start")
+
+
 def test_unhandled_exception_maps_to_generic_correlated_public_error(tmp_path, caplog) -> None:
     caplog.set_level(logging.ERROR)
     client = TestClient(
@@ -155,6 +172,59 @@ def test_unexpected_decision_error_logs_validated_recovery_correlation_only(
     assert "private-decision-state" not in caplog.text
 
 
+def test_unexpected_live_start_error_logs_generated_recovery_correlation(
+    tmp_path,
+    caplog,
+) -> None:
+    caplog.set_level(logging.ERROR)
+    orchestrator = LiveStartExplodingOrchestrator()
+    client = TestClient(
+        create_app(
+            RuntimeSettings(live_ready=True),
+            store=SQLiteStore(tmp_path / "live-start-correlation.sqlite3"),
+            orchestrator=orchestrator,  # type: ignore[arg-type]
+        ),
+        raise_server_exceptions=False,
+    )
+
+    response = client.post(
+        "/api/recoveries",
+        json={"scenarioId": "hotel", "executionMode": "openai_live"},
+    )
+
+    assert response.status_code == 500
+    assert len(orchestrator.recovery_ids) == 1
+    UUID(orchestrator.recovery_ids[0])
+    assert f"recovery_id={orchestrator.recovery_ids[0]}" in caplog.text
+    assert "recovery_id=none" not in caplog.text
+    assert "sk-live-start-secret" not in caplog.text
+    assert "private-live-start" not in caplog.text
+
+
+def test_uvicorn_access_log_never_retains_query_string_secret_markers(
+    tmp_path,
+    caplog,
+) -> None:
+    create_app(
+        RuntimeSettings(live_ready=False),
+        store=SQLiteStore(tmp_path / "access-log-filter.sqlite3"),
+    )
+    caplog.set_level(logging.INFO, logger="uvicorn.access")
+    logging.getLogger("uvicorn.access").info(
+        '%s - "%s %s HTTP/%s" %d',
+        "198.51.100.20:5000",
+        "GET",
+        "/health?prompt=private-query&state_json=private-state&key=sk-access-secret",
+        "1.1",
+        200,
+    )
+
+    assert "private-query" not in caplog.text
+    assert "private-state" not in caplog.text
+    assert "sk-access-secret" not in caplog.text
+    assert "[REDACTED]" in caplog.text
+
+
 @pytest.mark.parametrize(
     "unsafe_message",
     [
@@ -165,6 +235,8 @@ def test_unexpected_decision_error_logs_validated_recovery_correlation_only(
         "tool_args={card: secret}",
         "tool_results={provider: secret}",
         "Cookie: backchannel_demo_session=opaque-secret",
+        "OPENAI_API_KEY=opaque-provider-value",
+        "access_token=opaque-access-value",
     ],
 )
 def test_safe_log_filter_redacts_sensitive_payload_markers(unsafe_message: str) -> None:

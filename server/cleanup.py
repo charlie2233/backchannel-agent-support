@@ -1,4 +1,4 @@
-"""Bounded, idempotent retention cleanup for terminal recovery detail."""
+"""Bounded, idempotent retention cleanup for disposable recovery detail."""
 
 from __future__ import annotations
 
@@ -16,6 +16,8 @@ def cleanup_terminal_recoveries(
     now: datetime | None = None,
     batch_size: int = 100,
 ) -> int:
+    """Expire terminal detail plus immutable replay fixtures in any status."""
+
     if terminal_ttl <= timedelta(0):
         raise ValueError("terminal_ttl must be positive")
     if not 1 <= batch_size <= MAX_CLEANUP_BATCH_SIZE:

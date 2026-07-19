@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { DECISION_CAPACITY_MESSAGE } from "../api/client";
 import type { RecoverySnapshot } from "../domain/recovery";
 import { recoveryScenarios } from "../fixtures/recoveries";
 import { EvidenceInspector } from "./EvidenceInspector";
@@ -297,6 +298,67 @@ describe("EvidenceInspector exact consent", () => {
     expect(postedBodies[1].clientDecisionId).toBe("decision-retry-742");
     expect(postedBodies[0].action).toBe("approve");
     expect(postedBodies[1].action).toBe("approve");
+  });
+
+  it("shows the safe decision-capacity retry message without starting replay", async () => {
+    const decisionUrl =
+      "/api/recoveries/11111111-2222-4333-8444-555555555555/decisions";
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            code: "decision_capacity",
+            message: DECISION_CAPACITY_MESSAGE,
+            requestId: "0123456789abcdef0123456789abcdef",
+          }),
+          { status: 429, headers: { "Content-Type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            action: "approve",
+            clientDecisionId: "decision-capacity-742",
+            recoveryId: "11111111-2222-4333-8444-555555555555",
+            status: "completed",
+            approvedRemedyDigest: fullDigest,
+            executionStarted: true,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const onServerSuccess = vi.fn().mockResolvedValue(undefined);
+    render(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={pendingSnapshot()}
+        clientDecisionIdFactory={() => "decision-capacity-742"}
+        onServerSuccess={onServerSuccess}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Approve remedy" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      DECISION_CAPACITY_MESSAGE,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Approve remedy" }));
+
+    await waitFor(() => expect(onServerSuccess).toHaveBeenCalledTimes(1));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([decisionUrl, decisionUrl]);
+    const postedBodies = fetchMock.mock.calls.map(([, init]) =>
+      JSON.parse(String((init as RequestInit).body)),
+    );
+    expect(postedBodies.map((body) => body.clientDecisionId)).toEqual([
+      "decision-capacity-742",
+      "decision-capacity-742",
+    ]);
+    expect(postedBodies).not.toContainEqual(
+      expect.objectContaining({ executionMode: "replay_fixture" }),
+    );
   });
 
   it("shows a decline-specific error, does not refresh, and reuses its decision ID", async () => {

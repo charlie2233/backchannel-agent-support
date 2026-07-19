@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier, Event, Thread
 from uuid import UUID
 
@@ -13,7 +14,7 @@ from server.models import (
     RecoveryStatus,
     ScenarioId,
 )
-from server.replay.engine import ReplayEngine
+from server.replay.engine import ReplayEngine, replay_recovery_id
 from server.replay.loader import ScenarioLoader
 from server.store import ApprovalDecisionError, SQLiteStore
 
@@ -179,6 +180,85 @@ def test_hotel_recovery_and_ordered_events_survive_reopen(tmp_path) -> None:
         }
     assert REQUIRED_TABLES <= table_names
     reopened.close()
+
+
+def test_concurrent_replay_starts_reuse_one_atomic_definition_snapshot(tmp_path) -> None:
+    database_path = tmp_path / "atomic-replay.sqlite3"
+    SQLiteStore(database_path).close()
+    stores = [SQLiteStore(database_path) for _ in range(8)]
+    loaders = [ScenarioLoader() for _ in stores]
+
+    def start(index: int):
+        return ReplayEngine(stores[index], loaders[index]).start(
+            "api-quota",
+            execution_mode=ExecutionMode.REPLAY_FIXTURE,
+        )
+
+    try:
+        with ThreadPoolExecutor(max_workers=len(stores)) as executor:
+            snapshots = list(executor.map(start, range(len(stores))))
+
+        recovery_ids = {snapshot.recovery_id for snapshot in snapshots}
+        assert len(recovery_ids) == 1
+        recovery_id = recovery_ids.pop()
+        expected = loaders[0].get("api-quota")
+        assert recovery_id == replay_recovery_id(expected)
+        events = stores[0].list_events(recovery_id)
+        assert [event.type for event in events] == [
+            "recovery.created",
+            *(event.type for event in expected.events),
+        ]
+        assert events[-1].terminal is True
+        assert stores[0].get_receipt(recovery_id).status == "simulated_completed"
+
+        repeated = ReplayEngine(stores[0], loaders[0]).start(
+            "api-quota",
+            execution_mode=ExecutionMode.REPLAY_FIXTURE,
+        )
+        assert repeated == snapshots[0]
+        with sqlite3.connect(database_path) as connection:
+            assert connection.execute(
+                "SELECT COUNT(*) FROM recoveries WHERE execution_mode = 'replay_fixture'"
+            ).fetchone() == (1,)
+    finally:
+        for store in stores:
+            store.close()
+
+
+def test_replay_persistence_rolls_back_an_incomplete_event_set(tmp_path) -> None:
+    database_path = tmp_path / "atomic-replay-rollback.sqlite3"
+    store = SQLiteStore(database_path)
+    loader = ScenarioLoader()
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER reject_partial_replay
+            BEFORE INSERT ON events
+            WHEN NEW.type = 'remedy.recorded'
+            BEGIN
+                SELECT RAISE(ABORT, 'injected replay event failure');
+            END
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="injected replay event failure"):
+        ReplayEngine(store, loader).start(
+            "api-quota",
+            execution_mode=ExecutionMode.REPLAY_FIXTURE,
+        )
+
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM recoveries").fetchone() == (0,)
+        assert connection.execute("SELECT COUNT(*) FROM events").fetchone() == (0,)
+        connection.execute("DROP TRIGGER reject_partial_replay")
+
+    completed = ReplayEngine(store, loader).start(
+        "api-quota",
+        execution_mode=ExecutionMode.REPLAY_FIXTURE,
+    )
+    assert len(store.list_events(completed.recovery_id)) == len(
+        loader.get("api-quota").events
+    ) + 1
 
 
 def test_task2_recovery_constraints_migrate_without_losing_replay_rows(

@@ -19,6 +19,7 @@ from server.controls import (
     ClientIdentity,
     LiveAdmissionCode,
     LiveAdmissionError,
+    LiveDecisionCapacityError,
     PublicBoundaryMiddleware,
     PublicDemoControls,
     RequestBodyTooLarge,
@@ -212,6 +213,18 @@ def create_app(
             fallback_execution_mode=ExecutionMode.REPLAY_FIXTURE,
         )
 
+    @application.exception_handler(LiveDecisionCapacityError)
+    async def live_decision_capacity(
+        request: Request,
+        error: LiveDecisionCapacityError,
+    ) -> JSONResponse:
+        return _public_error_response(
+            request,
+            status_code=error.status_code,
+            code=error.code,
+            message=error.public_message,
+        )
+
     @application.exception_handler(RequestValidationError)
     async def invalid_request(
         request: Request,
@@ -321,6 +334,7 @@ def create_app(
             if payload.execution_mode is ExecutionMode.OPENAI_LIVE:
                 identity = cast(ClientIdentity, request.state.demo_identity)
                 recovery_id = str(uuid4())
+                request.state.recovery_id = recovery_id
                 public_controls.admit_live(
                     recovery_id=recovery_id,
                     ip_key=identity.ip_key,
@@ -369,12 +383,17 @@ def create_app(
                 and recovery_before.execution_mode is ExecutionMode.OPENAI_LIVE
                 and not recovery_before.status.terminal
             ):
-                public_controls.guard_live_resume(recovery_key)
-                async with public_controls.live_model_slot(recovery_key):
-                    response = await recovery_orchestrator.approve_decision(
-                        recovery_key,
-                        payload,
-                    )
+                try:
+                    public_controls.guard_live_resume(recovery_key)
+                    async with public_controls.live_model_slot(recovery_key):
+                        response = await recovery_orchestrator.approve_decision(
+                            recovery_key,
+                            payload,
+                        )
+                except LiveAdmissionError as error:
+                    if error.code is LiveAdmissionCode.LIVE_CAPACITY:
+                        raise LiveDecisionCapacityError from None
+                    raise
             else:
                 response = await recovery_orchestrator.approve_decision(
                     recovery_key,

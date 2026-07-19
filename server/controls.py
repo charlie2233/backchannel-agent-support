@@ -62,6 +62,11 @@ _PUBLIC_MESSAGES = {
     ),
 }
 
+DECISION_CAPACITY_MESSAGE = (
+    "Live decision processing is currently at capacity. "
+    "Retry the same decision shortly."
+)
+
 
 class LiveAdmissionError(RuntimeError):
     """Stable public live-mode rejection with no internal quota identifiers."""
@@ -79,6 +84,14 @@ class LiveAdmissionError(RuntimeError):
         if self.code is LiveAdmissionCode.LIVE_UNAVAILABLE:
             return 422
         return 429
+
+
+class LiveDecisionCapacityError(RuntimeError):
+    """Stable decision-endpoint retry signal with no replay implication."""
+
+    code = "decision_capacity"
+    public_message = DECISION_CAPACITY_MESSAGE
+    status_code = 429
 
 
 class RequestBodyTooLarge(StarletteHTTPException):

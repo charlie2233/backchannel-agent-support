@@ -1,6 +1,7 @@
 import asyncio
 import json
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
 
 import pytest
@@ -73,6 +74,55 @@ def test_replay_recovery_snapshot_and_receipt_are_durable(client: TestClient) ->
     assert "no model call or provider execution" in receipt["boundary"].lower()
 
     assert client.get(f"/api/recoveries/{uuid4()}/receipt").status_code == 404
+
+
+def test_independent_apps_racing_replay_post_return_one_complete_recovery(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "api-replay-race.sqlite3"
+    first_store = SQLiteStore(database_path)
+    second_store = SQLiteStore(database_path)
+    settings = RuntimeSettings(live_ready=False)
+    first_app = create_app(settings, store=first_store)
+    second_app = create_app(settings, store=second_store)
+    payload = {"scenarioId": "api-quota", "executionMode": "replay_fixture"}
+
+    with TestClient(first_app) as first_client, TestClient(second_app) as second_client:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            responses = list(
+                executor.map(
+                    lambda api_client: api_client.post("/api/recoveries", json=payload),
+                    (first_client, second_client),
+                )
+            )
+
+        assert [response.status_code for response in responses] == [201, 201]
+        recovery_ids = {response.json()["recoveryId"] for response in responses}
+        assert len(recovery_ids) == 1
+        recovery_id = recovery_ids.pop()
+        assert responses[0].json() == responses[1].json()
+
+        streamed = first_client.get(f"/api/recoveries/{recovery_id}/events")
+        assert streamed.status_code == 200
+        event_payloads = [
+            json.loads(line.removeprefix("data: "))
+            for line in streamed.text.splitlines()
+            if line.startswith("data: ")
+        ]
+        expected_types = [
+            "recovery.created",
+            *(event.type for event in ScenarioLoader().get("api-quota").events),
+        ]
+        assert [event["type"] for event in event_payloads] == expected_types
+        assert [event["seq"] for event in event_payloads] == list(
+            range(1, len(expected_types) + 1)
+        )
+        assert event_payloads[-1]["terminal"] is True
+
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM recoveries WHERE execution_mode = 'replay_fixture'"
+        ).fetchone() == (1,)
 
 
 def test_sdk_stub_hotel_creates_a_pending_recovery_without_execution(tmp_path) -> None:

@@ -11,6 +11,8 @@ _UNSAFE_LOG_CONTENT = re.compile(
     r"authorization\s*:|"
     r"\bbearer\s+[a-z0-9._~+/-]+|"
     r"\bcookie\s*:|"
+    r"\b(?:openai[_-])?api[_-]?key\s*=|"
+    r"\b(?:access[_-]?token|secret|token)\s*=|"
     r"\bprompt\s*=|"
     r"\bstate_json\s*=|"
     r"\b(?:runstate|run_state)\b|"
@@ -51,7 +53,7 @@ def get_safe_logger(name: str) -> logging.Logger:
 def install_server_log_safety() -> None:
     """Prevent ASGI server exception records from serializing raw tracebacks."""
 
-    for name in ("uvicorn", "uvicorn.error"):
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
         get_safe_logger(name)
 
 

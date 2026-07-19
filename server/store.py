@@ -29,6 +29,7 @@ from server.models import (
     RecoveryReceipt,
     RecoverySnapshot,
     RecoveryStatus,
+    ReplayScenarioDefinition,
     ScenarioId,
 )
 from server.policy import (
@@ -199,6 +200,10 @@ class RecoveryNotFoundError(LookupError):
 
 class ReceiptTransitionError(ValueError):
     """Raised when receipt provenance does not match its terminal transition."""
+
+
+class ReplayIntegrityError(RuntimeError):
+    """Raised when a canonical replay row no longer matches its definition."""
 
 
 class ExecutionConflictError(ValueError):
@@ -1409,6 +1414,203 @@ class SQLiteStore:
             )
         return self.get_recovery(recovery_id)
 
+    def get_or_create_replay(
+        self,
+        *,
+        recovery_id: str,
+        scenario: ReplayScenarioDefinition,
+    ) -> RecoverySnapshot:
+        """Atomically persist or reuse one complete canonical replay fixture."""
+
+        if scenario.execution_mode is not ExecutionMode.REPLAY_FIXTURE:
+            raise ValueError("Canonical replay persistence requires replay_fixture mode")
+        final_event = scenario.events[-1]
+        if scenario.receipt is not None and not final_event.status.terminal:
+            raise ReceiptTransitionError("Replay receipt requires a terminal final event")
+
+        now = self._now()
+        now_text = now.isoformat()
+        created_payload: dict[str, JsonValue] = {
+            "scenarioId": scenario.id.value,
+            "executionMode": ExecutionMode.REPLAY_FIXTURE.value,
+            "summary": "Recovery created for the selected execution mode.",
+        }
+        receipt = (
+            RecoveryReceipt(
+                recoveryId=recovery_id,
+                executionMode=ExecutionMode.REPLAY_FIXTURE,
+                modelCall=False,
+                rootTraceId=None,
+                sdkVersion=None,
+                protocolVersion=None,
+                agentGraphVersion=None,
+                definitionDigest=None,
+                **scenario.receipt.model_dump(),
+            )
+            if scenario.receipt is not None
+            else None
+        )
+
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM recoveries WHERE id = ?", (recovery_id,)
+            ).fetchone()
+            if row is None:
+                connection.execute(
+                    """
+                    INSERT INTO recoveries (
+                        id, scenario_id, execution_mode, status, current_step,
+                        current_step_summary, model_ids_json, root_trace_id,
+                        model_call, sdk_version, protocol_version,
+                        agent_graph_version, definition_digest,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, '[]', NULL, 0, NULL, NULL, NULL, NULL, ?, ?)
+                    """,
+                    (
+                        recovery_id,
+                        scenario.id.value,
+                        ExecutionMode.REPLAY_FIXTURE.value,
+                        final_event.status.value,
+                        final_event.current_step,
+                        final_event.summary,
+                        now_text,
+                        now_text,
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO events (
+                        recovery_id, seq, type, terminal, data_json, created_at
+                    ) VALUES (?, 1, 'recovery.created', 0, ?, ?)
+                    """,
+                    (
+                        recovery_id,
+                        json.dumps(created_payload, separators=(",", ":"), sort_keys=True),
+                        now_text,
+                    ),
+                )
+                for sequence, event in enumerate(scenario.events, start=2):
+                    connection.execute(
+                        """
+                        INSERT INTO events (
+                            recovery_id, seq, type, terminal, data_json, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            recovery_id,
+                            sequence,
+                            event.type,
+                            int(event.status.terminal),
+                            json.dumps(event.data, separators=(",", ":"), sort_keys=True),
+                            now_text,
+                        ),
+                    )
+                if receipt is not None:
+                    connection.execute(
+                        """
+                        INSERT INTO receipts (recovery_id, receipt_json, created_at)
+                        VALUES (?, ?, ?)
+                        """,
+                        (
+                            recovery_id,
+                            receipt.model_dump_json(by_alias=True),
+                            now_text,
+                        ),
+                    )
+                row = connection.execute(
+                    "SELECT * FROM recoveries WHERE id = ?", (recovery_id,)
+                ).fetchone()
+
+            if row is None:
+                raise ReplayIntegrityError("Canonical replay row was not persisted")
+            self._validate_canonical_replay(
+                connection,
+                row=row,
+                scenario=scenario,
+                created_payload=created_payload,
+                receipt=receipt,
+            )
+            return self._recovery_from_row(row)
+
+    @staticmethod
+    def _validate_canonical_replay(
+        connection: sqlite3.Connection,
+        *,
+        row: sqlite3.Row,
+        scenario: ReplayScenarioDefinition,
+        created_payload: dict[str, JsonValue],
+        receipt: RecoveryReceipt | None,
+    ) -> None:
+        """Fail closed instead of returning a partial or mutable replay snapshot."""
+
+        recovery_id = cast(str, row["id"])
+        final_event = scenario.events[-1]
+        provenance_values = (
+            json.loads(cast(str, row["model_ids_json"])),
+            row["root_trace_id"],
+            cast(int, row["model_call"]),
+            row["sdk_version"],
+            row["protocol_version"],
+            row["agent_graph_version"],
+            row["definition_digest"],
+        )
+        if (
+            cast(str, row["scenario_id"]) != scenario.id.value
+            or cast(str, row["execution_mode"]) != ExecutionMode.REPLAY_FIXTURE.value
+            or cast(str, row["status"]) != final_event.status.value
+            or cast(int, row["current_step"]) != final_event.current_step
+            or cast(str, row["current_step_summary"]) != final_event.summary
+            or provenance_values != ([], None, 0, None, None, None, None)
+        ):
+            raise ReplayIntegrityError("Canonical replay snapshot does not match its definition")
+
+        stored_events = connection.execute(
+            """
+            SELECT seq, type, terminal, data_json
+            FROM events
+            WHERE recovery_id = ?
+            ORDER BY seq ASC
+            """,
+            (recovery_id,),
+        ).fetchall()
+        expected_events = [
+            (1, "recovery.created", False, created_payload),
+            *[
+                (
+                    sequence,
+                    event.type,
+                    event.status.terminal,
+                    event.data,
+                )
+                for sequence, event in enumerate(scenario.events, start=2)
+            ],
+        ]
+        actual_events = [
+            (
+                cast(int, event["seq"]),
+                cast(str, event["type"]),
+                bool(cast(int, event["terminal"])),
+                json.loads(cast(str, event["data_json"])),
+            )
+            for event in stored_events
+        ]
+        if actual_events != expected_events:
+            raise ReplayIntegrityError("Canonical replay event set is incomplete or changed")
+
+        receipt_row = connection.execute(
+            "SELECT receipt_json FROM receipts WHERE recovery_id = ?", (recovery_id,)
+        ).fetchone()
+        if receipt is None:
+            if receipt_row is not None:
+                raise ReplayIntegrityError("Canonical replay has an unexpected receipt")
+        elif (
+            receipt_row is None
+            or RecoveryReceipt.model_validate_json(cast(str, receipt_row["receipt_json"]))
+            != receipt
+        ):
+            raise ReplayIntegrityError("Canonical replay receipt is incomplete or changed")
+
     def record_transition(
         self,
         recovery_id: str,
@@ -2445,15 +2647,18 @@ class SQLiteStore:
         updated_before: datetime,
         batch_size: int,
     ) -> int:
-        """Delete bounded terminal detail while retaining aggregate usage rows."""
+        """Delete bounded disposable detail while retaining aggregate usage rows."""
 
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
                 """
                 SELECT id FROM recoveries
-                WHERE status IN (
-                    'completed', 'closed_without_action', 'outcome_unknown'
+                WHERE (
+                    status IN (
+                        'completed', 'closed_without_action', 'outcome_unknown'
+                    )
+                    OR execution_mode = 'replay_fixture'
                 )
                   AND updated_at < ?
                 ORDER BY updated_at ASC, id ASC
