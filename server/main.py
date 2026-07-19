@@ -1,15 +1,27 @@
-"""FastAPI entry point for truthful replay recovery persistence and streaming."""
+"""FastAPI entry point for truthful recovery persistence and streaming."""
 
-from typing import Annotated
-from uuid import UUID
+from datetime import timedelta
+from typing import Annotated, cast
+from uuid import UUID, uuid4
 
 from agents.models.interface import ModelProvider
 from fastapi import FastAPI, Header, HTTPException, Request, Response, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
+from server.cleanup import cleanup_terminal_recoveries
 from server.config import RuntimeSettings
+from server.controls import (
+    ClientIdentity,
+    LiveAdmissionCode,
+    LiveAdmissionError,
+    PublicBoundaryMiddleware,
+    PublicDemoControls,
+    RequestBodyTooLarge,
+)
 from server.events import stream_recovery_events
+from server.logging import get_safe_logger, log_safe_exception
 from server.models import (
     ApprovalDecisionRequest,
     ApprovalDecisionResponse,
@@ -34,6 +46,56 @@ from server.replay.engine import ReplayEngine, UnsupportedExecutionModeError
 from server.replay.loader import ScenarioLoader, ScenarioNotFoundError
 from server.store import ApprovalDecisionError, RecoveryNotFoundError, SQLiteStore
 
+logger = get_safe_logger(__name__)
+
+
+def _request_id(request: Request) -> str:
+    value = getattr(request.state, "request_id", None)
+    return value if isinstance(value, str) else uuid4().hex
+
+
+def _public_error_response(
+    request: Request,
+    *,
+    status_code: int,
+    code: str,
+    message: str,
+    fallback_execution_mode: ExecutionMode | None = None,
+) -> JSONResponse:
+    request_id = _request_id(request)
+    content: dict[str, str] = {
+        "code": code,
+        "message": message,
+        "requestId": request_id,
+    }
+    if fallback_execution_mode is not None:
+        content["fallbackExecutionMode"] = fallback_execution_mode.value
+    headers = {
+        "X-Request-ID": request_id,
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+        "Referrer-Policy": "no-referrer",
+        "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+        "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",
+        "Cache-Control": "no-store",
+    }
+    runtime_settings = cast(RuntimeSettings, request.app.state.runtime_settings)
+    if runtime_settings.deployed_mode:
+        headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    response = JSONResponse(status_code=status_code, content=content, headers=headers)
+    identity = getattr(request.state, "demo_identity", None)
+    if isinstance(identity, ClientIdentity) and identity.new_session_cookie is not None:
+        response.set_cookie(
+            runtime_settings.demo_session_cookie_name,
+            identity.new_session_cookie,
+            max_age=runtime_settings.demo_session_lifetime_seconds,
+            httponly=True,
+            secure=runtime_settings.effective_demo_session_cookie_secure,
+            samesite="lax",
+            path="/",
+        )
+    return response
+
 
 def create_app(
     settings: RuntimeSettings | None = None,
@@ -56,16 +118,82 @@ def create_app(
             live_ready=runtime_settings.live_ready,
             model_provider=model_provider,
         )
+    public_controls = PublicDemoControls(recovery_store, runtime_settings)
+    cleanup_terminal_recoveries(
+        recovery_store,
+        terminal_ttl=timedelta(
+            seconds=runtime_settings.terminal_recovery_ttl_seconds
+        ),
+        batch_size=100,
+    )
     application = FastAPI(title="Backchannel API", version="0.3.0")
     application.state.recovery_store = recovery_store
     application.state.recovery_orchestrator = recovery_orchestrator
+    application.state.public_demo_controls = public_controls
+    application.state.runtime_settings = runtime_settings
     application.add_middleware(
         CORSMiddleware,
-        allow_origins=list(runtime_settings.development_cors_origins),
-        allow_credentials=False,
+        allow_origins=list(runtime_settings.cors_origins),
+        allow_credentials=True,
         allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["Accept", "Content-Type", "Last-Event-ID"],
     )
+    application.add_middleware(
+        PublicBoundaryMiddleware,
+        controls=public_controls,
+        settings=runtime_settings,
+    )
+
+    @application.exception_handler(LiveAdmissionError)
+    async def live_admission_error(
+        request: Request,
+        error: LiveAdmissionError,
+    ) -> JSONResponse:
+        return _public_error_response(
+            request,
+            status_code=error.status_code,
+            code=error.code.value,
+            message=error.public_message,
+            fallback_execution_mode=ExecutionMode.REPLAY_FIXTURE,
+        )
+
+    @application.exception_handler(RequestValidationError)
+    async def invalid_request(
+        request: Request,
+        _error: RequestValidationError,
+    ) -> JSONResponse:
+        return _public_error_response(
+            request,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            code="invalid_request",
+            message="The request did not match the public API contract.",
+        )
+
+    @application.exception_handler(RequestBodyTooLarge)
+    async def request_too_large(
+        request: Request,
+        _error: RequestBodyTooLarge,
+    ) -> JSONResponse:
+        return _public_error_response(
+            request,
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            code="request_too_large",
+            message="The request body is too large.",
+        )
+
+    @application.exception_handler(Exception)
+    async def internal_error(request: Request, error: Exception) -> JSONResponse:
+        log_safe_exception(
+            logger,
+            request_id=_request_id(request),
+            error=error,
+        )
+        return _public_error_response(
+            request,
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            code="internal_error",
+            message="The request could not be completed.",
+        )
 
     @application.get("/health", response_model=HealthResponse)
     def health() -> HealthResponse:
@@ -97,7 +225,17 @@ def create_app(
         response_model=RecoverySnapshot,
         status_code=status.HTTP_201_CREATED,
     )
-    async def create_recovery(payload: CreateRecoveryRequest) -> RecoverySnapshot:
+    async def create_recovery(
+        payload: CreateRecoveryRequest,
+        request: Request,
+    ) -> RecoverySnapshot:
+        cleanup_terminal_recoveries(
+            recovery_store,
+            terminal_ttl=timedelta(
+                seconds=runtime_settings.terminal_recovery_ttl_seconds
+            ),
+            batch_size=25,
+        )
         if payload.execution_mode is ExecutionMode.REPLAY_FIXTURE:
             try:
                 return replay_engine.start(
@@ -107,16 +245,13 @@ def create_app(
             except (ScenarioNotFoundError, UnsupportedExecutionModeError) as error:
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                    detail=str(error),
+                    detail={"code": "invalid_scenario"},
                 ) from error
         if (
             payload.execution_mode is ExecutionMode.OPENAI_LIVE
             and not runtime_settings.live_ready
         ):
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail="openai_live requires a server-side live-ready runtime",
-            )
+            raise LiveAdmissionError(LiveAdmissionCode.LIVE_UNAVAILABLE)
         if payload.execution_mode not in {
             ExecutionMode.SDK_STUB,
             ExecutionMode.OPENAI_LIVE,
@@ -126,15 +261,34 @@ def create_app(
                 detail="Unsupported execution mode",
             )
         try:
-            pending = await recovery_orchestrator.start(
-                payload.scenario_id,
-                execution_mode=payload.execution_mode,
-            )
+            if payload.execution_mode is ExecutionMode.OPENAI_LIVE:
+                identity = cast(ClientIdentity, request.state.demo_identity)
+                recovery_id = str(uuid4())
+                public_controls.admit_live(
+                    recovery_id=recovery_id,
+                    ip_key=identity.ip_key,
+                    session_key=identity.session_key,
+                )
+                try:
+                    async with public_controls.live_model_slot():
+                        pending = await recovery_orchestrator.start(
+                            payload.scenario_id,
+                            execution_mode=payload.execution_mode,
+                            recovery_id=recovery_id,
+                        )
+                except Exception:
+                    public_controls.release_live(recovery_id)
+                    raise
+            else:
+                pending = await recovery_orchestrator.start(
+                    payload.scenario_id,
+                    execution_mode=payload.execution_mode,
+                )
             return pending.recovery
         except UnsupportedOrchestrationError as error:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail=str(error),
+                detail={"code": "orchestration_unavailable"},
             ) from error
 
     @application.post(
@@ -147,7 +301,14 @@ def create_app(
     ) -> ApprovalDecisionResponse:
         recovery_key = str(recovery_id)
         try:
-            return await recovery_orchestrator.approve_decision(recovery_key, payload)
+            response = await recovery_orchestrator.approve_decision(recovery_key, payload)
+            recovery = recovery_store.get_recovery(recovery_key)
+            if (
+                recovery.execution_mode is ExecutionMode.OPENAI_LIVE
+                and recovery.status.terminal
+            ):
+                public_controls.release_live(recovery_key)
+            return response
         except ApprovalDecisionError as error:
             raise HTTPException(
                 status_code=error.status_code,

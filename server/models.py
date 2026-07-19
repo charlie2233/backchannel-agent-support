@@ -19,7 +19,7 @@ from server.trace_ids import is_valid_live_trace_id, is_valid_qa_trace_id
 class ApiModel(BaseModel):
     """Base model that accepts Python names and emits explicit API aliases."""
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
 
 class ExecutionMode(StrEnum):
@@ -188,12 +188,12 @@ class ApprovalDecisionRequest(ApiModel):
 
     action: DecisionAction
     client_decision_id: str = Field(alias="clientDecisionId", min_length=1, max_length=128)
-    remedy_id: str = Field(alias="remedyId", min_length=1)
+    remedy_id: str = Field(alias="remedyId", min_length=1, max_length=128)
     remedy_digest: str = Field(
         alias="remedyDigest",
         pattern=r"^sha256:[0-9a-f]{64}$",
     )
-    tool_call_id: str = Field(alias="toolCallId", min_length=1)
+    tool_call_id: str = Field(alias="toolCallId", min_length=1, max_length=256)
 
 
 class ApprovalDecisionResponse(ApiModel):

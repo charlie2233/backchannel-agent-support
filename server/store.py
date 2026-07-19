@@ -6,7 +6,7 @@ import hashlib
 import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import RLock
 from typing import Any, Literal, cast
@@ -160,17 +160,36 @@ CREATE TABLE IF NOT EXISTS receipts (
 
 CREATE TABLE IF NOT EXISTS usage_ledger (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    recovery_id TEXT NOT NULL REFERENCES recoveries(id) ON DELETE CASCADE,
+    recovery_id TEXT NOT NULL,
     category TEXT NOT NULL,
     amount INTEGER NOT NULL DEFAULT 0,
     recorded_at TEXT NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS usage_ledger_category_time_idx
+ON usage_ledger(category, recorded_at);
 
 CREATE TABLE IF NOT EXISTS demo_sessions (
     id TEXT PRIMARY KEY,
     created_at TEXT NOT NULL,
     expires_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS live_admissions (
+    recovery_id TEXT PRIMARY KEY,
+    ip_key TEXT NOT NULL,
+    session_key TEXT NOT NULL,
+    budget_units INTEGER NOT NULL CHECK (budget_units > 0),
+    admitted_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    released_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS live_admissions_ip_time_idx
+ON live_admissions(ip_key, admitted_at);
+
+CREATE INDEX IF NOT EXISTS live_admissions_session_time_idx
+ON live_admissions(session_key, admitted_at);
 """
 
 
@@ -311,6 +330,7 @@ class SQLiteStore:
             self._migrate_task7_receipts(connection)
             self._migrate_task3_executions(connection)
             self._migrate_task6_approval_decisions(connection)
+            self._migrate_task8_usage_ledger(connection)
             event_columns = {
                 cast(str, row["name"])
                 for row in connection.execute("PRAGMA table_info(events)").fetchall()
@@ -336,6 +356,56 @@ class SQLiteStore:
                 )
                 """
             )
+
+    @staticmethod
+    def _migrate_task8_usage_ledger(connection: sqlite3.Connection) -> None:
+        """Detach aggregate demo usage from recovery-detail retention."""
+
+        foreign_keys = connection.execute(
+            "PRAGMA foreign_key_list(usage_ledger)"
+        ).fetchall()
+        if not foreign_keys:
+            return
+
+        connection.commit()
+        connection.execute("PRAGMA foreign_keys = OFF")
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("DROP TABLE IF EXISTS usage_ledger_task8")
+            connection.execute(
+                """
+                CREATE TABLE usage_ledger_task8 (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    recovery_id TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    amount INTEGER NOT NULL DEFAULT 0,
+                    recorded_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO usage_ledger_task8 (
+                    id, recovery_id, category, amount, recorded_at
+                )
+                SELECT id, recovery_id, category, amount, recorded_at
+                FROM usage_ledger
+                """
+            )
+            connection.execute("DROP TABLE usage_ledger")
+            connection.execute("ALTER TABLE usage_ledger_task8 RENAME TO usage_ledger")
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS usage_ledger_category_time_idx
+                ON usage_ledger(category, recorded_at)
+                """
+            )
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+        finally:
+            connection.execute("PRAGMA foreign_keys = ON")
 
     @staticmethod
     def _migrate_task7_recovery_provenance(connection: sqlite3.Connection) -> None:
@@ -2068,6 +2138,229 @@ class SQLiteStore:
                 connection.execute("SELECT COUNT(*) FROM recoveries").fetchone()[0],
             )
 
+    def create_demo_session(
+        self,
+        session_key: str,
+        *,
+        created_at: datetime,
+        expires_at: datetime,
+    ) -> None:
+        if expires_at <= created_at:
+            raise ValueError("Demo session expiry must follow creation")
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                DELETE FROM demo_sessions
+                WHERE id IN (
+                    SELECT id FROM demo_sessions
+                    WHERE expires_at <= ?
+                    ORDER BY expires_at ASC
+                    LIMIT 100
+                )
+                """,
+                (created_at.isoformat(),),
+            )
+            connection.execute(
+                """
+                INSERT INTO demo_sessions (id, created_at, expires_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    expires_at = excluded.expires_at
+                """,
+                (session_key, created_at.isoformat(), expires_at.isoformat()),
+            )
+
+    def demo_session_is_active(self, session_key: str, *, now: datetime) -> bool:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM demo_sessions
+                WHERE id = ? AND expires_at > ?
+                """,
+                (session_key, now.isoformat()),
+            ).fetchone()
+        return row is not None
+
+    def try_admit_live_recovery(
+        self,
+        *,
+        recovery_id: str,
+        ip_key: str,
+        session_key: str,
+        max_active: int,
+        ip_cooldown: timedelta,
+        session_cooldown: timedelta,
+        daily_budget_units: int,
+        active_ttl: timedelta,
+        now: datetime,
+    ) -> Literal["live_capacity", "cooldown", "daily_budget"] | None:
+        """Atomically reserve one durable live-demo unit across app instances."""
+
+        if now.tzinfo is None or now.utcoffset() != timedelta(0):
+            raise ValueError("Admission time must be timezone-aware UTC")
+        if (
+            max_active <= 0
+            or daily_budget_units <= 0
+            or ip_cooldown <= timedelta(0)
+            or session_cooldown <= timedelta(0)
+            or active_ttl <= timedelta(0)
+        ):
+            raise ValueError("Admission policy must contain positive limits")
+
+        now_text = now.isoformat()
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        next_day = day_start + timedelta(days=1)
+        ip_cutoff = now - ip_cooldown
+        session_cutoff = now - session_cooldown
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                UPDATE live_admissions
+                SET released_at = ?
+                WHERE released_at IS NULL
+                  AND (
+                    expires_at <= ?
+                    OR EXISTS (
+                        SELECT 1 FROM recoveries
+                        WHERE recoveries.id = live_admissions.recovery_id
+                          AND recoveries.status IN (
+                            'completed', 'closed_without_action', 'outcome_unknown'
+                          )
+                    )
+                  )
+                """,
+                (now_text, now_text),
+            )
+            connection.execute(
+                """
+                DELETE FROM live_admissions
+                WHERE recovery_id IN (
+                    SELECT recovery_id FROM live_admissions
+                    WHERE released_at IS NOT NULL
+                      AND admitted_at < ?
+                    ORDER BY admitted_at ASC
+                    LIMIT 100
+                )
+                """,
+                (min(ip_cutoff, session_cutoff).isoformat(),),
+            )
+
+            active_count = cast(
+                int,
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM live_admissions
+                    WHERE released_at IS NULL AND expires_at > ?
+                    """,
+                    (now_text,),
+                ).fetchone()[0],
+            )
+            if active_count >= max_active:
+                return "live_capacity"
+
+            used_units = cast(
+                int,
+                connection.execute(
+                    """
+                    SELECT COALESCE(SUM(amount), 0) FROM usage_ledger
+                    WHERE category = 'live_demo_budget_unit'
+                      AND recorded_at >= ? AND recorded_at < ?
+                    """,
+                    (day_start.isoformat(), next_day.isoformat()),
+                ).fetchone()[0],
+            )
+            if used_units + 1 > daily_budget_units:
+                return "daily_budget"
+
+            recent_ip = connection.execute(
+                """
+                SELECT 1 FROM live_admissions
+                WHERE ip_key = ? AND admitted_at > ?
+                LIMIT 1
+                """,
+                (ip_key, ip_cutoff.isoformat()),
+            ).fetchone()
+            recent_session = connection.execute(
+                """
+                SELECT 1 FROM live_admissions
+                WHERE session_key = ? AND admitted_at > ?
+                LIMIT 1
+                """,
+                (session_key, session_cutoff.isoformat()),
+            ).fetchone()
+            if recent_ip is not None or recent_session is not None:
+                return "cooldown"
+
+            connection.execute(
+                """
+                INSERT INTO live_admissions (
+                    recovery_id, ip_key, session_key, budget_units,
+                    admitted_at, expires_at, released_at
+                ) VALUES (?, ?, ?, 1, ?, ?, NULL)
+                """,
+                (
+                    recovery_id,
+                    ip_key,
+                    session_key,
+                    now_text,
+                    (now + active_ttl).isoformat(),
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO usage_ledger (
+                    recovery_id, category, amount, recorded_at
+                ) VALUES (?, 'live_demo_budget_unit', 1, ?)
+                """,
+                (recovery_id, now_text),
+            )
+        return None
+
+    def release_live_admission(self, recovery_id: str, *, now: datetime) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                UPDATE live_admissions
+                SET released_at = COALESCE(released_at, ?)
+                WHERE recovery_id = ?
+                """,
+                (now.isoformat(), recovery_id),
+            )
+
+    def delete_terminal_recoveries(
+        self,
+        *,
+        updated_before: datetime,
+        batch_size: int,
+    ) -> int:
+        """Delete bounded terminal detail while retaining aggregate usage rows."""
+
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """
+                SELECT id FROM recoveries
+                WHERE status IN (
+                    'completed', 'closed_without_action', 'outcome_unknown'
+                )
+                  AND updated_at < ?
+                ORDER BY updated_at ASC, id ASC
+                LIMIT ?
+                """,
+                (updated_before.isoformat(), batch_size),
+            ).fetchall()
+            recovery_ids = [cast(str, row["id"]) for row in rows]
+            if recovery_ids:
+                placeholders = ",".join("?" for _ in recovery_ids)
+                connection.execute(
+                    f"DELETE FROM recoveries WHERE id IN ({placeholders})",
+                    recovery_ids,
+                )
+        return len(recovery_ids)
+
     def get_pending_approval(self, recovery_id: str) -> PendingApprovalEnvelope:
         """Load the opaque SDK state envelope without exposing it through public models."""
 
@@ -2422,6 +2715,8 @@ class SQLiteStore:
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute("DELETE FROM demo_sessions")
+            connection.execute("DELETE FROM live_admissions")
+            connection.execute("DELETE FROM usage_ledger")
             connection.execute("DELETE FROM recoveries")
 
     def close(self) -> None:

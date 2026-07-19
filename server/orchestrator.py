@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, NoReturn
@@ -53,6 +52,7 @@ from server.agents.versioning import (
     remedy_action_digest,
 )
 from server.digest import remedy_consent_digest
+from server.logging import get_safe_logger
 from server.models import (
     ApprovalDecisionRequest,
     ApprovalDecisionResponse,
@@ -80,7 +80,7 @@ from server.store import (
 )
 from server.trace_ids import is_valid_live_trace_id, is_valid_qa_trace_id
 
-logger = logging.getLogger(__name__)
+logger = get_safe_logger(__name__)
 
 
 class UnsupportedOrchestrationError(ValueError):
@@ -158,10 +158,11 @@ class RecoveryOrchestrator:
                     execution,
                     receipt=self._receipt_for_execution(execution),
                 )
-            except Exception:
-                logger.exception(
-                    "Failed to reconcile committed execution for recovery_id=%s",
+            except Exception as error:
+                logger.error(
+                    "execution_reconcile_failed recovery_id=%s error_type=%s",
                     execution.recovery_id,
+                    type(error).__name__,
                 )
                 raise
 
@@ -197,6 +198,7 @@ class RecoveryOrchestrator:
         scenario_id: str | ScenarioId,
         *,
         execution_mode: ExecutionMode,
+        recovery_id: str | None = None,
     ) -> PendingSdkApproval:
         try:
             approved_scenario = ScenarioId(scenario_id)
@@ -214,7 +216,7 @@ class RecoveryOrchestrator:
                 "Agents SDK orchestration supports hotel recovery only"
             )
 
-        recovery_id = str(uuid4())
+        recovery_id = recovery_id or str(uuid4())
         context = HotelAgentContext(
             recovery_id=recovery_id,
             store=self._store,

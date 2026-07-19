@@ -3,13 +3,42 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlparse
 
 DEVELOPMENT_CORS_ORIGINS = (
     "http://localhost:5173",
     "http://127.0.0.1:5173",
 )
+DEVELOPMENT_IDENTITY_HASH_SECRET = "backchannel-local-development-identity-key"
+
+
+def _environment_bool(name: str, *, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized == "true":
+        return True
+    if normalized == "false":
+        return False
+    raise ValueError(f"{name} must be either true or false")
+
+
+def _environment_int(name: str, *, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError as error:
+        raise ValueError(f"{name} must be an integer") from error
+
+
+def _environment_origins(name: str) -> tuple[str, ...]:
+    raw = os.environ.get(name, "")
+    return tuple(origin.strip() for origin in raw.split(",") if origin.strip())
 
 # Serialized SDK approvals are intentionally bound to these application contracts.
 APPROVAL_PROTOCOL_VERSION = "backchannel.approval.v1"
@@ -25,6 +54,96 @@ class RuntimeSettings:
     development_cors_origins: tuple[str, ...] = DEVELOPMENT_CORS_ORIGINS
     database_path: Path = Path("backchannel.sqlite3")
     demo_reset_enabled: bool = False
+    max_concurrent_live_recoveries: int = 2
+    live_ip_cooldown_seconds: int = 60
+    live_session_cooldown_seconds: int = 60
+    daily_demo_budget_units: int = 100
+    terminal_recovery_ttl_seconds: int = 86_400
+    request_body_size_limit_bytes: int = 16_384
+    deployed_mode: bool = False
+    deployed_cors_origins: tuple[str, ...] = ()
+    trusted_proxy_enabled: bool = False
+    demo_session_cookie_name: str = "backchannel_demo_session"
+    demo_session_lifetime_seconds: int = 86_400
+    demo_session_cookie_secure: bool = False
+    identity_hash_secret: str = field(
+        default=DEVELOPMENT_IDENTITY_HASH_SECRET,
+        repr=False,
+    )
+
+    def __post_init__(self) -> None:
+        bounds = {
+            "max_concurrent_live_recoveries": (
+                self.max_concurrent_live_recoveries,
+                1,
+                100,
+            ),
+            "live_ip_cooldown_seconds": (self.live_ip_cooldown_seconds, 1, 86_400),
+            "live_session_cooldown_seconds": (
+                self.live_session_cooldown_seconds,
+                1,
+                86_400,
+            ),
+            "daily_demo_budget_units": (self.daily_demo_budget_units, 1, 1_000_000),
+            "terminal_recovery_ttl_seconds": (
+                self.terminal_recovery_ttl_seconds,
+                1,
+                2_592_000,
+            ),
+            "request_body_size_limit_bytes": (
+                self.request_body_size_limit_bytes,
+                1,
+                1_048_576,
+            ),
+            "demo_session_lifetime_seconds": (
+                self.demo_session_lifetime_seconds,
+                1,
+                604_800,
+            ),
+        }
+        for name, (value, minimum, maximum) in bounds.items():
+            if (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or not minimum <= value <= maximum
+            ):
+                raise ValueError(f"{name} must be between {minimum} and {maximum}")
+
+        if not self.demo_session_cookie_name or any(
+            character in self.demo_session_cookie_name for character in " ;,\r\n\t"
+        ):
+            raise ValueError("demo_session_cookie_name must be a safe cookie token")
+        if len(self.identity_hash_secret.encode("utf-8")) < 32:
+            raise ValueError("identity_hash_secret must contain at least 32 bytes")
+        if self.deployed_mode:
+            if self.identity_hash_secret == DEVELOPMENT_IDENTITY_HASH_SECRET:
+                raise ValueError(
+                    "deployed mode requires an explicit BACKCHANNEL_IDENTITY_HASH_SECRET"
+                )
+            if not self.deployed_cors_origins:
+                raise ValueError("deployed mode requires an explicit HTTPS origin allowlist")
+            for origin in self.deployed_cors_origins:
+                parsed = urlparse(origin)
+                if (
+                    parsed.scheme != "https"
+                    or not parsed.netloc
+                    or parsed.path not in {"", "/"}
+                    or parsed.params
+                    or parsed.query
+                    or parsed.fragment
+                    or "*" in origin
+                ):
+                    raise ValueError(
+                        "deployed mode origins must be exact HTTPS origins without wildcards"
+                    )
+
+    @property
+    def cors_origins(self) -> tuple[str, ...]:
+        return self.deployed_cors_origins if self.deployed_mode else self.development_cors_origins
+
+    @property
+    def effective_demo_session_cookie_secure(self) -> bool:
+        return self.deployed_mode or self.demo_session_cookie_secure
 
     @classmethod
     def from_environment(cls) -> RuntimeSettings:
@@ -39,4 +158,46 @@ class RuntimeSettings:
             live_ready=live_ready,
             database_path=database_path,
             demo_reset_enabled=demo_reset_enabled,
+            max_concurrent_live_recoveries=_environment_int(
+                "BACKCHANNEL_MAX_CONCURRENT_LIVE_RECOVERIES",
+                default=2,
+            ),
+            live_ip_cooldown_seconds=_environment_int(
+                "BACKCHANNEL_LIVE_IP_COOLDOWN_SECONDS",
+                default=60,
+            ),
+            live_session_cooldown_seconds=_environment_int(
+                "BACKCHANNEL_LIVE_SESSION_COOLDOWN_SECONDS",
+                default=60,
+            ),
+            daily_demo_budget_units=_environment_int(
+                "BACKCHANNEL_DAILY_DEMO_BUDGET_UNITS",
+                default=100,
+            ),
+            terminal_recovery_ttl_seconds=_environment_int(
+                "BACKCHANNEL_TERMINAL_RECOVERY_TTL_SECONDS",
+                default=86_400,
+            ),
+            request_body_size_limit_bytes=_environment_int(
+                "BACKCHANNEL_REQUEST_BODY_SIZE_LIMIT_BYTES",
+                default=16_384,
+            ),
+            deployed_mode=_environment_bool("BACKCHANNEL_DEPLOYED_MODE"),
+            deployed_cors_origins=_environment_origins("BACKCHANNEL_CORS_ORIGINS"),
+            trusted_proxy_enabled=_environment_bool("BACKCHANNEL_TRUSTED_PROXY_ENABLED"),
+            demo_session_cookie_name=os.environ.get(
+                "BACKCHANNEL_DEMO_SESSION_COOKIE_NAME",
+                "backchannel_demo_session",
+            ),
+            demo_session_lifetime_seconds=_environment_int(
+                "BACKCHANNEL_DEMO_SESSION_LIFETIME_SECONDS",
+                default=86_400,
+            ),
+            demo_session_cookie_secure=_environment_bool(
+                "BACKCHANNEL_DEMO_SESSION_COOKIE_SECURE"
+            ),
+            identity_hash_secret=os.environ.get(
+                "BACKCHANNEL_IDENTITY_HASH_SECRET",
+                DEVELOPMENT_IDENTITY_HASH_SECRET,
+            ),
         )
