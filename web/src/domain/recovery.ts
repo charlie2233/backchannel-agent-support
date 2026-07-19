@@ -11,7 +11,21 @@ export const lifecycleSteps = [
 
 export type LifecycleStep = (typeof lifecycleSteps)[number];
 export type ScenarioId = "hotel" | "api-quota";
-export type RecoveryStatus = "in_progress" | "pending_approval" | "completed";
+export type DecisionAction = "approve" | "decline";
+export type RecoveryStatus =
+  | "in_progress"
+  | "pending_approval"
+  | "completed"
+  | "closed_without_action"
+  | "outcome_unknown";
+
+export function isTerminalRecoveryStatus(status: RecoveryStatus): boolean {
+  return (
+    status === "completed" ||
+    status === "closed_without_action" ||
+    status === "outcome_unknown"
+  );
+}
 
 export interface HotelRemedyTerms {
   bookingId: string;
@@ -54,19 +68,44 @@ export interface RecoverySnapshot {
 }
 
 export interface ApprovalDecisionRequest {
+  action: DecisionAction;
   clientDecisionId: string;
   remedyId: string;
   remedyDigest: `sha256:${string}`;
   toolCallId: string;
 }
 
-export interface ApprovalDecisionResponse {
+export interface ApprovedDecisionResponse {
+  action: "approve";
   clientDecisionId: string;
   recoveryId: string;
   status: "completed";
   approvedRemedyDigest: `sha256:${string}`;
   executionStarted: true;
 }
+
+export interface ClosedDecisionResponse {
+  action: "decline";
+  clientDecisionId: string;
+  recoveryId: string;
+  status: "closed_without_action";
+  approvedRemedyDigest: null;
+  executionStarted: false;
+}
+
+export interface UnknownDecisionResponse {
+  action: "decline";
+  clientDecisionId: string;
+  recoveryId: string;
+  status: "outcome_unknown";
+  approvedRemedyDigest: null;
+  executionStarted: null;
+}
+
+export type ApprovalDecisionResponse =
+  | ApprovedDecisionResponse
+  | ClosedDecisionResponse
+  | UnknownDecisionResponse;
 
 export interface EvidenceEntry {
   label: string;

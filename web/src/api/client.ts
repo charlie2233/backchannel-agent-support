@@ -146,7 +146,9 @@ export function isRecoverySnapshot(value: unknown): value is RecoverySnapshot {
   const statusIsValid =
     value.status === "in_progress" ||
     value.status === "pending_approval" ||
-    value.status === "completed";
+    value.status === "completed" ||
+    value.status === "closed_without_action" ||
+    value.status === "outcome_unknown";
   const approvalIsValid =
     value.pendingApproval === null || isPendingApproval(value.pendingApproval);
   return (
@@ -210,21 +212,35 @@ export async function createRecovery(
 }
 
 function isDecisionResponse(value: unknown): value is ApprovalDecisionResponse {
-  return (
-    isRecord(value) &&
-    hasExactKeys(value, [
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, [
+      "action",
       "clientDecisionId",
       "recoveryId",
       "status",
       "approvedRemedyDigest",
       "executionStarted",
-    ]) &&
-    typeof value.clientDecisionId === "string" &&
-    typeof value.recoveryId === "string" &&
-    value.status === "completed" &&
-    typeof value.approvedRemedyDigest === "string" &&
-    /^sha256:[0-9a-f]{64}$/.test(value.approvedRemedyDigest) &&
-    value.executionStarted === true
+    ]) ||
+    typeof value.clientDecisionId !== "string" ||
+    typeof value.recoveryId !== "string"
+  ) {
+    return false;
+  }
+  if (value.action === "approve") {
+    return (
+      value.status === "completed" &&
+      typeof value.approvedRemedyDigest === "string" &&
+      /^sha256:[0-9a-f]{64}$/.test(value.approvedRemedyDigest) &&
+      value.executionStarted === true
+    );
+  }
+  if (value.action !== "decline" || value.approvedRemedyDigest !== null) {
+    return false;
+  }
+  return (
+    (value.status === "closed_without_action" && value.executionStarted === false) ||
+    (value.status === "outcome_unknown" && value.executionStarted === null)
   );
 }
 
@@ -250,7 +266,14 @@ export async function postDecision(
   }
   const body: unknown = await response.json();
   if (!isDecisionResponse(body)) {
-    throw new Error("Decision response did not match the approval contract");
+    throw new Error("Decision response did not match the decision contract");
+  }
+  if (
+    body.action !== decision.action ||
+    body.clientDecisionId !== decision.clientDecisionId ||
+    body.recoveryId !== recoveryId
+  ) {
+    throw new Error("Decision response did not match the requested decision");
   }
   return body;
 }

@@ -1,4 +1,8 @@
-import { lifecycleSteps, type RecoveryScenario } from "../domain/recovery";
+import {
+  isTerminalRecoveryStatus,
+  lifecycleSteps,
+  type RecoveryScenario,
+} from "../domain/recovery";
 
 interface LifecycleProps {
   scenario: RecoveryScenario;
@@ -20,7 +24,7 @@ export function Lifecycle({ scenario }: LifecycleProps) {
       <ol className="lifecycle" aria-label="Recovery lifecycle">
         {lifecycleSteps.map((step, index) => {
           const state =
-            scenario.status === "completed" || index < scenario.currentStep
+            isTerminalRecoveryStatus(scenario.status) || index < scenario.currentStep
               ? "complete"
               : index === scenario.currentStep
                 ? "current"

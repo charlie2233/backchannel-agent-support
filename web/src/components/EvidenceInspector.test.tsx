@@ -61,9 +61,9 @@ describe("EvidenceInspector exact consent", () => {
     );
 
     const inspector = screen.getByRole("complementary", {
-      name: "Approve exact remedy",
+      name: "Decide exact remedy",
     });
-    expect(within(inspector).getByRole("heading", { name: "Approve exact remedy" })).toBeVisible();
+    expect(within(inspector).getByRole("heading", { name: "Decide exact remedy" })).toBeVisible();
     expect(
       within(inspector).getByText("11111111-2222-4333-8444-555555555555"),
     ).toBeVisible();
@@ -87,7 +87,8 @@ describe("EvidenceInspector exact consent", () => {
     expect(within(inspector).getByText("Execution has not begun.")).toBeVisible();
     expect(within(inspector).getByText("sha256:0123456789ab…89abcdef")).toBeVisible();
     expect(within(inspector).queryByText(fullDigest)).not.toBeInTheDocument();
-    expect(within(inspector).queryByRole("button", { name: /Decline/i })).not.toBeInTheDocument();
+    expect(within(inspector).getByRole("button", { name: "Approve remedy" })).toBeVisible();
+    expect(within(inspector).getByRole("button", { name: "Decline" })).toBeVisible();
   });
 
   it("copies the full digest while keeping only a shortened digest visible", async () => {
@@ -129,7 +130,8 @@ describe("EvidenceInspector exact consent", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Approve remedy" }));
 
-    expect(screen.getByRole("button", { name: "Submitting…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Submitting approval…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Decline" })).toBeDisabled();
     expect(screen.getByText("Execution has not begun.")).toBeVisible();
     expect(screen.queryByText(/completed receipt/i)).not.toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -138,6 +140,7 @@ describe("EvidenceInspector exact consent", () => {
       "/api/recoveries/11111111-2222-4333-8444-555555555555/decisions",
     );
     expect(JSON.parse(String(init.body))).toEqual({
+      action: "approve",
       clientDecisionId: "decision-stable-742",
       remedyId: "remedy-server-742",
       remedyDigest: fullDigest,
@@ -147,6 +150,7 @@ describe("EvidenceInspector exact consent", () => {
     resolveFetch?.(
       new Response(
         JSON.stringify({
+          action: "approve",
           clientDecisionId: "decision-stable-742",
           recoveryId: "11111111-2222-4333-8444-555555555555",
           status: "completed",
@@ -157,7 +161,62 @@ describe("EvidenceInspector exact consent", () => {
       ),
     );
     await waitFor(() => expect(onServerSuccess).toHaveBeenCalledTimes(1));
+    expect(screen.getByText("Approval accepted by the server. Refreshing recovery evidence.")).toBeVisible();
     expect(screen.queryByText(/completed receipt/i)).not.toBeInTheDocument();
+  });
+
+  it("posts an exact decline, disables both actions, and refreshes only after acceptance", async () => {
+    let resolveFetch: ((response: Response) => void) | undefined;
+    const fetchMock = vi.fn().mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveFetch = resolve;
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const onServerSuccess = vi.fn().mockResolvedValue(undefined);
+    render(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={pendingSnapshot()}
+        clientDecisionIdFactory={() => "decision-decline-742"}
+        onServerSuccess={onServerSuccess}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Decline" }));
+
+    expect(screen.getByRole("button", { name: "Approve remedy" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Submitting decline…" })).toBeDisabled();
+    expect(screen.getByText("Execution has not begun.")).toBeVisible();
+    expect(onServerSuccess).not.toHaveBeenCalled();
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(String(init.body))).toEqual({
+      action: "decline",
+      clientDecisionId: "decision-decline-742",
+      remedyId: "remedy-server-742",
+      remedyDigest: fullDigest,
+      toolCallId: "call-server-742",
+    });
+
+    resolveFetch?.(
+      new Response(
+        JSON.stringify({
+          action: "decline",
+          clientDecisionId: "decision-decline-742",
+          recoveryId: "11111111-2222-4333-8444-555555555555",
+          status: "closed_without_action",
+          approvedRemedyDigest: null,
+          executionStarted: false,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    await waitFor(() => expect(onServerSuccess).toHaveBeenCalledTimes(1));
+    expect(
+      screen.getByText("Decline accepted by the server. Refreshing recovery evidence."),
+    ).toBeVisible();
   });
 
   it("shows an alert and reuses the same decision ID on retry", async () => {
@@ -167,6 +226,7 @@ describe("EvidenceInspector exact consent", () => {
       .mockResolvedValueOnce(
         new Response(
           JSON.stringify({
+            action: "approve",
             clientDecisionId: "decision-retry-742",
             recoveryId: "11111111-2222-4333-8444-555555555555",
             status: "completed",
@@ -200,6 +260,59 @@ describe("EvidenceInspector exact consent", () => {
     );
     expect(postedBodies[0].clientDecisionId).toBe("decision-retry-742");
     expect(postedBodies[1].clientDecisionId).toBe("decision-retry-742");
+    expect(postedBodies[0].action).toBe("approve");
+    expect(postedBodies[1].action).toBe("approve");
+  });
+
+  it("shows a decline-specific error, does not refresh, and reuses its decision ID", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("failure", { status: 503 }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            action: "decline",
+            clientDecisionId: "decision-decline-retry-742",
+            recoveryId: "11111111-2222-4333-8444-555555555555",
+            status: "closed_without_action",
+            approvedRemedyDigest: null,
+            executionStarted: false,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const onServerSuccess = vi.fn().mockResolvedValue(undefined);
+    render(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={pendingSnapshot()}
+        clientDecisionIdFactory={() => "decision-decline-retry-742"}
+        onServerSuccess={onServerSuccess}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Decline" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Decline could not be recorded. Try again with the same decision.",
+    );
+    expect(onServerSuccess).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Decline" }));
+
+    await waitFor(() => expect(onServerSuccess).toHaveBeenCalledTimes(1));
+    const postedBodies = fetchMock.mock.calls.map(([, init]) =>
+      JSON.parse(String((init as RequestInit).body)),
+    );
+    expect(postedBodies).toEqual([
+      expect.objectContaining({
+        action: "decline",
+        clientDecisionId: "decision-decline-retry-742",
+      }),
+      expect.objectContaining({
+        action: "decline",
+        clientDecisionId: "decision-decline-retry-742",
+      }),
+    ]);
   });
 
   it("does not expose an approval action after the durable decision claim", () => {
@@ -218,6 +331,7 @@ describe("EvidenceInspector exact consent", () => {
 
     expect(screen.getByRole("heading", { name: "Decision in progress" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "Approve remedy" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Decline" })).not.toBeInTheDocument();
     expect(screen.queryByText("Execution has not begun.")).not.toBeInTheDocument();
   });
 });

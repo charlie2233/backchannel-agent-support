@@ -100,7 +100,7 @@ describe("Backchannel console", () => {
       render(<App />);
 
       expect(
-        await screen.findByRole("heading", { name: "Approve exact remedy" }),
+        await screen.findByRole("heading", { name: "Decide exact remedy" }),
       ).toBeVisible();
       expect(await screen.findByText("SDK stub")).toBeVisible();
       expect(screen.getByText("server-booking")).toBeVisible();
@@ -144,6 +144,56 @@ describe("Backchannel console", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /API quota recovery/i }));
 
+    const lifecycle = screen.getByRole("list", { name: "Recovery lifecycle" });
+    expect(within(lifecycle).getAllByText("Recorded")).toHaveLength(6);
+  });
+
+  it.each([
+    ["closed_without_action", "Closed without action"],
+    ["outcome_unknown", "Outcome unknown"],
+  ] as const)("renders %s as a terminal server outcome", async (status, label) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: string | URL | Request) => {
+        const url = String(input);
+        if (url === "/health") {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                backend: "stub",
+                liveReady: false,
+                providerBoundary: "demo_adapter_only",
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        if (url === "/api/recoveries") {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                recoveryId: "11111111-2222-4333-8444-555555555555",
+                scenarioId: "hotel",
+                executionMode: "sdk_stub",
+                status,
+                currentStep: 5,
+                currentStepSummary: `${label} server evidence sealed.`,
+                createdAt: "2026-07-18T20:00:00Z",
+                updatedAt: "2026-07-18T20:00:01Z",
+                pendingApproval: null,
+              }),
+              { status: 201, headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    expect(await screen.findByText(label)).toBeVisible();
+    expect(screen.getByText(status)).toBeVisible();
     const lifecycle = screen.getByRole("list", { name: "Recovery lifecycle" });
     expect(within(lifecycle).getAllByText("Recorded")).toHaveLength(6);
   });

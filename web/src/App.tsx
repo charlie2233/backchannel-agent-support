@@ -6,8 +6,28 @@ import { Lifecycle } from "./components/Lifecycle";
 import { ProvenanceStrip } from "./components/ProvenanceStrip";
 import { ScenarioRail } from "./components/ScenarioRail";
 import { deriveRuntimePresentation, type HealthStatus } from "./domain/runtime";
-import type { RecoveryScenario, RecoverySnapshot, ScenarioId } from "./domain/recovery";
+import type {
+  RecoveryScenario,
+  RecoverySnapshot,
+  RecoveryStatus,
+  ScenarioId,
+} from "./domain/recovery";
 import { recoveryScenarios } from "./fixtures/recoveries";
+
+function serverStatusLabel(status: RecoveryStatus, hasPendingApproval: boolean): string {
+  switch (status) {
+    case "completed":
+      return "Completed";
+    case "closed_without_action":
+      return "Closed without action";
+    case "outcome_unknown":
+      return "Outcome unknown";
+    case "pending_approval":
+      return hasPendingApproval ? "Awaiting decision" : "Decision in progress";
+    case "in_progress":
+      return "Recovery in progress";
+  }
+}
 
 export default function App() {
   const [activeId, setActiveId] = useState<ScenarioId>("hotel");
@@ -111,11 +131,10 @@ export default function App() {
             </div>
             <span className="recovery-state">
               {activeSnapshot !== null
-                ? activeScenarioView.status === "completed"
-                  ? "Completed"
-                  : activeSnapshot.pendingApproval === null
-                    ? "Decision in progress"
-                    : "Awaiting approval"
+                ? serverStatusLabel(
+                    activeSnapshot.status,
+                    activeSnapshot.pendingApproval !== null,
+                  )
                 : activeScenarioView.status === "completed"
                   ? "Completed fixture"
                   : "Awaiting boundary"}

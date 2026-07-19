@@ -1,7 +1,11 @@
 import { useRef, useState } from "react";
 
 import { postDecision } from "../api/client";
-import type { RecoveryScenario, RecoverySnapshot } from "../domain/recovery";
+import type {
+  DecisionAction,
+  RecoveryScenario,
+  RecoverySnapshot,
+} from "../domain/recovery";
 
 interface EvidenceInspectorProps {
   scenario: RecoveryScenario;
@@ -40,10 +44,10 @@ export function EvidenceInspector({
   onServerSuccess,
   clientDecisionIdFactory = defaultDecisionId,
 }: EvidenceInspectorProps) {
-  const [submitting, setSubmitting] = useState(false);
+  const [submittingAction, setSubmittingAction] = useState<DecisionAction | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
-  const decisionId = useRef<string | null>(null);
+  const decisionIds = useRef<Partial<Record<DecisionAction, string>>>({});
   const approval = snapshot?.pendingApproval ?? null;
 
   if (snapshot !== null && approval !== null) {
@@ -59,32 +63,41 @@ export function EvidenceInspector({
       }
     };
 
-    const approve = async () => {
-      if (submitting) {
+    const submitDecision = async (action: DecisionAction) => {
+      if (submittingAction !== null) {
         return;
       }
-      const stableDecisionId = decisionId.current ?? clientDecisionIdFactory();
-      decisionId.current = stableDecisionId;
-      setSubmitting(true);
+      const stableDecisionId = decisionIds.current[action] ?? clientDecisionIdFactory();
+      decisionIds.current[action] = stableDecisionId;
+      setSubmittingAction(action);
       setError(null);
       setStatusMessage(null);
       try {
         await postDecision(snapshot.recoveryId, {
+          action,
           clientDecisionId: stableDecisionId,
           remedyId: approval.remedyId,
           remedyDigest: approval.remedyDigest,
           toolCallId: approval.toolCallId,
         });
-        setStatusMessage("Decision accepted by the server. Refreshing recovery evidence.");
+        setStatusMessage(
+          action === "approve"
+            ? "Approval accepted by the server. Refreshing recovery evidence."
+            : "Decline accepted by the server. Refreshing recovery evidence.",
+        );
         try {
           await onServerSuccess?.();
         } catch {
-          setError("Decision accepted, but refreshed recovery evidence is unavailable.");
+          setError(
+            `${action === "approve" ? "Approval" : "Decline"} accepted, but refreshed recovery evidence is unavailable.`,
+          );
         }
       } catch {
-        setError("Approval could not be recorded. Try again with the same decision.");
+        setError(
+          `${action === "approve" ? "Approval" : "Decline"} could not be recorded. Try again with the same decision.`,
+        );
       } finally {
-        setSubmitting(false);
+        setSubmittingAction(null);
       }
     };
 
@@ -92,7 +105,7 @@ export function EvidenceInspector({
       <aside className="evidence-inspector" aria-labelledby="approval-heading">
         <div className="inspector-heading">
           <p className="eyebrow">Server consent record</p>
-          <h2 id="approval-heading">Approve exact remedy</h2>
+          <h2 id="approval-heading">Decide exact remedy</h2>
           <p>{snapshot.currentStepSummary}</p>
         </div>
 
@@ -184,8 +197,21 @@ export function EvidenceInspector({
           {statusMessage}
         </p>
         <div className="consent-actions">
-          <button type="button" disabled={submitting} onClick={() => void approve()}>
-            {submitting ? "Submitting…" : "Approve remedy"}
+          <button
+            className="consent-action consent-action--decline"
+            type="button"
+            disabled={submittingAction !== null}
+            onClick={() => void submitDecision("decline")}
+          >
+            {submittingAction === "decline" ? "Submitting decline…" : "Decline"}
+          </button>
+          <button
+            className="consent-action consent-action--approve"
+            type="button"
+            disabled={submittingAction !== null}
+            onClick={() => void submitDecision("approve")}
+          >
+            {submittingAction === "approve" ? "Submitting approval…" : "Approve remedy"}
           </button>
         </div>
       </aside>
@@ -216,7 +242,7 @@ export function EvidenceInspector({
         </dl>
         <div className="execution-boundary">
           <strong>Awaiting the durable execution outcome.</strong>
-          <p>The claimed decision cannot be replaced by another approval.</p>
+          <p>The claimed decision cannot be replaced by another decision.</p>
         </div>
       </aside>
     );

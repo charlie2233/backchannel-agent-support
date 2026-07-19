@@ -586,6 +586,9 @@ a:focus-visible {
 }
 
 .consent-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
   margin-top: 16px;
 }
 
@@ -605,6 +608,12 @@ a:focus-visible {
 .consent-actions button:disabled {
   cursor: wait;
   opacity: 0.65;
+}
+
+.consent-actions .consent-action--decline {
+  border-color: #98a2b3;
+  background: white;
+  color: #344054;
 }
 
 @media (max-width: 1120px) {

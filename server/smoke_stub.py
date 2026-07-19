@@ -1,4 +1,4 @@
-"""Bounded, keyless smoke proof for replay and deterministic SDK approval."""
+"""Bounded, keyless smoke proof for replay and deterministic SDK decisions."""
 
 from __future__ import annotations
 
@@ -52,22 +52,45 @@ def main() -> None:
             boundary = cast(str, receipt["boundary"])
             assert "no model call or provider execution" in boundary.lower()
 
-            sdk_created = client.post(
+            approve_created = client.post(
                 "/api/recoveries",
                 json={"scenarioId": "hotel", "executionMode": "sdk_stub"},
             )
-            sdk_created.raise_for_status()
-            sdk_snapshot = cast(dict[str, object], sdk_created.json())
-            assert sdk_snapshot["status"] == "pending_approval"
-            approval = cast(dict[str, object], sdk_snapshot["pendingApproval"])
-            assert approval["executionStarted"] is False
+            approve_created.raise_for_status()
+            approve_snapshot = cast(dict[str, object], approve_created.json())
+            assert approve_snapshot["status"] == "pending_approval"
+            approve_record = cast(
+                dict[str, object], approve_snapshot["pendingApproval"]
+            )
+            assert approve_record["executionStarted"] is False
+
+            decline_created = client.post(
+                "/api/recoveries",
+                json={"scenarioId": "hotel", "executionMode": "sdk_stub"},
+            )
+            decline_created.raise_for_status()
+            decline_snapshot = cast(dict[str, object], decline_created.json())
+            assert decline_snapshot["status"] == "pending_approval"
+            decline_record = cast(
+                dict[str, object], decline_snapshot["pendingApproval"]
+            )
+            assert decline_record["executionStarted"] is False
             assert hotel_provider.dispatch_count == 0
-            sdk_recovery_id = cast(str, sdk_snapshot["recoveryId"])
-            decision_payload = {
-                "clientDecisionId": "smoke-restart-approval",
-                "remedyId": cast(str, approval["remedyId"]),
-                "remedyDigest": cast(str, approval["remedyDigest"]),
-                "toolCallId": cast(str, approval["toolCallId"]),
+            approve_recovery_id = cast(str, approve_snapshot["recoveryId"])
+            approve_payload = {
+                "action": "approve",
+                "clientDecisionId": "smoke-restart-approve",
+                "remedyId": cast(str, approve_record["remedyId"]),
+                "remedyDigest": cast(str, approve_record["remedyDigest"]),
+                "toolCallId": cast(str, approve_record["toolCallId"]),
+            }
+            decline_recovery_id = cast(str, decline_snapshot["recoveryId"])
+            decline_payload = {
+                "action": "decline",
+                "clientDecisionId": "smoke-restart-decline",
+                "remedyId": cast(str, decline_record["remedyId"]),
+                "remedyDigest": cast(str, decline_record["remedyDigest"]),
+                "toolCallId": cast(str, decline_record["toolCallId"]),
             }
 
         store.close()
@@ -82,16 +105,63 @@ def main() -> None:
                 hotel_provider=restarted_provider,
             )
         ) as restarted_client:
-            completed = restarted_client.post(
-                f"/api/recoveries/{sdk_recovery_id}/decisions",
-                json=decision_payload,
+            approved = restarted_client.post(
+                f"/api/recoveries/{approve_recovery_id}/decisions",
+                json=approve_payload,
             )
-            completed.raise_for_status()
-            assert completed.json()["status"] == "completed"
-        assert restarted_provider.dispatch_count == 1
-        sdk_receipt = restarted_store.get_receipt(sdk_recovery_id)
-        assert sdk_receipt.execution_mode is ExecutionMode.SDK_STUB
-        assert sdk_receipt.provider_execution is True
+            approved.raise_for_status()
+            approved_body = cast(dict[str, object], approved.json())
+            assert approved_body["action"] == "approve"
+            assert approved_body["status"] == "completed"
+            assert approved_body["executionStarted"] is True
+            assert restarted_provider.dispatch_count == 1
+            assert restarted_store.count_executions(approve_recovery_id) == 1
+            approve_receipt = restarted_store.get_receipt(approve_recovery_id)
+            assert approve_receipt.execution_mode is ExecutionMode.SDK_STUB
+            assert approve_receipt.provider_execution is True
+
+            dispatches_before_decline = restarted_provider.dispatch_count
+            declined = restarted_client.post(
+                f"/api/recoveries/{decline_recovery_id}/decisions",
+                json=decline_payload,
+            )
+            declined.raise_for_status()
+            declined_body = cast(dict[str, object], declined.json())
+            assert declined_body["action"] == "decline"
+            assert declined_body["status"] == "closed_without_action"
+            assert declined_body["approvedRemedyDigest"] is None
+            assert declined_body["executionStarted"] is False
+            decline_dispatch_count = (
+                restarted_provider.dispatch_count - dispatches_before_decline
+            )
+            assert decline_dispatch_count == 0
+            assert restarted_store.count_executions(decline_recovery_id) == 0
+
+            decline_snapshot_response = restarted_client.get(
+                f"/api/recoveries/{decline_recovery_id}"
+            )
+            decline_snapshot_response.raise_for_status()
+            terminal_decline = cast(
+                dict[str, object], decline_snapshot_response.json()
+            )
+            assert terminal_decline["status"] == "closed_without_action"
+            assert terminal_decline["pendingApproval"] is None
+
+            decline_receipt = restarted_store.get_receipt(decline_recovery_id)
+            assert decline_receipt.execution_mode is ExecutionMode.SDK_STUB
+            assert decline_receipt.status == "closed_without_action"
+            assert decline_receipt.provider_execution is False
+            assert decline_receipt.approved_remedy_digest is None
+            assert decline_receipt.provider_result == "Provider dispatch did not begin."
+            assert decline_receipt.verification_results == [
+                "Exact interruption rejected.",
+                "No replacement remedy selected.",
+                "Execution count is zero.",
+                "Provider dispatch did not begin.",
+                "Temporary permission revoked.",
+                "Cancellation receipt sealed.",
+            ]
+            assert restarted_provider.dispatch_count == 1
 
         print(
             json.dumps(
@@ -103,6 +173,16 @@ def main() -> None:
                     "sdkProofLane": "public_typed_decision",
                     "sdkMode": "sdk_stub",
                     "sdkApprovalCount": 1,
+                    "sdkApproveStatus": approved_body["status"],
+                    "sdkApproveExecutionCount": restarted_store.count_executions(
+                        approve_recovery_id
+                    ),
+                    "sdkDeclineStatus": declined_body["status"],
+                    "sdkDeclineExecutionCount": restarted_store.count_executions(
+                        decline_recovery_id
+                    ),
+                    "sdkDeclineProviderDispatchCount": decline_dispatch_count,
+                    "sdkDeclineVerificationResults": decline_receipt.verification_results,
                     "sdkPreapprovalDispatchCount": 0,
                     "sdkPostapprovalDispatchCount": 1,
                     "sdkRestartResume": "passed",
@@ -111,6 +191,7 @@ def main() -> None:
                 sort_keys=True,
             )
         )
+        restarted_store.close()
 
 
 if __name__ == "__main__":
