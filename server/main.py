@@ -1,9 +1,11 @@
 """FastAPI entry point for truthful recovery persistence and streaming."""
 
 import asyncio
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import timedelta
+from pathlib import Path
 from typing import Annotated, cast
 from uuid import UUID, uuid4
 
@@ -11,7 +13,8 @@ from agents.models.interface import ModelProvider
 from fastapi import FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
 from server.cleanup import cleanup_terminal_recoveries
 from server.config import RuntimeSettings
@@ -53,6 +56,154 @@ from server.replay.loader import ScenarioLoader, ScenarioNotFoundError
 from server.store import ApprovalDecisionError, RecoveryNotFoundError, SQLiteStore
 
 logger = get_safe_logger(__name__)
+
+_PRODUCTION_STATIC_DIR = Path(__file__).resolve().parent.parent / "web" / "dist"
+_READY_SCHEMA_COLUMNS = {
+    "recoveries": frozenset(
+        {
+            "id",
+            "scenario_id",
+            "execution_mode",
+            "status",
+            "current_step",
+            "current_step_summary",
+            "model_ids_json",
+            "root_trace_id",
+            "model_call",
+            "sdk_version",
+            "protocol_version",
+            "agent_graph_version",
+            "definition_digest",
+            "created_at",
+            "updated_at",
+        }
+    ),
+    "remedies": frozenset(
+        {
+            "id",
+            "recovery_id",
+            "terms_json",
+            "digest",
+            "cost_delta_minor",
+            "changed_fields_json",
+            "provider_commitments_json",
+            "expiry",
+            "hard_constraint_satisfied",
+            "delegated_authority_satisfied",
+            "evidence_json",
+            "status",
+            "created_at",
+        }
+    ),
+    "pending_approvals": frozenset(
+        {
+            "tool_call_id",
+            "recovery_id",
+            "sdk_version",
+            "protocol_version",
+            "agent_graph_version",
+            "definition_digest",
+            "root_trace_id",
+            "model_ids_json",
+            "execution_mode",
+            "action_digest",
+            "remedy_id",
+            "consent_digest",
+            "state_json",
+            "status",
+            "created_at",
+            "updated_at",
+        }
+    ),
+    "approval_decisions": frozenset(
+        {
+            "recovery_id",
+            "client_decision_id",
+            "action",
+            "remedy_id",
+            "remedy_digest",
+            "tool_call_id",
+            "request_fingerprint",
+            "status",
+            "result_json",
+            "claimed_at",
+            "completed_at",
+        }
+    ),
+    "executions": frozenset(
+        {
+            "id",
+            "recovery_id",
+            "idempotency_key",
+            "status",
+            "provider_execution",
+            "request_digest",
+            "tool_call_id",
+            "remedy_digest",
+            "result_json",
+            "created_at",
+            "updated_at",
+        }
+    ),
+    "events": frozenset(
+        {"id", "recovery_id", "seq", "type", "terminal", "data_json", "created_at"}
+    ),
+    "receipts": frozenset({"recovery_id", "receipt_json", "created_at"}),
+    "usage_ledger": frozenset(
+        {"id", "recovery_id", "category", "amount", "recorded_at"}
+    ),
+    "demo_sessions": frozenset({"id", "created_at", "expires_at"}),
+    "live_admissions": frozenset(
+        {
+            "recovery_id",
+            "ip_key",
+            "session_key",
+            "budget_units",
+            "admitted_at",
+            "expires_at",
+            "released_at",
+        }
+    ),
+}
+_SPA_SEGMENT = re.compile(r"^[A-Za-z0-9_-]+$")
+_RESERVED_ROUTE_ROOTS = frozenset(
+    {"api", "assets", "docs", "health", "openapi.json", "readyz", "redoc"}
+)
+
+
+def _store_schema_is_ready(store: SQLiteStore) -> bool:
+    """Probe the configured SQLite database without exposing failure details."""
+
+    try:
+        with store._connect() as connection:
+            integrity = connection.execute("PRAGMA quick_check(1)").fetchone()
+            if integrity is None or integrity[0] != "ok":
+                return False
+            for table_name, required_columns in _READY_SCHEMA_COLUMNS.items():
+                actual_columns = {
+                    str(row[1])
+                    for row in connection.execute(
+                        f'PRAGMA table_info("{table_name}")'
+                    ).fetchall()
+                }
+                if not required_columns.issubset(actual_columns):
+                    return False
+    except Exception:
+        return False
+    return True
+
+
+def _is_route_like_spa_path(path: str) -> bool:
+    if not path:
+        return True
+    segments = path.split("/")
+    if (
+        segments[0].lower() in _RESERVED_ROUTE_ROOTS
+        or any(segment in {"", ".", ".."} for segment in segments)
+        or any(_SPA_SEGMENT.fullmatch(segment) is None for segment in segments)
+    ):
+        return False
+    return True
 
 
 def _request_id(request: Request) -> str:
@@ -121,6 +272,7 @@ def create_app(
     quota_provider: QuotaSimulator | None = None,
     orchestrator: RecoveryOrchestrator | None = None,
     model_provider: ModelProvider | None = None,
+    static_dir: Path | None = None,
 ) -> FastAPI:
     install_server_log_safety()
     runtime_settings = settings or RuntimeSettings.from_environment()
@@ -138,6 +290,12 @@ def create_app(
             model_provider=model_provider,
         )
     public_controls = PublicDemoControls(recovery_store, runtime_settings)
+    configured_static_dir = static_dir.resolve() if static_dir is not None else None
+    static_index = (
+        configured_static_dir / "index.html"
+        if configured_static_dir is not None
+        else None
+    )
     terminal_ttl = timedelta(
         seconds=runtime_settings.terminal_recovery_ttl_seconds
     )
@@ -190,6 +348,7 @@ def create_app(
     application.state.recovery_orchestrator = recovery_orchestrator
     application.state.public_demo_controls = public_controls
     application.state.runtime_settings = runtime_settings
+    application.state.static_dir = configured_static_dir
     application.add_middleware(
         CORSMiddleware,
         allow_origins=list(runtime_settings.cors_origins),
@@ -278,8 +437,18 @@ def create_app(
         )
 
     @application.get("/readyz", response_model=ReadinessResponse)
-    def ready() -> ReadinessResponse:
-        return ReadinessResponse(status="ready")
+    def ready() -> Response:
+        database_ready = _store_schema_is_ready(recovery_store)
+        static_ready = static_index is None or static_index.is_file()
+        readiness_status = "ready" if database_ready and static_ready else "not_ready"
+        return JSONResponse(
+            status_code=(
+                status.HTTP_200_OK
+                if readiness_status == "ready"
+                else status.HTTP_503_SERVICE_UNAVAILABLE
+            ),
+            content={"status": readiness_status},
+        )
 
     @application.get("/api/scenarios", response_model=list[ScenarioResponse])
     def scenarios() -> list[ScenarioResponse]:
@@ -502,7 +671,34 @@ def create_app(
         recovery_store.reset()
         return DemoResetResponse(reset=True)
 
+    if configured_static_dir is not None:
+        assets_dir = configured_static_dir / "assets"
+        if assets_dir.is_dir():
+            application.mount(
+                "/assets",
+                StaticFiles(directory=assets_dir, check_dir=True),
+                name="production-assets",
+            )
+
+        @application.api_route(
+            "/{spa_path:path}",
+            methods=["GET", "HEAD"],
+            include_in_schema=False,
+        )
+        def spa_fallback(spa_path: str) -> Response:
+            if static_index is None or not static_index.is_file():
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Not found",
+                )
+            if not _is_route_like_spa_path(spa_path):
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Not found",
+                )
+            return FileResponse(static_index, media_type="text/html")
+
     return application
 
 
-app = create_app()
+app = create_app(static_dir=_PRODUCTION_STATIC_DIR)

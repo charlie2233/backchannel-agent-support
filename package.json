@@ -8,9 +8,13 @@
   "scripts": {
     "build": "npm --workspace web run build",
     "check": "npm --workspace web run check && uv run ruff check server tests && uv run mypy server && uv run pytest -q",
+    "presmoke:production": "npm run build",
     "smoke:live": "uv run python scripts/smoke_live.py",
     "smoke:live:3": "uv run python scripts/smoke_live_three.py",
+    "smoke:container": "uv run python scripts/docker_smoke.py",
+    "smoke:production": "uv run python scripts/docker_smoke.py --launch",
     "smoke:stub": "node scripts/smoke-stub.mjs",
+    "start": "uv run python scripts/start.py",
     "test": "npm --workspace web test -- --run"
   },
   "engines": {

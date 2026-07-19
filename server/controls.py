@@ -40,6 +40,14 @@ _SESSION_COOKIE_DOMAIN = "backchannel.demo-session-cookie"
 _SESSION_COOKIE_MAX_LENGTH = 160
 _SESSION_NONCE_LENGTH = 43
 _SESSION_SIGNATURE_LENGTH = 64
+_API_CONTENT_SECURITY_POLICY = (
+    "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
+)
+_HTML_CONTENT_SECURITY_POLICY = (
+    "default-src 'none'; script-src 'self'; style-src 'self'; "
+    "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; "
+    "base-uri 'none'; form-action 'none'"
+)
 
 
 class LiveAdmissionCode(StrEnum):
@@ -450,8 +458,12 @@ class PublicBoundaryMiddleware:
                 response_headers["permissions-policy"] = (
                     "camera=(), microphone=(), geolocation=()"
                 )
+                content_type = response_headers.get("content-type", "")
+                is_html = content_type.partition(";")[0].strip().lower() == "text/html"
                 response_headers["content-security-policy"] = (
-                    "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
+                    _HTML_CONTENT_SECURITY_POLICY
+                    if is_html
+                    else _API_CONTENT_SECURITY_POLICY
                 )
                 if "cache-control" not in response_headers:
                     response_headers["cache-control"] = "no-store"
