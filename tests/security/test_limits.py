@@ -60,6 +60,38 @@ class RecordingLiveOrchestrator:
 
 
 @pytest.mark.parametrize(
+    ("code", "expected_message"),
+    [
+        (
+            LiveAdmissionCode.LIVE_UNAVAILABLE,
+            "Live recovery is unavailable in this demo. "
+            "A replay fixture is starting automatically; you can rerun it explicitly.",
+        ),
+        (
+            LiveAdmissionCode.LIVE_CAPACITY,
+            "Live recovery is currently at capacity. "
+            "A replay fixture is starting automatically; you can rerun it explicitly.",
+        ),
+        (
+            LiveAdmissionCode.COOLDOWN,
+            "Please wait before starting another live recovery. "
+            "A replay fixture is starting automatically; you can rerun it explicitly.",
+        ),
+        (
+            LiveAdmissionCode.DAILY_BUDGET,
+            "The daily live demo budget is currently reached. "
+            "A replay fixture is starting automatically; you can rerun it explicitly.",
+        ),
+    ],
+)
+def test_live_admission_messages_match_the_public_client_allowlist(
+    code: LiveAdmissionCode,
+    expected_message: str,
+) -> None:
+    assert LiveAdmissionError(code).public_message == expected_message
+
+
+@pytest.mark.parametrize(
     ("field", "value"),
     [
         ("max_concurrent_live_recoveries", 0),
@@ -310,7 +342,10 @@ def test_live_unavailable_has_stable_code_and_explicit_replay_offer(tmp_path) ->
     assert response.status_code == 422
     assert response.json()["code"] == "live_unavailable"
     assert response.json()["fallbackExecutionMode"] == "replay_fixture"
-    assert "explicitly run the replay fixture" in response.json()["message"]
+    assert response.json()["message"] == (
+        "Live recovery is unavailable in this demo. "
+        "A replay fixture is starting automatically; you can rerun it explicitly."
+    )
 
 
 def test_capacity_and_daily_budget_errors_do_not_expose_internal_keys(tmp_path) -> None:

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import App from "./App";
@@ -34,6 +34,175 @@ function stubHealthWithUnavailableRecovery() {
 }
 
 describe("Backchannel console", () => {
+  it("retries replay once after a stable live-admission error and discloses it", async () => {
+    const requestModes: string[] = [];
+    const safeExplanation =
+      "Live recovery is currently at capacity. A replay fixture is starting automatically; you can rerun it explicitly.";
+    const fetchMock = vi.fn().mockImplementation(
+      (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/health") {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                backend: "openai",
+                liveReady: true,
+                providerBoundary: "demo_adapter_only",
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        if (url === "/api/recoveries") {
+          const body = JSON.parse(String(init?.body)) as { executionMode: string };
+          requestModes.push(body.executionMode);
+          if (body.executionMode === "openai_live") {
+            return Promise.resolve(
+              new Response(
+                JSON.stringify({
+                  code: "live_capacity",
+                  message: safeExplanation,
+                  requestId: "0123456789abcdef0123456789abcdef",
+                  fallbackExecutionMode: "replay_fixture",
+                }),
+                { status: 429, headers: { "Content-Type": "application/json" } },
+              ),
+            );
+          }
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                recoveryId: "11111111-2222-4333-8444-555555555555",
+                scenarioId: "hotel",
+                executionMode: "replay_fixture",
+                modelIds: [],
+                rootTraceId: null,
+                status: "in_progress",
+                currentStep: 1,
+                currentStepSummary: "Replay server snapshot loaded.",
+                createdAt: "2026-07-19T12:00:00Z",
+                updatedAt: "2026-07-19T12:00:00Z",
+                pendingApproval: null,
+              }),
+              { status: 201, headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<App />);
+
+    expect(await screen.findByText(safeExplanation)).toBeVisible();
+    const replayAction = screen.getByRole("button", { name: "Run replay fixture" });
+    expect(replayAction).toBeVisible();
+    expect((await screen.findAllByText("Replay server snapshot loaded."))[0]).toBeVisible();
+    expect(requestModes).toEqual(["openai_live", "replay_fixture"]);
+    expect(screen.getByText("Replay fixture")).toBeVisible();
+    expect(screen.queryByText("GPT-5.6 agents")).not.toBeInTheDocument();
+
+    fireEvent.click(replayAction);
+    await waitFor(() =>
+      expect(requestModes).toEqual(["openai_live", "replay_fixture", "replay_fixture"]),
+    );
+  });
+
+  it("uses disclosed replay, never SDK stub, when health says live is unavailable", async () => {
+    const requestModes: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/health") {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                backend: "stub",
+                liveReady: false,
+                providerBoundary: "demo_adapter_only",
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        if (url === "/api/recoveries") {
+          requestModes.push(
+            (JSON.parse(String(init?.body)) as { executionMode: string }).executionMode,
+          );
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                recoveryId: "11111111-2222-4333-8444-555555555555",
+                scenarioId: "hotel",
+                executionMode: "replay_fixture",
+                modelIds: [],
+                rootTraceId: null,
+                status: "in_progress",
+                currentStep: 1,
+                currentStepSummary: "Preflight replay loaded.",
+                createdAt: "2026-07-19T12:00:00Z",
+                updatedAt: "2026-07-19T12:00:00Z",
+                pendingApproval: null,
+              }),
+              { status: 201, headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    expect(
+      await screen.findByText(
+        "Live recovery is unavailable in this demo. A replay fixture is starting automatically; you can rerun it explicitly.",
+      ),
+    ).toBeVisible();
+    expect((await screen.findAllByText("Preflight replay loaded."))[0]).toBeVisible();
+    expect(requestModes).toEqual(["replay_fixture"]);
+    expect(screen.queryByText("SDK stub")).not.toBeInTheDocument();
+    expect(screen.queryByText("GPT-5.6 agents")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Run replay fixture" })).toBeVisible();
+  });
+
+  it("does not offer or start replay for an arbitrary live failure", async () => {
+    const requestModes: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/health") {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                backend: "openai",
+                liveReady: true,
+                providerBoundary: "demo_adapter_only",
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        if (url === "/api/recoveries") {
+          requestModes.push(
+            (JSON.parse(String(init?.body)) as { executionMode: string }).executionMode,
+          );
+          return Promise.resolve(new Response(null, { status: 500 }));
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    await waitFor(() => expect(requestModes).toEqual(["openai_live"]));
+    expect(screen.queryByRole("button", { name: "Run replay fixture" })).not.toBeInTheDocument();
+    expect(screen.queryByText("GPT-5.6 agents")).not.toBeInTheDocument();
+  });
+
   it("renders GPT-5.6 agents only for a verified live backend and live snapshot", async () => {
     vi.stubGlobal(
       "fetch",

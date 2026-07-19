@@ -9,6 +9,31 @@ import type {
   ScenarioId,
 } from "../domain/recovery";
 
+export const LIVE_ADMISSION_MESSAGES = {
+  live_unavailable:
+    "Live recovery is unavailable in this demo. A replay fixture is starting automatically; you can rerun it explicitly.",
+  live_capacity:
+    "Live recovery is currently at capacity. A replay fixture is starting automatically; you can rerun it explicitly.",
+  cooldown:
+    "Please wait before starting another live recovery. A replay fixture is starting automatically; you can rerun it explicitly.",
+  daily_budget:
+    "The daily live demo budget is currently reached. A replay fixture is starting automatically; you can rerun it explicitly.",
+} as const;
+
+export type LiveAdmissionCode = keyof typeof LIVE_ADMISSION_MESSAGES;
+
+export class LiveAdmissionError extends Error {
+  readonly name = "LiveAdmissionError";
+  readonly fallbackExecutionMode = "replay_fixture" as const;
+
+  constructor(
+    readonly code: LiveAdmissionCode,
+    readonly requestId: string,
+  ) {
+    super(LIVE_ADMISSION_MESSAGES[code]);
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -106,6 +131,30 @@ function isHealthStatus(value: unknown): value is HealthStatus {
     typeof candidate.liveReady === "boolean" &&
     candidate.providerBoundary === "demo_adapter_only"
   );
+}
+
+function isLiveAdmissionCode(value: unknown): value is LiveAdmissionCode {
+  return typeof value === "string" && value in LIVE_ADMISSION_MESSAGES;
+}
+
+function readLiveAdmissionError(value: unknown): LiveAdmissionError | null {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, [
+      "code",
+      "message",
+      "requestId",
+      "fallbackExecutionMode",
+    ]) ||
+    !isLiveAdmissionCode(value.code) ||
+    value.message !== LIVE_ADMISSION_MESSAGES[value.code] ||
+    typeof value.requestId !== "string" ||
+    !/^[0-9a-f]{32}$/.test(value.requestId) ||
+    value.fallbackExecutionMode !== "replay_fixture"
+  ) {
+    return null;
+  }
+  return new LiveAdmissionError(value.code, value.requestId);
 }
 
 export async function getHealth(signal?: AbortSignal): Promise<HealthStatus> {
@@ -223,6 +272,16 @@ export async function createRecovery(
     signal,
   });
   if (!response.ok) {
+    let body: unknown = null;
+    try {
+      body = await response.json();
+    } catch {
+      // A malformed error response is handled by the generic status-only path.
+    }
+    const admissionError = readLiveAdmissionError(body);
+    if (admissionError !== null) {
+      throw admissionError;
+    }
     throw new Error(`Recovery creation failed with status ${response.status}`);
   }
   return readRecovery(response);

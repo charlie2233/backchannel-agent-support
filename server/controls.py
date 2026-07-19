@@ -41,19 +41,19 @@ class LiveAdmissionCode(StrEnum):
 _PUBLIC_MESSAGES = {
     LiveAdmissionCode.LIVE_UNAVAILABLE: (
         "Live recovery is unavailable in this demo. "
-        "You can explicitly run the replay fixture instead."
+        "A replay fixture is starting automatically; you can rerun it explicitly."
     ),
     LiveAdmissionCode.LIVE_CAPACITY: (
         "Live recovery is currently at capacity. "
-        "You can explicitly run the replay fixture instead."
+        "A replay fixture is starting automatically; you can rerun it explicitly."
     ),
     LiveAdmissionCode.COOLDOWN: (
         "Please wait before starting another live recovery. "
-        "You can explicitly run the replay fixture instead."
+        "A replay fixture is starting automatically; you can rerun it explicitly."
     ),
     LiveAdmissionCode.DAILY_BUDGET: (
         "The daily live demo budget is currently reached. "
-        "You can explicitly run the replay fixture instead."
+        "A replay fixture is starting automatically; you can rerun it explicitly."
     ),
 }
 

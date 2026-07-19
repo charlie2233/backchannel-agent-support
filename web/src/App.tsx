@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { createRecovery, getHealth, getRecovery } from "./api/client";
+import {
+  LIVE_ADMISSION_MESSAGES,
+  LiveAdmissionError,
+  createRecovery,
+  getHealth,
+  getRecovery,
+} from "./api/client";
 import { EvidenceInspector } from "./components/EvidenceInspector";
 import { Lifecycle } from "./components/Lifecycle";
 import { ProvenanceStrip } from "./components/ProvenanceStrip";
@@ -100,9 +106,28 @@ export default function App() {
   const [health, setHealth] = useState<HealthStatus | null>(null);
   const [healthError, setHealthError] = useState(false);
   const [hotelSnapshot, setHotelSnapshot] = useState<RecoverySnapshot | null>(null);
+  const [replayFallback, setReplayFallback] = useState<string | null>(null);
+  const [replayLoading, setReplayLoading] = useState(false);
+  const [replayError, setReplayError] = useState<string | null>(null);
 
   const activeScenario =
     recoveryScenarios.find((scenario) => scenario.id === activeId) ?? recoveryScenarios[0];
+
+  const startReplay = useCallback(async (signal?: AbortSignal) => {
+    setReplayLoading(true);
+    setReplayError(null);
+    try {
+      const snapshot = await createRecovery("hotel", "replay_fixture", signal);
+      setHotelSnapshot(snapshot);
+    } catch (error: unknown) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        return;
+      }
+      setReplayError("The replay fixture could not be started. You can retry explicitly.");
+    } finally {
+      setReplayLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -126,20 +151,32 @@ export default function App() {
       return;
     }
     const controller = new AbortController();
-    const executionMode =
-      health.backend === "openai" && health.liveReady ? "openai_live" : "sdk_stub";
+    const liveAvailable = health.backend === "openai" && health.liveReady;
+    if (!liveAvailable) {
+      setHotelSnapshot(null);
+      setReplayFallback(LIVE_ADMISSION_MESSAGES.live_unavailable);
+      void startReplay(controller.signal);
+      return () => controller.abort();
+    }
 
-    void createRecovery("hotel", executionMode, controller.signal)
+    setReplayFallback(null);
+    setReplayError(null);
+
+    void createRecovery("hotel", "openai_live", controller.signal)
       .then(setHotelSnapshot)
       .catch((error: unknown) => {
         if (error instanceof DOMException && error.name === "AbortError") {
           return;
         }
         setHotelSnapshot(null);
+        if (error instanceof LiveAdmissionError) {
+          setReplayFallback(error.message);
+          void startReplay(controller.signal);
+        }
       });
 
     return () => controller.abort();
-  }, [health]);
+  }, [health, startReplay]);
 
   const activeSnapshot = activeId === "hotel" ? hotelSnapshot : null;
   const activeScenarioView = useMemo<RecoveryScenario>(
@@ -196,6 +233,23 @@ export default function App() {
 
         <main className="workspace">
           <ProvenanceStrip presentation={presentation} healthError={healthError} />
+          {replayFallback !== null ? (
+            <section className="replay-fallback" aria-live="polite">
+              <div>
+                <p className="eyebrow">Replay fallback</p>
+                <p>{replayFallback}</p>
+                {replayError !== null ? <p role="alert">{replayError}</p> : null}
+              </div>
+              <button
+                type="button"
+                aria-label="Run replay fixture"
+                disabled={replayLoading}
+                onClick={() => void startReplay()}
+              >
+                {replayLoading ? "Loading replay fixture…" : "Run replay fixture"}
+              </button>
+            </section>
+          ) : null}
           <section className="recovery-heading" aria-labelledby="recovery-title">
             <div>
               <p className="eyebrow">Active recovery</p>

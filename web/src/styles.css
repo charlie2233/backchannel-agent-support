@@ -298,6 +298,47 @@ a:focus-visible {
   color: #1849a9;
 }
 
+.replay-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin-top: 14px;
+  border: 1px solid #fedf89;
+  border-radius: 7px;
+  background: #fffaeb;
+  padding: 13px 14px;
+}
+
+.replay-fallback p {
+  margin: 3px 0 0;
+  color: #713b12;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.replay-fallback [role="alert"] {
+  color: var(--danger);
+}
+
+.replay-fallback button {
+  min-height: 42px;
+  flex: 0 0 auto;
+  border: 1px solid #b54708;
+  border-radius: 7px;
+  background: #fff;
+  padding: 9px 14px;
+  color: #93370d;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.replay-fallback button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
 .recovery-heading {
   display: flex;
   align-items: flex-end;
@@ -695,6 +736,15 @@ a:focus-visible {
 
   .provenance-strip {
     align-items: flex-start;
+  }
+
+  .replay-fallback {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .replay-fallback button {
+    width: 100%;
   }
 
   .boundary-label {
