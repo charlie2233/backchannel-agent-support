@@ -9,7 +9,11 @@ from agents.models.interface import ModelTracing
 from openai.types.responses import ResponseFunctionToolCall, ResponseOutputMessage
 
 from server.agents.schemas import deterministic_hotel_arguments
-from server.agents.stub_model import DeterministicApprovalModel
+from server.agents.stub_model import (
+    DECLINED_REMEDY_CLOSURE,
+    EXACT_REMEDY_REJECTION_MESSAGE,
+    DeterministicApprovalModel,
+)
 
 CALL_ID = "commit-remedy-focused-model-test"
 
@@ -64,7 +68,30 @@ def test_model_finishes_when_matching_function_output_is_in_mapping_history() ->
         ),
     )
 
-    assert isinstance(response.output[0], ResponseOutputMessage)
+    message = response.output[0]
+    assert isinstance(message, ResponseOutputMessage)
+    assert message.content[0].text == "Deterministic demo-provider recovery completed."
+
+
+def test_model_closes_without_alternative_for_exact_rejection_output() -> None:
+    response = get_response(
+        make_model(),
+        cast(
+            list[TResponseInputItem],
+            [
+                {
+                    "type": "function_call_output",
+                    "call_id": CALL_ID,
+                    "output": EXACT_REMEDY_REJECTION_MESSAGE,
+                }
+            ],
+        ),
+    )
+
+    message = response.output[0]
+    assert isinstance(message, ResponseOutputMessage)
+    assert message.content[0].text == DECLINED_REMEDY_CLOSURE
+    assert "alternative" in message.content[0].text
 
 
 def test_model_finishes_when_matching_function_output_is_an_object() -> None:

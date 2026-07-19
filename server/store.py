@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import RLock
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from pydantic import JsonValue
 
@@ -18,6 +18,7 @@ from server.digest import remedy_consent_digest
 from server.models import (
     ApprovalDecisionRequest,
     ApprovalDecisionResponse,
+    DecisionAction,
     ExecutionMode,
     HotelRemedyTerms,
     PendingApprovalView,
@@ -43,7 +44,10 @@ CREATE TABLE IF NOT EXISTS recoveries (
         execution_mode IN ('openai_live', 'sdk_stub', 'replay_fixture')
     ),
     status TEXT NOT NULL CHECK (
-        status IN ('in_progress', 'pending_approval', 'completed')
+        status IN (
+            'in_progress', 'pending_approval', 'completed',
+            'closed_without_action', 'outcome_unknown'
+        )
     ),
     current_step INTEGER NOT NULL CHECK (current_step BETWEEN 0 AND 5),
     current_step_summary TEXT NOT NULL,
@@ -93,6 +97,7 @@ CREATE TABLE IF NOT EXISTS pending_approvals (
 CREATE TABLE IF NOT EXISTS approval_decisions (
     recovery_id TEXT PRIMARY KEY REFERENCES recoveries(id) ON DELETE CASCADE,
     client_decision_id TEXT NOT NULL UNIQUE,
+    action TEXT NOT NULL CHECK (action IN ('approve', 'decline')),
     remedy_id TEXT NOT NULL,
     remedy_digest TEXT NOT NULL,
     tool_call_id TEXT NOT NULL,
@@ -275,6 +280,7 @@ class SQLiteStore:
             self._migrate_task4_remedies(connection)
             self._migrate_task3_pending_approvals(connection)
             self._migrate_task3_executions(connection)
+            self._migrate_task6_approval_decisions(connection)
             event_columns = {
                 cast(str, row["name"])
                 for row in connection.execute("PRAGMA table_info(events)").fetchall()
@@ -288,7 +294,10 @@ class SQLiteStore:
                 UPDATE events
                 SET terminal = 1
                 WHERE recovery_id IN (
-                    SELECT id FROM recoveries WHERE status = 'completed'
+                    SELECT id FROM recoveries
+                    WHERE status IN (
+                        'completed', 'closed_without_action', 'outcome_unknown'
+                    )
                 )
                 AND seq = (
                     SELECT MAX(final_event.seq)
@@ -530,6 +539,105 @@ class SQLiteStore:
                 connection.execute(f"ALTER TABLE executions ADD COLUMN {column} TEXT")
 
     @staticmethod
+    def _migrate_task6_approval_decisions(connection: sqlite3.Connection) -> None:
+        """Add explicit actions while preserving every legacy approval claim."""
+
+        columns = {
+            cast(str, row["name"])
+            for row in connection.execute(
+                "PRAGMA table_info(approval_decisions)"
+            ).fetchall()
+        }
+        if "action" in columns:
+            return
+
+        connection.commit()
+        connection.execute("PRAGMA foreign_keys = OFF")
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            legacy_rows = connection.execute(
+                "SELECT * FROM approval_decisions ORDER BY claimed_at ASC"
+            ).fetchall()
+            connection.execute("DROP TABLE IF EXISTS approval_decisions_task6")
+            connection.execute(
+                """
+                CREATE TABLE approval_decisions_task6 (
+                    recovery_id TEXT PRIMARY KEY
+                        REFERENCES recoveries(id) ON DELETE CASCADE,
+                    client_decision_id TEXT NOT NULL UNIQUE,
+                    action TEXT NOT NULL CHECK (action IN ('approve', 'decline')),
+                    remedy_id TEXT NOT NULL,
+                    remedy_digest TEXT NOT NULL,
+                    tool_call_id TEXT NOT NULL,
+                    request_fingerprint TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN ('claimed', 'completed')),
+                    result_json TEXT,
+                    claimed_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    CHECK (
+                        (status = 'claimed' AND result_json IS NULL
+                            AND completed_at IS NULL)
+                        OR
+                        (status = 'completed' AND result_json IS NOT NULL
+                            AND completed_at IS NOT NULL)
+                    )
+                )
+                """
+            )
+            for row in legacy_rows:
+                recovery_id = cast(str, row["recovery_id"])
+                request = ApprovalDecisionRequest(
+                    action=DecisionAction.APPROVE,
+                    clientDecisionId=cast(str, row["client_decision_id"]),
+                    remedyId=cast(str, row["remedy_id"]),
+                    remedyDigest=cast(str, row["remedy_digest"]),
+                    toolCallId=cast(str, row["tool_call_id"]),
+                )
+                migrated_result: str | None = None
+                if row["result_json"] is not None:
+                    result_payload = json.loads(cast(str, row["result_json"]))
+                    if not isinstance(result_payload, dict):
+                        raise RuntimeError("Legacy decision result must be a JSON object")
+                    result_payload["action"] = DecisionAction.APPROVE.value
+                    migrated_result = ApprovalDecisionResponse.model_validate(
+                        result_payload
+                    ).model_dump_json(by_alias=True)
+                connection.execute(
+                    """
+                    INSERT INTO approval_decisions_task6 (
+                        recovery_id, client_decision_id, action, remedy_id,
+                        remedy_digest, tool_call_id, request_fingerprint, status,
+                        result_json, claimed_at, completed_at
+                    ) VALUES (?, ?, 'approve', ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        recovery_id,
+                        request.client_decision_id,
+                        request.remedy_id,
+                        request.remedy_digest,
+                        request.tool_call_id,
+                        SQLiteStore._decision_fingerprint(recovery_id, request),
+                        cast(str, row["status"]),
+                        migrated_result,
+                        cast(str, row["claimed_at"]),
+                        cast(str | None, row["completed_at"]),
+                    ),
+                )
+            connection.execute("DROP TABLE approval_decisions")
+            connection.execute(
+                "ALTER TABLE approval_decisions_task6 RENAME TO approval_decisions"
+            )
+            violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+            if violations:
+                raise RuntimeError("Approval decision migration violated foreign keys")
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+        finally:
+            connection.execute("PRAGMA foreign_keys = ON")
+
+    @staticmethod
     def _migrate_task2_recovery_constraints(connection: sqlite3.Connection) -> None:
         """Expand Task 2 CHECK constraints while preserving rows and foreign keys."""
 
@@ -539,7 +647,12 @@ class SQLiteStore:
         if row is None:
             raise RuntimeError("recoveries table was not created")
         table_sql = cast(str, row["sql"])
-        if "'sdk_stub'" in table_sql and "'pending_approval'" in table_sql:
+        if (
+            "'sdk_stub'" in table_sql
+            and "'pending_approval'" in table_sql
+            and "'closed_without_action'" in table_sql
+            and "'outcome_unknown'" in table_sql
+        ):
             return
 
         connection.commit()
@@ -558,7 +671,10 @@ class SQLiteStore:
                         execution_mode IN ('openai_live', 'sdk_stub', 'replay_fixture')
                     ),
                     status TEXT NOT NULL CHECK (
-                        status IN ('in_progress', 'pending_approval', 'completed')
+                        status IN (
+                            'in_progress', 'pending_approval', 'completed',
+                            'closed_without_action', 'outcome_unknown'
+                        )
                     ),
                     current_step INTEGER NOT NULL CHECK (current_step BETWEEN 0 AND 5),
                     current_step_summary TEXT NOT NULL,
@@ -719,6 +835,7 @@ class SQLiteStore:
     @staticmethod
     def _decision_request_from_row(row: sqlite3.Row) -> ApprovalDecisionRequest:
         return ApprovalDecisionRequest(
+            action=DecisionAction(cast(str, row["action"])),
             clientDecisionId=cast(str, row["client_decision_id"]),
             remedyId=cast(str, row["remedy_id"]),
             remedyDigest=cast(str, row["remedy_digest"]),
@@ -1010,9 +1127,9 @@ class SQLiteStore:
             if existing is None:
                 raise RecoveryNotFoundError("Recovery not found")
             if receipt is not None:
-                if status is not RecoveryStatus.COMPLETED:
+                if not status.terminal:
                     raise ReceiptTransitionError(
-                        "Receipt requires a completed terminal transition"
+                        "Receipt requires a terminal transition"
                     )
                 if receipt.recovery_id != recovery_id:
                     raise ReceiptTransitionError(
@@ -1060,7 +1177,7 @@ class SQLiteStore:
                     recovery_id,
                     next_sequence,
                     event_type,
-                    int(status is RecoveryStatus.COMPLETED),
+                    int(status.terminal),
                     event_json,
                     now.isoformat(),
                 ),
@@ -1134,14 +1251,19 @@ class SQLiteStore:
                         now.isoformat(),
                     ),
                 )
-            if status is RecoveryStatus.COMPLETED:
+            if status.terminal:
+                terminal_approval_status = {
+                    RecoveryStatus.COMPLETED: "completed",
+                    RecoveryStatus.CLOSED_WITHOUT_ACTION: "rejected",
+                    RecoveryStatus.OUTCOME_UNKNOWN: "outcome_unknown",
+                }[status]
                 connection.execute(
                     """
                     UPDATE pending_approvals
-                    SET status = 'completed', updated_at = ?
+                    SET status = ?, updated_at = ?
                     WHERE recovery_id = ?
                     """,
-                    (now.isoformat(), recovery_id),
+                    (terminal_approval_status, now.isoformat(), recovery_id),
                 )
         return self.get_recovery(recovery_id)
 
@@ -1226,14 +1348,15 @@ class SQLiteStore:
             connection.execute(
                 """
                 INSERT INTO approval_decisions (
-                    recovery_id, client_decision_id, remedy_id, remedy_digest,
-                    tool_call_id, request_fingerprint, status, result_json,
+                    recovery_id, client_decision_id, action, remedy_id,
+                    remedy_digest, tool_call_id, request_fingerprint, status, result_json,
                     claimed_at, completed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 'claimed', NULL, ?, NULL)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'claimed', NULL, ?, NULL)
                 """,
                 (
                     recovery_id,
                     request.client_decision_id,
+                    request.action.value,
                     request.remedy_id,
                     request.remedy_digest,
                     request.tool_call_id,
@@ -1248,7 +1371,7 @@ class SQLiteStore:
                 WHERE id = ?
                 """,
                 (
-                    "Exact approval claimed; execution outcome pending.",
+                    f"Exact {request.action.value} claimed; outcome pending.",
                     now.isoformat(),
                     recovery_id,
                 ),
@@ -1319,7 +1442,8 @@ class SQLiteStore:
                 )
             claim = self._decision_claim_from_row(row)
             if (
-                claim.request.tool_call_id != tool_call_id
+                claim.request.action is not DecisionAction.APPROVE
+                or claim.request.tool_call_id != tool_call_id
                 or claim.request.remedy_digest != remedy_digest
             ):
                 raise ApprovalDecisionError(
@@ -1379,6 +1503,216 @@ class SQLiteStore:
                 """,
                 (serialized, now.isoformat(), claim.recovery_id),
             )
+        return response
+
+    def complete_decline_decision(
+        self,
+        claim: ApprovalDecisionClaim,
+    ) -> ApprovalDecisionResponse:
+        """Atomically seal an exact rejection without claiming a false cancellation."""
+
+        if claim.request.action is not DecisionAction.DECLINE:
+            raise ValueError("Only decline decisions can use the rejection seal")
+        now = self._now()
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM approval_decisions WHERE recovery_id = ?",
+                (claim.recovery_id,),
+            ).fetchone()
+            if row is None:
+                raise ApprovalDecisionError(
+                    "decision_unavailable", claim.recovery_id, status_code=409
+                )
+            durable_claim = self._decision_claim_from_row(row)
+            if (
+                durable_claim.request.client_decision_id
+                != claim.request.client_decision_id
+                or durable_claim.request_fingerprint != claim.request_fingerprint
+                or durable_claim.request.action is not DecisionAction.DECLINE
+            ):
+                raise ApprovalDecisionError(
+                    "decision_id_conflict", claim.recovery_id, status_code=409
+                )
+            if durable_claim.response is not None:
+                return durable_claim.response
+
+            recovery = connection.execute(
+                "SELECT status, execution_mode FROM recoveries WHERE id = ?",
+                (claim.recovery_id,),
+            ).fetchone()
+            pending = connection.execute(
+                "SELECT status FROM pending_approvals WHERE recovery_id = ?",
+                (claim.recovery_id,),
+            ).fetchone()
+            if recovery is None or pending is None:
+                raise ApprovalDecisionError(
+                    "decision_unavailable", claim.recovery_id, status_code=409
+                )
+            execution_rows = connection.execute(
+                "SELECT status, provider_execution FROM executions WHERE recovery_id = ?",
+                (claim.recovery_id,),
+            ).fetchall()
+            may_have_begun = (
+                bool(execution_rows)
+                or cast(str, pending["status"]) != "pending"
+                or cast(str, recovery["status"])
+                != RecoveryStatus.PENDING_APPROVAL.value
+            )
+            decision_status: Literal[
+                "closed_without_action", "outcome_unknown"
+            ] = (
+                "outcome_unknown"
+                if may_have_begun
+                else "closed_without_action"
+            )
+            terminal_status = RecoveryStatus(decision_status)
+            response = ApprovalDecisionResponse(
+                action=DecisionAction.DECLINE,
+                clientDecisionId=claim.request.client_decision_id,
+                recoveryId=claim.recovery_id,
+                status=decision_status,
+                executionStarted=None if may_have_begun else False,
+            )
+            if terminal_status is RecoveryStatus.CLOSED_WITHOUT_ACTION:
+                provider_result = "Provider dispatch did not begin."
+                authorization_source = (
+                    "User declined the exact Agents SDK commit_remedy interruption."
+                )
+                verification_results = [
+                    "Exact interruption rejected.",
+                    "No replacement remedy selected.",
+                    "Execution count is zero.",
+                    "Provider dispatch did not begin.",
+                    "Temporary permission revoked.",
+                    "Cancellation receipt sealed.",
+                ]
+                summary = "Exact remedy declined before provider dispatch."
+            else:
+                provider_result = "Provider dispatch may have begun; its outcome is unknown."
+                authorization_source = (
+                    "Decline arrived after execution or dispatch may have begun; "
+                    "cancellation was not claimed."
+                )
+                verification_results = [
+                    "Exact interruption rejected.",
+                    "No replacement remedy selected.",
+                    "Prior execution or dispatch evidence detected.",
+                    "Outcome marked unknown instead of cancelled.",
+                    "Temporary permission revoked.",
+                    "Uncertain-outcome receipt sealed.",
+                ]
+                summary = "Decline recorded; prior provider outcome remains unknown."
+
+            receipt = RecoveryReceipt(
+                recoveryId=claim.recovery_id,
+                executionMode=ExecutionMode(cast(str, recovery["execution_mode"])),
+                status=terminal_status.value,
+                simulated=True,
+                providerExecution=None if may_have_begun else False,
+                modelIds=[],
+                boundary=(
+                    "Deterministic Agents SDK model and demo hotel adapter only; "
+                    "no OpenAI model call, real booking, or payment change."
+                ),
+                providerResult=provider_result,
+                authorizationSource=authorization_source,
+                verificationResults=verification_results,
+            )
+            existing_receipt = connection.execute(
+                "SELECT 1 FROM receipts WHERE recovery_id = ?",
+                (claim.recovery_id,),
+            ).fetchone()
+            terminal_events = connection.execute(
+                "SELECT 1 FROM events WHERE recovery_id = ? AND terminal = 1",
+                (claim.recovery_id,),
+            ).fetchall()
+            if existing_receipt is not None or terminal_events:
+                raise ReceiptTransitionError("Existing terminal evidence mismatch")
+
+            response_json = response.model_dump_json(by_alias=True)
+            receipt_json = receipt.model_dump_json(by_alias=True)
+            terminal_data: dict[str, JsonValue] = {
+                "recoveryId": claim.recovery_id,
+                "executionMode": receipt.execution_mode.value,
+                "executionCount": len(execution_rows),
+                "providerExecution": receipt.provider_execution,
+                "phase": "Verify & seal",
+                "summary": summary,
+            }
+            next_sequence = cast(
+                int,
+                connection.execute(
+                    "SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE recovery_id = ?",
+                    (claim.recovery_id,),
+                ).fetchone()[0],
+            )
+            connection.execute(
+                """
+                INSERT INTO receipts (recovery_id, receipt_json, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (claim.recovery_id, receipt_json, now.isoformat()),
+            )
+            connection.execute(
+                """
+                INSERT INTO events (
+                    recovery_id, seq, type, terminal, data_json, created_at
+                ) VALUES (?, ?, ?, 1, ?, ?)
+                """,
+                (
+                    claim.recovery_id,
+                    next_sequence,
+                    f"recovery.{terminal_status.value}",
+                    json.dumps(terminal_data, separators=(",", ":"), sort_keys=True),
+                    now.isoformat(),
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE recoveries
+                SET status = ?, current_step = 5,
+                    current_step_summary = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    terminal_status.value,
+                    summary,
+                    now.isoformat(),
+                    claim.recovery_id,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE pending_approvals
+                SET status = ?, updated_at = ?
+                WHERE recovery_id = ?
+                """,
+                (
+                    "rejected" if not may_have_begun else "outcome_unknown",
+                    now.isoformat(),
+                    claim.recovery_id,
+                ),
+            )
+            connection.execute(
+                "UPDATE remedies SET status = ? WHERE recovery_id = ?",
+                (
+                    "declined" if not may_have_begun else "outcome_unknown",
+                    claim.recovery_id,
+                ),
+            )
+            cursor = connection.execute(
+                """
+                UPDATE approval_decisions
+                SET status = 'completed', result_json = ?, completed_at = ?
+                WHERE recovery_id = ? AND status = 'claimed'
+                """,
+                (response_json, now.isoformat(), claim.recovery_id),
+            )
+            if cursor.rowcount != 1:
+                raise ApprovalDecisionError(
+                    "decision_unavailable", claim.recovery_id, status_code=409
+                )
         return response
 
     def list_claimed_decisions(self) -> list[ApprovalDecisionClaim]:

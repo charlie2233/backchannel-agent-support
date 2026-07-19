@@ -52,3 +52,40 @@ def test_sdk_stub_receipt_rejects_impossible_provenance(
 
     with pytest.raises(ValidationError):
         RecoveryReceipt.model_validate(payload)
+
+
+def test_closed_without_action_requires_zero_provider_execution() -> None:
+    payload = receipt_payload(ExecutionMode.SDK_STUB)
+    payload.update(
+        {
+            "status": "closed_without_action",
+            "providerExecution": False,
+        }
+    )
+
+    receipt = RecoveryReceipt.model_validate(payload)
+
+    assert receipt.provider_execution is False
+    with pytest.raises(ValidationError):
+        RecoveryReceipt.model_validate({**payload, "providerExecution": None})
+
+
+@pytest.mark.parametrize("claimed_execution", [False, True])
+def test_unknown_outcome_forbids_claiming_provider_execution(
+    claimed_execution: bool,
+) -> None:
+    payload = receipt_payload(ExecutionMode.SDK_STUB)
+    payload.update(
+        {
+            "status": "outcome_unknown",
+            "providerExecution": None,
+        }
+    )
+
+    receipt = RecoveryReceipt.model_validate(payload)
+
+    assert receipt.provider_execution is None
+    with pytest.raises(ValidationError):
+        RecoveryReceipt.model_validate(
+            {**payload, "providerExecution": claimed_execution}
+        )

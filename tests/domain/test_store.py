@@ -2,12 +2,21 @@ import json
 import sqlite3
 from uuid import UUID
 
-from server.models import ExecutionMode, RecoveryStatus, ScenarioId
+import pytest
+
+from server.models import (
+    ApprovalDecisionRequest,
+    DecisionAction,
+    ExecutionMode,
+    RecoveryStatus,
+    ScenarioId,
+)
 from server.replay.engine import ReplayEngine
 from server.replay.loader import ScenarioLoader
-from server.store import SQLiteStore
+from server.store import ApprovalDecisionError, SQLiteStore
 
 REQUIRED_TABLES = {
+    "approval_decisions",
     "demo_sessions",
     "events",
     "executions",
@@ -17,6 +26,8 @@ REQUIRED_TABLES = {
     "remedies",
     "usage_ledger",
 }
+
+APPROVED_DIGEST = f"sha256:{'a' * 64}"
 
 
 def test_hotel_recovery_and_ordered_events_survive_reopen(tmp_path) -> None:
@@ -171,3 +182,97 @@ def test_task2_recovery_constraints_migrate_without_losing_replay_rows(
     assert pending.status is RecoveryStatus.PENDING_APPROVAL
     with sqlite3.connect(database_path) as connection:
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_task6_action_migration_preserves_completed_approval_replay(tmp_path) -> None:
+    database_path = tmp_path / "task6-action-migration.sqlite3"
+    timestamp = "2026-07-18T20:00:00+00:00"
+    recovery_id = "legacy-approved-recovery"
+    decision_id = "legacy-approved-decision"
+    with sqlite3.connect(database_path) as connection:
+        connection.executescript(
+            """
+            PRAGMA foreign_keys = ON;
+            CREATE TABLE recoveries (
+                id TEXT PRIMARY KEY,
+                scenario_id TEXT NOT NULL,
+                execution_mode TEXT NOT NULL,
+                status TEXT NOT NULL,
+                current_step INTEGER NOT NULL,
+                current_step_summary TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE approval_decisions (
+                recovery_id TEXT PRIMARY KEY
+                    REFERENCES recoveries(id) ON DELETE CASCADE,
+                client_decision_id TEXT NOT NULL UNIQUE,
+                remedy_id TEXT NOT NULL,
+                remedy_digest TEXT NOT NULL,
+                tool_call_id TEXT NOT NULL,
+                request_fingerprint TEXT NOT NULL,
+                status TEXT NOT NULL,
+                result_json TEXT,
+                claimed_at TEXT NOT NULL,
+                completed_at TEXT
+            );
+            """
+        )
+        connection.execute(
+            "INSERT INTO recoveries VALUES (?, 'hotel', 'sdk_stub', 'completed', 5, "
+            "'Legacy approval completed.', ?, ?)",
+            (recovery_id, timestamp, timestamp),
+        )
+        connection.execute(
+            """
+            INSERT INTO approval_decisions VALUES (
+                ?, ?, 'remedy-legacy', ?, 'tool-legacy',
+                'legacy-fingerprint-without-action', 'completed', ?, ?, ?
+            )
+            """,
+            (
+                recovery_id,
+                decision_id,
+                APPROVED_DIGEST,
+                json.dumps(
+                    {
+                        "clientDecisionId": decision_id,
+                        "recoveryId": recovery_id,
+                        "status": "completed",
+                        "approvedRemedyDigest": APPROVED_DIGEST,
+                        "executionStarted": True,
+                    }
+                ),
+                timestamp,
+                timestamp,
+            ),
+        )
+
+    store = SQLiteStore(database_path)
+    request = ApprovalDecisionRequest(
+        action="approve",
+        clientDecisionId=decision_id,
+        remedyId="remedy-legacy",
+        remedyDigest=APPROVED_DIGEST,
+        toolCallId="tool-legacy",
+    )
+
+    replayed = store.claim_approval_decision(recovery_id, request)
+
+    assert replayed.response is not None
+    assert replayed.response.action is DecisionAction.APPROVE
+    assert replayed.response.execution_started is True
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute(
+            "SELECT action, request_fingerprint, result_json FROM approval_decisions"
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "approve"
+        assert row[1] != "legacy-fingerprint-without-action"
+        assert json.loads(row[2])["action"] == "approve"
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+    changed_action = request.model_copy(update={"action": DecisionAction.DECLINE})
+    with pytest.raises(ApprovalDecisionError) as conflict:
+        store.claim_approval_decision(recovery_id, changed_action)
+    assert conflict.value.code == "decision_id_conflict"

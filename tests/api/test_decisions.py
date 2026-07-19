@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import multiprocessing
 import os
@@ -16,10 +15,8 @@ from fastapi.testclient import TestClient
 
 from server.config import RuntimeSettings
 from server.main import create_app
-from server.models import ApprovalDecisionRequest
-from server.orchestrator import RecoveryOrchestrator
 from server.providers.hotel_simulator import HotelSimulator
-from server.store import ApprovalDecisionError, SQLiteStore
+from server.store import SQLiteStore
 
 
 def decision_payload(
@@ -30,6 +27,7 @@ def decision_payload(
     approval = snapshot["pendingApproval"]
     assert isinstance(approval, dict)
     return {
+        "action": "approve",
         "clientDecisionId": client_decision_id,
         "remedyId": str(approval["remedyId"]),
         "remedyDigest": str(approval["remedyDigest"]),
@@ -92,46 +90,40 @@ def _decision_process_worker(
         store = SQLiteStore(database_path)
         report_phase("store_ready")
         provider = HotelSimulator(store=store)
-        orchestrator = RecoveryOrchestrator(
+        app = create_app(
+            RuntimeSettings(live_ready=False),
             store=store,
             hotel_provider=provider,
         )
-        report_phase("ready")
-        while True:
-            report_phase("waiting_for_job")
-            job = job_queue.get()
-            if job is None:
-                report_phase("stopping")
-                return
-            iteration, recovery_id, payload = job
-            request = ApprovalDecisionRequest.model_validate(payload)
-            report_phase("waiting_at_barrier")
-            start_barrier.wait(timeout=20)
-            before_dispatches = provider.dispatch_count
-            report_phase("approving")
-            try:
-                response = asyncio.run(
-                    orchestrator.approve_decision(recovery_id, request)
+        with TestClient(app) as client:
+            report_phase("ready")
+            while True:
+                report_phase("waiting_for_job")
+                job = job_queue.get()
+                if job is None:
+                    report_phase("stopping")
+                    return
+                iteration, recovery_id, payload = job
+                report_phase("waiting_at_barrier")
+                start_barrier.wait(timeout=20)
+                before_dispatches = provider.dispatch_count
+                report_phase("deciding")
+                response = client.post(
+                    f"/api/recoveries/{recovery_id}/decisions",
+                    json=payload,
                 )
-            except ApprovalDecisionError as error:
-                status_code = error.status_code
-                body: dict[str, object] = {"detail": error.public_detail}
-                report_phase("decision_conflict")
-            else:
-                status_code = 200
-                body = response.model_dump(mode="json", by_alias=True)
                 report_phase("decision_completed")
-            result_queue.put(
-                {
-                    "iteration": iteration,
-                    "pid": os.getpid(),
-                    "phase": phase,
-                    "status": status_code,
-                    "body": body,
-                    "dispatchDelta": provider.dispatch_count - before_dispatches,
-                }
-            )
-            report_phase("result_sent")
+                result_queue.put(
+                    {
+                        "iteration": iteration,
+                        "pid": os.getpid(),
+                        "phase": phase,
+                        "status": response.status_code,
+                        "body": response.json(),
+                        "dispatchDelta": provider.dispatch_count - before_dispatches,
+                    }
+                )
+                report_phase("result_sent")
     except BaseException as error:
         result_queue.put(
             {
@@ -142,6 +134,7 @@ def _decision_process_worker(
                 "error": str(error)[:200],
             }
         )
+        raise
     finally:
         if store is not None:
             store.close()
@@ -160,10 +153,21 @@ def _wait_for_process_workers(
     phase_queue: Any,
     processes: list[Any],
 ) -> list[dict[str, object]]:
-    deadline = time.monotonic() + 30
+    deadline = time.monotonic() + 60
     diagnostics: list[dict[str, object]] = []
     ready_pids: set[int] = set()
     while len(ready_pids) < len(processes):
+        exited = [process for process in processes if process.exitcode is not None]
+        if exited:
+            exited_states = [
+                {"pid": process.pid, "exitcode": process.exitcode}
+                for process in exited
+            ]
+            pytest.fail(
+                "Direct decision worker exited during startup: "
+                f"workers={exited_states}, "
+                f"phases={diagnostics[-20:]}"
+            )
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             worker_states = [
@@ -179,7 +183,7 @@ def _wait_for_process_workers(
                 f"workers={worker_states}, phases={diagnostics[-20:]}"
             )
         try:
-            diagnostic = phase_queue.get(timeout=remaining)
+            diagnostic = phase_queue.get(timeout=min(remaining, 1.0))
         except Empty:
             continue
         diagnostics.append(diagnostic)
@@ -201,6 +205,7 @@ def test_public_sdk_stub_creation_and_typed_approval_complete_once(
     assert response.status_code == 200
     body = response.json()
     assert body == {
+        "action": "approve",
         "clientDecisionId": "decision-001",
         "recoveryId": recovery_id,
         "status": "completed",
@@ -395,9 +400,13 @@ def test_two_processes_race_twenty_times_with_one_durable_winner(tmp_path) -> No
                     )
                 )
                 outcomes: list[dict[str, object]] = []
+                race_deadline = time.monotonic() + 20
                 try:
                     for _worker in processes:
-                        outcomes.append(results.get(timeout=20))
+                        remaining = race_deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise Empty
+                        outcomes.append(results.get(timeout=remaining))
                 except Empty:
                     worker_states = [
                         {
@@ -427,6 +436,7 @@ def test_two_processes_race_twenty_times_with_one_durable_winner(tmp_path) -> No
                         f"workers={worker_states}, phases={phase_diagnostics}"
                     )
 
+                assert all(process.exitcode in {None, 0} for process in processes)
                 assert all("error" not in outcome for outcome in outcomes), outcomes
                 assert {outcome["iteration"] for outcome in outcomes} == {iteration}
                 assert len({outcome["pid"] for outcome in outcomes}) == 2
@@ -499,18 +509,25 @@ def test_same_decision_id_can_race_and_replay_one_result(tmp_path) -> None:
 
     def submit(app):
         with TestClient(app) as client:
-            barrier.wait()
+            barrier.wait(timeout=15)
             response = client.post(
                 f"/api/recoveries/{recovery_id}/decisions",
                 json=decision_payload(snapshot, client_decision_id="same-winner"),
             )
             return response.status_code, response.content
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    executor = ThreadPoolExecutor(max_workers=2)
+    futures = []
+    try:
+        futures = [executor.submit(submit, first_app), executor.submit(submit, second_app)]
         outcomes = [
             future.result(timeout=15)
-            for future in [executor.submit(submit, first_app), executor.submit(submit, second_app)]
+            for future in futures
         ]
+    finally:
+        for future in futures:
+            future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
 
     assert [status for status, _content in outcomes] == [200, 200]
     assert outcomes[0][1] == outcomes[1][1]

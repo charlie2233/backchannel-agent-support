@@ -15,6 +15,7 @@ def approval_request(pending, decision_id: str) -> ApprovalDecisionRequest:
     approval = pending.recovery.pending_approval
     assert approval is not None
     return ApprovalDecisionRequest(
+        action="approve",
         clientDecisionId=decision_id,
         remedyId=approval.remedy_id,
         remedyDigest=approval.remedy_digest,

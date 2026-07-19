@@ -7,7 +7,7 @@ import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from time import monotonic
 
-from server.models import RecoveryEvent, RecoveryStatus
+from server.models import RecoveryEvent
 from server.store import SQLiteStore
 
 HEARTBEAT_SECONDS = 15.0
@@ -45,7 +45,7 @@ async def stream_recovery_events(
             cursor = event.seq
             last_emission = monotonic()
 
-        if recovery_status is RecoveryStatus.COMPLETED:
+        if recovery_status.terminal:
             return
         if await is_disconnected():
             return

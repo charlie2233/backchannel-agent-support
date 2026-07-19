@@ -40,10 +40,25 @@ class ScenarioId(StrEnum):
     API_QUOTA = "api-quota"
 
 
+class DecisionAction(StrEnum):
+    APPROVE = "approve"
+    DECLINE = "decline"
+
+
 class RecoveryStatus(StrEnum):
     IN_PROGRESS = "in_progress"
     PENDING_APPROVAL = "pending_approval"
     COMPLETED = "completed"
+    CLOSED_WITHOUT_ACTION = "closed_without_action"
+    OUTCOME_UNKNOWN = "outcome_unknown"
+
+    @property
+    def terminal(self) -> bool:
+        return self in {
+            RecoveryStatus.COMPLETED,
+            RecoveryStatus.CLOSED_WITHOUT_ACTION,
+            RecoveryStatus.OUTCOME_UNKNOWN,
+        }
 
 
 class HealthResponse(ApiModel):
@@ -165,6 +180,7 @@ class PendingApprovalView(ApiModel):
 class ApprovalDecisionRequest(ApiModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid", frozen=True)
 
+    action: DecisionAction
     client_decision_id: str = Field(alias="clientDecisionId", min_length=1, max_length=128)
     remedy_id: str = Field(alias="remedyId", min_length=1)
     remedy_digest: str = Field(
@@ -177,14 +193,34 @@ class ApprovalDecisionRequest(ApiModel):
 class ApprovalDecisionResponse(ApiModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid", frozen=True)
 
+    action: DecisionAction
     client_decision_id: str = Field(alias="clientDecisionId")
     recovery_id: str = Field(alias="recoveryId")
-    status: Literal["completed"]
-    approved_remedy_digest: str = Field(
+    status: Literal["completed", "closed_without_action", "outcome_unknown"]
+    approved_remedy_digest: str | None = Field(
+        default=None,
         alias="approvedRemedyDigest",
         pattern=r"^sha256:[0-9a-f]{64}$",
     )
-    execution_started: Literal[True] = Field(alias="executionStarted")
+    execution_started: bool | None = Field(alias="executionStarted")
+
+    @model_validator(mode="after")
+    def enforce_action_outcome(self) -> Self:
+        if self.action is DecisionAction.APPROVE:
+            if (
+                self.status != "completed"
+                or not self.execution_started
+                or self.approved_remedy_digest is None
+            ):
+                raise ValueError("Approve decisions require completed execution evidence")
+            return self
+        if self.status == "completed" or self.approved_remedy_digest is not None:
+            raise ValueError("Decline decisions cannot claim approved execution evidence")
+        if self.status == "closed_without_action" and self.execution_started is not False:
+            raise ValueError("Closed declines require zero execution evidence")
+        if self.status == "outcome_unknown" and self.execution_started is not None:
+            raise ValueError("Unknown outcomes cannot claim whether execution started")
+        return self
 
 
 class RecoverySnapshot(ApiModel):
@@ -215,7 +251,7 @@ class RecoveryReceipt(ApiModel):
     execution_mode: ExecutionMode = Field(alias="executionMode")
     status: str
     simulated: bool
-    provider_execution: bool = Field(alias="providerExecution")
+    provider_execution: bool | None = Field(alias="providerExecution")
     model_ids: list[str] = Field(alias="modelIds")
     boundary: str
     provider_result: str = Field(alias="providerResult")
@@ -230,7 +266,7 @@ class RecoveryReceipt(ApiModel):
     @model_validator(mode="after")
     def enforce_execution_mode_provenance(self) -> Self:
         if self.execution_mode is ExecutionMode.REPLAY_FIXTURE and (
-            not self.simulated or self.provider_execution or self.model_ids
+            not self.simulated or self.provider_execution is not False or self.model_ids
         ):
             raise ValueError(
                 "Replay receipts require simulated evidence, no provider execution, "
@@ -240,6 +276,14 @@ class RecoveryReceipt(ApiModel):
             not self.simulated or self.model_ids
         ):
             raise ValueError("SDK stub receipts require simulated evidence and no model IDs")
+        if self.status == RecoveryStatus.CLOSED_WITHOUT_ACTION.value and (
+            self.provider_execution is not False
+        ):
+            raise ValueError("Closed-without-action receipts require zero provider execution")
+        if self.status == RecoveryStatus.OUTCOME_UNKNOWN.value and (
+            self.provider_execution is not None
+        ):
+            raise ValueError("Unknown-outcome receipts cannot claim provider execution")
         return self
 
 

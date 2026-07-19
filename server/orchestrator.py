@@ -12,6 +12,10 @@ from agents import Agent, RunContextWrapper, Runner, RunResult, RunState
 
 from server.agents.factory import HotelAgentContext, build_hotel_agent
 from server.agents.schemas import CommitRemedyArguments, deterministic_hotel_arguments
+from server.agents.stub_model import (
+    DECLINED_REMEDY_CLOSURE,
+    EXACT_REMEDY_REJECTION_MESSAGE,
+)
 from server.agents.tracing import configure_sdk_stub_tracing
 from server.agents.versioning import (
     HOTEL_START_PROMPT,
@@ -25,6 +29,7 @@ from server.digest import remedy_consent_digest
 from server.models import (
     ApprovalDecisionRequest,
     ApprovalDecisionResponse,
+    DecisionAction,
     ExecutionMode,
     RecoveryReceipt,
     RecoverySnapshot,
@@ -128,7 +133,10 @@ class RecoveryOrchestrator:
 
     @staticmethod
     def _decision_response(claim: ApprovalDecisionClaim) -> ApprovalDecisionResponse:
+        if claim.request.action is not DecisionAction.APPROVE:
+            raise ValueError("Execution responses require an approve decision")
         return ApprovalDecisionResponse(
+            action=DecisionAction.APPROVE,
             clientDecisionId=claim.request.client_decision_id,
             recoveryId=claim.recovery_id,
             status="completed",
@@ -156,6 +164,8 @@ class RecoveryOrchestrator:
         """Complete claimed responses whose durable dispatch already committed."""
 
         for claim in self._store.list_claimed_decisions():
+            if claim.request.action is not DecisionAction.APPROVE:
+                continue
             execution = self._store.get_completed_execution(claim.recovery_id)
             if execution is None:
                 continue
@@ -320,11 +330,14 @@ class RecoveryOrchestrator:
         recovery_id: str,
         request: ApprovalDecisionRequest,
     ) -> ApprovalDecisionResponse:
-        """Claim, resume, and durably replay one exact approval decision."""
+        """Claim, resume, and durably replay one exact approve or decline decision."""
 
         claim = self._store.claim_approval_decision(recovery_id, request)
         if claim.response is not None:
             return claim.response
+        if claim.request.action is DecisionAction.DECLINE:
+            await self._resume_claimed_approval(claim)
+            return self._store.complete_decline_decision(claim)
         execution = self._store.get_completed_execution(recovery_id)
         if execution is not None:
             return self._complete_committed_claim(claim, execution)
@@ -348,7 +361,7 @@ class RecoveryOrchestrator:
         self,
         claim: ApprovalDecisionClaim,
     ) -> RunResult | None:
-        """Restore and approve only after a durable exact-consent claim."""
+        """Restore the exact interruption only after a durable decision claim."""
 
         recovery_id = claim.recovery_id
         arguments = deterministic_hotel_arguments()
@@ -357,7 +370,11 @@ class RecoveryOrchestrator:
             recovery_id=recovery_id,
             store=self._store,
             hotel_provider=self._hotel_provider,
-            approved_remedy_digest=claim.request.remedy_digest,
+            approved_remedy_digest=(
+                claim.request.remedy_digest
+                if claim.request.action is DecisionAction.APPROVE
+                else None
+            ),
         )
         fresh_agent = build_hotel_agent(context=fresh_context, arguments=arguments)
         try:
@@ -493,11 +510,22 @@ class RecoveryOrchestrator:
         validated_claim = self._store.validate_claimed_decision(claim)
         if validated_claim.response is not None:
             return None
-        state.approve(interruption)
-        self._store.update_pending_approval_status(recovery_id, status="approved")
+        if claim.request.action is DecisionAction.APPROVE:
+            state.approve(interruption)
+            self._store.update_pending_approval_status(recovery_id, status="approved")
+        else:
+            state.reject(
+                interruption,
+                rejection_message=EXACT_REMEDY_REJECTION_MESSAGE,
+            )
         completed = await Runner.run(
             fresh_agent,
             state,
             run_config=configure_sdk_stub_tracing(),
         )
+        if claim.request.action is DecisionAction.DECLINE:
+            if completed.interruptions:
+                self._raise_incompatible(recovery_id, "rejection_interruption")
+            if completed.final_output != DECLINED_REMEDY_CLOSURE:
+                self._raise_incompatible(recovery_id, "rejection_closure")
         return completed
