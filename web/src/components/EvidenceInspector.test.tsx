@@ -165,6 +165,39 @@ describe("EvidenceInspector exact consent", () => {
     expect(screen.queryByText(/completed receipt/i)).not.toBeInTheDocument();
   });
 
+  it("rejects an approval response for a different remedy digest", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          action: "approve",
+          clientDecisionId: "decision-digest-mismatch-742",
+          recoveryId: "11111111-2222-4333-8444-555555555555",
+          status: "completed",
+          approvedRemedyDigest: `sha256:${"f".repeat(64)}`,
+          executionStarted: true,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const onServerSuccess = vi.fn().mockResolvedValue(undefined);
+    render(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={pendingSnapshot()}
+        clientDecisionIdFactory={() => "decision-digest-mismatch-742"}
+        onServerSuccess={onServerSuccess}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Approve remedy" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Approval could not be recorded. Try again with the same decision.",
+    );
+    expect(onServerSuccess).not.toHaveBeenCalled();
+  });
+
   it("posts an exact decline, disables both actions, and refreshes only after acceptance", async () => {
     let resolveFetch: ((response: Response) => void) | undefined;
     const fetchMock = vi.fn().mockImplementation(

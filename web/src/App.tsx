@@ -29,6 +29,60 @@ function serverStatusLabel(status: RecoveryStatus, hasPendingApproval: boolean):
   }
 }
 
+function serverLifecycleDetails(
+  snapshot: RecoverySnapshot,
+): RecoveryScenario["lifecycleDetails"] {
+  const recorded = {
+    Detect: "Server recovery detected the hotel booking conflict.",
+    Prove: "Server-side recovery evidence was recorded.",
+    Negotiate: "One exact replacement remedy was prepared.",
+  } as const;
+
+  switch (snapshot.status) {
+    case "completed":
+      return {
+        ...recorded,
+        Authorize: "Exact remedy approval was accepted by the server.",
+        Execute: "Approved provider dispatch completed.",
+        "Verify & seal": snapshot.currentStepSummary,
+      };
+    case "closed_without_action":
+      return {
+        ...recorded,
+        Authorize: "The exact remedy was declined and its permission was revoked.",
+        Execute: "Provider dispatch did not begin.",
+        "Verify & seal": snapshot.currentStepSummary,
+      };
+    case "outcome_unknown":
+      return {
+        ...recorded,
+        Authorize: "The decline was recorded after dispatch may have begun.",
+        Execute: "Provider dispatch may have begun; its outcome is unknown.",
+        "Verify & seal": snapshot.currentStepSummary,
+      };
+    case "pending_approval":
+      return {
+        ...recorded,
+        Authorize:
+          snapshot.pendingApproval === null
+            ? "A durable decision claim is being resolved."
+            : snapshot.currentStepSummary,
+        Execute:
+          snapshot.pendingApproval === null
+            ? "The execution outcome is not yet available."
+            : "Provider dispatch has not begun.",
+        "Verify & seal": "Waiting for the durable decision outcome.",
+      };
+    case "in_progress":
+      return {
+        ...recorded,
+        Authorize: snapshot.currentStepSummary,
+        Execute: "No provider dispatch has been recorded.",
+        "Verify & seal": "No terminal evidence is available.",
+      };
+  }
+}
+
 export default function App() {
   const [activeId, setActiveId] = useState<ScenarioId>("hotel");
   const [health, setHealth] = useState<HealthStatus | null>(null);
@@ -81,6 +135,7 @@ export default function App() {
             status: activeSnapshot.status,
             currentStep: activeSnapshot.currentStep,
             currentStepSummary: activeSnapshot.currentStepSummary,
+            lifecycleDetails: serverLifecycleDetails(activeSnapshot),
           },
     [activeScenario, activeSnapshot],
   );

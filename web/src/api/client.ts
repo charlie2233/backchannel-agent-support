@@ -271,7 +271,9 @@ export async function postDecision(
   if (
     body.action !== decision.action ||
     body.clientDecisionId !== decision.clientDecisionId ||
-    body.recoveryId !== recoveryId
+    body.recoveryId !== recoveryId ||
+    (body.action === "approve" &&
+      body.approvedRemedyDigest !== decision.remedyDigest)
   ) {
     throw new Error("Decision response did not match the requested decision");
   }

@@ -149,9 +149,34 @@ describe("Backchannel console", () => {
   });
 
   it.each([
-    ["closed_without_action", "Closed without action"],
-    ["outcome_unknown", "Outcome unknown"],
-  ] as const)("renders %s as a terminal server outcome", async (status, label) => {
+    {
+      status: "completed",
+      label: "Completed",
+      authorization: "Exact remedy approval was accepted by the server.",
+      execution: "Approved provider dispatch completed.",
+      verification: "Completed server evidence sealed.",
+    },
+    {
+      status: "closed_without_action",
+      label: "Closed without action",
+      authorization: "The exact remedy was declined and its permission was revoked.",
+      execution: "Provider dispatch did not begin.",
+      verification: "Closed without action server evidence sealed.",
+    },
+    {
+      status: "outcome_unknown",
+      label: "Outcome unknown",
+      authorization: "The decline was recorded after dispatch may have begun.",
+      execution: "Provider dispatch may have begun; its outcome is unknown.",
+      verification: "Outcome unknown server evidence sealed.",
+    },
+  ] as const)("renders $status as a truthful terminal server outcome", async ({
+    status,
+    label,
+    authorization,
+    execution,
+    verification,
+  }) => {
     vi.stubGlobal(
       "fetch",
       vi.fn().mockImplementation((input: string | URL | Request) => {
@@ -196,5 +221,12 @@ describe("Backchannel console", () => {
     expect(screen.getByText(status)).toBeVisible();
     const lifecycle = screen.getByRole("list", { name: "Recovery lifecycle" });
     expect(within(lifecycle).getAllByText("Recorded")).toHaveLength(6);
+    expect(within(lifecycle).getByText(authorization)).toBeVisible();
+    expect(within(lifecycle).getByText(execution)).toBeVisible();
+    expect(within(lifecycle).getByText(verification)).toBeVisible();
+    expect(within(lifecycle).queryByText("Not started.")).not.toBeInTheDocument();
+    expect(
+      within(lifecycle).queryByText("Waiting for an execution outcome."),
+    ).not.toBeInTheDocument();
   });
 });

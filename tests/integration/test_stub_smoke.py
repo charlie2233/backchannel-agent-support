@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any, cast
 
 from server.smoke_stub import main
 
 
-def test_keyless_stub_smoke_proves_approve_and_decline(capsys: Any) -> None:
+def test_keyless_stub_smoke_proves_approve_and_decline(
+    capsys: Any,
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "non-secret-smoke-sentinel")
+
     main()
 
     output = cast(dict[str, object], json.loads(capsys.readouterr().out))
+    assert os.environ["OPENAI_API_KEY"] == "non-secret-smoke-sentinel"
     assert output["smoke"] == "passed"
     assert output["sdkApproveStatus"] == "completed"
     assert output["sdkApproveExecutionCount"] == 1
@@ -24,4 +31,3 @@ def test_keyless_stub_smoke_proves_approve_and_decline(capsys: Any) -> None:
         "Temporary permission revoked.",
         "Cancellation receipt sealed.",
     ]
-

@@ -17,8 +17,7 @@ from server.providers.hotel_simulator import HotelSimulator
 from server.store import SQLiteStore
 
 
-def main() -> None:
-    os.environ.pop("OPENAI_API_KEY", None)
+def _run_smoke() -> None:
     with TemporaryDirectory(prefix="backchannel-smoke-") as temporary_directory:
         database_path = Path(temporary_directory) / "smoke.sqlite3"
         store = SQLiteStore(database_path)
@@ -192,6 +191,15 @@ def main() -> None:
             )
         )
         restarted_store.close()
+
+
+def main() -> None:
+    original_api_key = os.environ.pop("OPENAI_API_KEY", None)
+    try:
+        _run_smoke()
+    finally:
+        if original_api_key is not None:
+            os.environ["OPENAI_API_KEY"] = original_api_key
 
 
 if __name__ == "__main__":
