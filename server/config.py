@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -40,6 +41,11 @@ def _environment_origins(name: str) -> tuple[str, ...]:
     raw = os.environ.get(name, "")
     return tuple(origin.strip() for origin in raw.split(",") if origin.strip())
 
+
+def _environment_cidrs(name: str) -> tuple[str, ...]:
+    raw = os.environ.get(name, "")
+    return tuple(value.strip() for value in raw.split(",") if value.strip())
+
 # Serialized SDK approvals are intentionally bound to these application contracts.
 APPROVAL_PROTOCOL_VERSION = "backchannel.approval.v1"
 HOTEL_AGENT_GRAPH_VERSION = "backchannel.hotel-agent.v1"
@@ -58,11 +64,14 @@ class RuntimeSettings:
     live_ip_cooldown_seconds: int = 60
     live_session_cooldown_seconds: int = 60
     daily_demo_budget_units: int = 100
+    live_admission_lease_seconds: int = 300
     terminal_recovery_ttl_seconds: int = 86_400
+    terminal_cleanup_interval_seconds: int = 300
     request_body_size_limit_bytes: int = 16_384
     deployed_mode: bool = False
     deployed_cors_origins: tuple[str, ...] = ()
     trusted_proxy_enabled: bool = False
+    trusted_proxy_cidrs: tuple[str, ...] = ()
     demo_session_cookie_name: str = "backchannel_demo_session"
     demo_session_lifetime_seconds: int = 86_400
     demo_session_cookie_secure: bool = False
@@ -85,10 +94,20 @@ class RuntimeSettings:
                 86_400,
             ),
             "daily_demo_budget_units": (self.daily_demo_budget_units, 1, 1_000_000),
+            "live_admission_lease_seconds": (
+                self.live_admission_lease_seconds,
+                1,
+                86_400,
+            ),
             "terminal_recovery_ttl_seconds": (
                 self.terminal_recovery_ttl_seconds,
                 1,
                 2_592_000,
+            ),
+            "terminal_cleanup_interval_seconds": (
+                self.terminal_cleanup_interval_seconds,
+                1,
+                86_400,
             ),
             "request_body_size_limit_bytes": (
                 self.request_body_size_limit_bytes,
@@ -115,6 +134,13 @@ class RuntimeSettings:
             raise ValueError("demo_session_cookie_name must be a safe cookie token")
         if len(self.identity_hash_secret.encode("utf-8")) < 32:
             raise ValueError("identity_hash_secret must contain at least 32 bytes")
+        for cidr in self.trusted_proxy_cidrs:
+            try:
+                ipaddress.ip_network(cidr, strict=False)
+            except ValueError as error:
+                raise ValueError("trusted_proxy_cidrs must contain valid IP networks") from error
+        if self.trusted_proxy_enabled and not self.trusted_proxy_cidrs:
+            raise ValueError("trusted proxy mode requires explicit trusted_proxy_cidrs")
         if self.deployed_mode:
             if self.identity_hash_secret == DEVELOPMENT_IDENTITY_HASH_SECRET:
                 raise ValueError(
@@ -174,9 +200,17 @@ class RuntimeSettings:
                 "BACKCHANNEL_DAILY_DEMO_BUDGET_UNITS",
                 default=100,
             ),
+            live_admission_lease_seconds=_environment_int(
+                "BACKCHANNEL_LIVE_ADMISSION_LEASE_SECONDS",
+                default=300,
+            ),
             terminal_recovery_ttl_seconds=_environment_int(
                 "BACKCHANNEL_TERMINAL_RECOVERY_TTL_SECONDS",
                 default=86_400,
+            ),
+            terminal_cleanup_interval_seconds=_environment_int(
+                "BACKCHANNEL_TERMINAL_CLEANUP_INTERVAL_SECONDS",
+                default=300,
             ),
             request_body_size_limit_bytes=_environment_int(
                 "BACKCHANNEL_REQUEST_BODY_SIZE_LIMIT_BYTES",
@@ -185,6 +219,7 @@ class RuntimeSettings:
             deployed_mode=_environment_bool("BACKCHANNEL_DEPLOYED_MODE"),
             deployed_cors_origins=_environment_origins("BACKCHANNEL_CORS_ORIGINS"),
             trusted_proxy_enabled=_environment_bool("BACKCHANNEL_TRUSTED_PROXY_ENABLED"),
+            trusted_proxy_cidrs=_environment_cidrs("BACKCHANNEL_TRUSTED_PROXY_CIDRS"),
             demo_session_cookie_name=os.environ.get(
                 "BACKCHANNEL_DEMO_SESSION_COOKIE_NAME",
                 "backchannel_demo_session",

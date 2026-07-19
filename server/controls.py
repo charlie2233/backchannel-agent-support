@@ -19,6 +19,7 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from http.cookies import SimpleCookie
 from typing import TYPE_CHECKING, cast
+from uuid import UUID
 
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -26,9 +27,13 @@ from starlette.requests import Request
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from server.config import RuntimeSettings
+from server.logging import get_safe_logger, log_safe_exception
 
 if TYPE_CHECKING:
     from server.store import SQLiteStore
+
+
+logger = get_safe_logger(__name__)
 
 
 class LiveAdmissionCode(StrEnum):
@@ -83,6 +88,13 @@ class RequestBodyTooLarge(StarletteHTTPException):
         super().__init__(status_code=413, detail="Request body too large")
 
 
+class SanitizedApplicationError(RuntimeError):
+    """Opaque exception re-raised to preserve ASGI and TestClient semantics."""
+
+    def __init__(self) -> None:
+        super().__init__("Unhandled application error")
+
+
 @dataclass(frozen=True, slots=True)
 class ClientIdentity:
     ip_key: str
@@ -110,6 +122,10 @@ class PublicDemoControls:
         self._settings = settings
         self._live_semaphore = asyncio.Semaphore(settings.max_concurrent_live_recoveries)
         self._identity_secret = settings.identity_hash_secret.encode("utf-8")
+        self._trusted_proxy_networks = tuple(
+            ipaddress.ip_network(cidr, strict=False)
+            for cidr in settings.trusted_proxy_cidrs
+        )
 
     def _correlation_key(self, namespace: str, value: str) -> str:
         return hmac.new(
@@ -121,14 +137,31 @@ class PublicDemoControls:
     def _client_ip(self, request: Request) -> str:
         direct = request.client.host if request.client is not None else "unknown"
         normalized_direct = _normalize_ip(direct) or "unknown"
-        if not self._settings.trusted_proxy_enabled:
+        if (
+            not self._settings.trusted_proxy_enabled
+            or normalized_direct == "unknown"
+            or not self._ip_is_trusted_proxy(normalized_direct)
+        ):
             return normalized_direct
         forwarded = request.headers.get("x-forwarded-for")
-        if forwarded:
-            normalized_forwarded = _normalize_ip(forwarded.split(",", 1)[0])
-            if normalized_forwarded is not None:
-                return normalized_forwarded
-        return normalized_direct
+        if not forwarded:
+            return normalized_direct
+        forwarded_hops = [_normalize_ip(value) for value in forwarded.split(",")]
+        if any(hop is None for hop in forwarded_hops):
+            return normalized_direct
+        current = normalized_direct
+        for hop in reversed(cast(list[str], forwarded_hops)):
+            if not self._ip_is_trusted_proxy(current):
+                break
+            current = hop
+        return current
+
+    def _ip_is_trusted_proxy(self, value: str) -> bool:
+        try:
+            address = ipaddress.ip_address(value)
+        except ValueError:
+            return False
+        return any(address in network for network in self._trusted_proxy_networks)
 
     def resolve_client_identity(
         self,
@@ -191,8 +224,8 @@ class PublicDemoControls:
                 seconds=self._settings.live_session_cooldown_seconds
             ),
             daily_budget_units=self._settings.daily_demo_budget_units,
-            active_ttl=timedelta(
-                seconds=self._settings.terminal_recovery_ttl_seconds
+            lease_ttl=timedelta(
+                seconds=self._settings.live_admission_lease_seconds
             ),
             now=now or datetime.now(UTC),
         )
@@ -205,10 +238,67 @@ class PublicDemoControls:
             now=now or datetime.now(UTC),
         )
 
+    def guard_live_resume(
+        self,
+        recovery_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> None:
+        guarded = self._store.renew_or_reacquire_live_admission(
+            recovery_id,
+            max_active=self._settings.max_concurrent_live_recoveries,
+            lease_ttl=timedelta(
+                seconds=self._settings.live_admission_lease_seconds
+            ),
+            now=now or datetime.now(UTC),
+        )
+        if not guarded:
+            raise LiveAdmissionError(LiveAdmissionCode.LIVE_CAPACITY)
+
+    def _renew_live_start(self, recovery_id: str) -> None:
+        renewed = self._store.renew_live_admission_lease(
+            recovery_id,
+            lease_ttl=timedelta(
+                seconds=self._settings.live_admission_lease_seconds
+            ),
+            now=datetime.now(UTC),
+        )
+        if not renewed:
+            raise LiveAdmissionError(LiveAdmissionCode.LIVE_CAPACITY)
+
+    async def _heartbeat_live_lease(
+        self,
+        recovery_id: str,
+        stop: asyncio.Event,
+    ) -> None:
+        interval = max(0.25, self._settings.live_admission_lease_seconds / 3)
+        while True:
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=interval)
+            except TimeoutError:
+                self._renew_live_start(recovery_id)
+            else:
+                return
+
     @asynccontextmanager
-    async def live_model_slot(self) -> AsyncIterator[None]:
+    async def live_model_slot(
+        self,
+        recovery_id: str | None = None,
+    ) -> AsyncIterator[None]:
         async with self._live_semaphore:
-            yield
+            if recovery_id is None:
+                yield
+                return
+            self._renew_live_start(recovery_id)
+            stop = asyncio.Event()
+            heartbeat = asyncio.create_task(
+                self._heartbeat_live_lease(recovery_id, stop)
+            )
+            try:
+                yield
+            finally:
+                stop.set()
+                await heartbeat
 
 
 class PublicBoundaryMiddleware:
@@ -233,6 +323,44 @@ class PublicBoundaryMiddleware:
         request_id = secrets.token_hex(16)
         state = scope.setdefault("state", {})
         state["request_id"] = request_id
+        sanitized_error: SanitizedApplicationError | None = None
+        try:
+            await self._handle_http(
+                scope,
+                receive,
+                send,
+                request_id=request_id,
+                state=state,
+            )
+        except Exception as error:
+            recovery_id = state.get("recovery_id")
+            validated_recovery_id: str | None = None
+            if isinstance(recovery_id, str):
+                try:
+                    validated_recovery_id = str(UUID(recovery_id))
+                except ValueError:
+                    validated_recovery_id = None
+            log_safe_exception(
+                logger,
+                request_id=request_id,
+                recovery_id=validated_recovery_id,
+                error=error,
+            )
+            sanitized_error = SanitizedApplicationError()
+        if sanitized_error is not None:
+            # Raise only after leaving the raw exception context, so the opaque
+            # boundary error carries neither a cause nor a hidden context chain.
+            raise sanitized_error
+
+    async def _handle_http(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+        *,
+        request_id: str,
+        state: dict[str, object],
+    ) -> None:
         identity = self._controls.resolve_client_identity(Request(scope))
         state["demo_identity"] = identity
         headers = Headers(scope=scope)

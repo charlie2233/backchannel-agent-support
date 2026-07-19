@@ -1,5 +1,8 @@
 """FastAPI entry point for truthful recovery persistence and streaming."""
 
+import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import timedelta
 from typing import Annotated, cast
 from uuid import UUID, uuid4
@@ -19,9 +22,10 @@ from server.controls import (
     PublicBoundaryMiddleware,
     PublicDemoControls,
     RequestBodyTooLarge,
+    SanitizedApplicationError,
 )
 from server.events import stream_recovery_events
-from server.logging import get_safe_logger, log_safe_exception
+from server.logging import get_safe_logger, install_server_log_safety, log_safe_exception
 from server.models import (
     ApprovalDecisionRequest,
     ApprovalDecisionResponse,
@@ -52,6 +56,16 @@ logger = get_safe_logger(__name__)
 def _request_id(request: Request) -> str:
     value = getattr(request.state, "request_id", None)
     return value if isinstance(value, str) else uuid4().hex
+
+
+def _validated_recovery_id(request: Request) -> str | None:
+    value = getattr(request.state, "recovery_id", None)
+    if not isinstance(value, str):
+        return None
+    try:
+        return str(UUID(value))
+    except ValueError:
+        return None
 
 
 def _public_error_response(
@@ -105,6 +119,7 @@ def create_app(
     orchestrator: RecoveryOrchestrator | None = None,
     model_provider: ModelProvider | None = None,
 ) -> FastAPI:
+    install_server_log_safety()
     runtime_settings = settings or RuntimeSettings.from_environment()
     recovery_store = store or SQLiteStore(runtime_settings.database_path)
     scenario_loader = ScenarioLoader()
@@ -119,14 +134,54 @@ def create_app(
             model_provider=model_provider,
         )
     public_controls = PublicDemoControls(recovery_store, runtime_settings)
-    cleanup_terminal_recoveries(
-        recovery_store,
-        terminal_ttl=timedelta(
-            seconds=runtime_settings.terminal_recovery_ttl_seconds
-        ),
-        batch_size=100,
+    terminal_ttl = timedelta(
+        seconds=runtime_settings.terminal_recovery_ttl_seconds
     )
-    application = FastAPI(title="Backchannel API", version="0.3.0")
+
+    @asynccontextmanager
+    async def lifespan(_application: FastAPI) -> AsyncIterator[None]:
+        cleanup_terminal_recoveries(
+            recovery_store,
+            terminal_ttl=terminal_ttl,
+            batch_size=100,
+        )
+        stop_cleanup = asyncio.Event()
+
+        async def run_periodic_cleanup() -> None:
+            while True:
+                try:
+                    await asyncio.wait_for(
+                        stop_cleanup.wait(),
+                        timeout=runtime_settings.terminal_cleanup_interval_seconds,
+                    )
+                except TimeoutError:
+                    try:
+                        cleanup_terminal_recoveries(
+                            recovery_store,
+                            terminal_ttl=terminal_ttl,
+                            batch_size=100,
+                        )
+                    except Exception as error:
+                        log_safe_exception(
+                            logger,
+                            request_id="retention_cleanup",
+                            error=error,
+                        )
+                else:
+                    return
+
+        cleanup_task = asyncio.create_task(run_periodic_cleanup())
+        try:
+            yield
+        finally:
+            stop_cleanup.set()
+            await cleanup_task
+
+    application = FastAPI(
+        title="Backchannel API",
+        version="0.3.0",
+        lifespan=lifespan,
+    )
     application.state.recovery_store = recovery_store
     application.state.recovery_orchestrator = recovery_orchestrator
     application.state.public_demo_controls = public_controls
@@ -183,11 +238,13 @@ def create_app(
 
     @application.exception_handler(Exception)
     async def internal_error(request: Request, error: Exception) -> JSONResponse:
-        log_safe_exception(
-            logger,
-            request_id=_request_id(request),
-            error=error,
-        )
+        if not isinstance(error, SanitizedApplicationError):
+            log_safe_exception(
+                logger,
+                request_id=_request_id(request),
+                recovery_id=_validated_recovery_id(request),
+                error=error,
+            )
         return _public_error_response(
             request,
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -270,7 +327,7 @@ def create_app(
                     session_key=identity.session_key,
                 )
                 try:
-                    async with public_controls.live_model_slot():
+                    async with public_controls.live_model_slot(recovery_id):
                         pending = await recovery_orchestrator.start(
                             payload.scenario_id,
                             execution_mode=payload.execution_mode,
@@ -298,10 +355,31 @@ def create_app(
     async def approve_recovery(
         recovery_id: UUID,
         payload: ApprovalDecisionRequest,
+        request: Request,
     ) -> ApprovalDecisionResponse:
         recovery_key = str(recovery_id)
+        request.state.recovery_id = recovery_key
         try:
-            response = await recovery_orchestrator.approve_decision(recovery_key, payload)
+            try:
+                recovery_before = recovery_store.get_recovery(recovery_key)
+            except RecoveryNotFoundError:
+                recovery_before = None
+            if (
+                recovery_before is not None
+                and recovery_before.execution_mode is ExecutionMode.OPENAI_LIVE
+                and not recovery_before.status.terminal
+            ):
+                public_controls.guard_live_resume(recovery_key)
+                async with public_controls.live_model_slot(recovery_key):
+                    response = await recovery_orchestrator.approve_decision(
+                        recovery_key,
+                        payload,
+                    )
+            else:
+                response = await recovery_orchestrator.approve_decision(
+                    recovery_key,
+                    payload,
+                )
             recovery = recovery_store.get_recovery(recovery_key)
             if (
                 recovery.execution_mode is ExecutionMode.OPENAI_LIVE

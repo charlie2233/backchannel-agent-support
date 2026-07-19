@@ -23,6 +23,12 @@ class SafeLogFilter(logging.Filter):
     """Replace a whole unsafe record instead of attempting partial disclosure."""
 
     def filter(self, record: logging.LogRecord) -> bool:
+        if record.exc_info is not None:
+            record.msg = "[EXCEPTION REDACTED]"
+            record.args = ()
+            record.exc_info = None
+            record.exc_text = None
+            return True
         try:
             rendered = record.getMessage()
         except Exception:
@@ -40,6 +46,13 @@ def get_safe_logger(name: str) -> logging.Logger:
     if not any(isinstance(item, SafeLogFilter) for item in logger.filters):
         logger.addFilter(SafeLogFilter())
     return logger
+
+
+def install_server_log_safety() -> None:
+    """Prevent ASGI server exception records from serializing raw tracebacks."""
+
+    for name in ("uvicorn", "uvicorn.error"):
+        get_safe_logger(name)
 
 
 def log_safe_exception(

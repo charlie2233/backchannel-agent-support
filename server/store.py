@@ -2192,7 +2192,7 @@ class SQLiteStore:
         ip_cooldown: timedelta,
         session_cooldown: timedelta,
         daily_budget_units: int,
-        active_ttl: timedelta,
+        lease_ttl: timedelta,
         now: datetime,
     ) -> Literal["live_capacity", "cooldown", "daily_budget"] | None:
         """Atomically reserve one durable live-demo unit across app instances."""
@@ -2204,7 +2204,7 @@ class SQLiteStore:
             or daily_budget_units <= 0
             or ip_cooldown <= timedelta(0)
             or session_cooldown <= timedelta(0)
-            or active_ttl <= timedelta(0)
+            or lease_ttl <= timedelta(0)
         ):
             raise ValueError("Admission policy must contain positive limits")
 
@@ -2240,6 +2240,13 @@ class SQLiteStore:
                     SELECT recovery_id FROM live_admissions
                     WHERE released_at IS NOT NULL
                       AND admitted_at < ?
+                      AND NOT EXISTS (
+                          SELECT 1 FROM recoveries
+                          WHERE recoveries.id = live_admissions.recovery_id
+                            AND recoveries.status NOT IN (
+                                'completed', 'closed_without_action', 'outcome_unknown'
+                            )
+                      )
                     ORDER BY admitted_at ASC
                     LIMIT 100
                 )
@@ -2305,7 +2312,7 @@ class SQLiteStore:
                     ip_key,
                     session_key,
                     now_text,
-                    (now + active_ttl).isoformat(),
+                    (now + lease_ttl).isoformat(),
                 ),
             )
             connection.execute(
@@ -2317,6 +2324,108 @@ class SQLiteStore:
                 (recovery_id, now_text),
             )
         return None
+
+    def renew_live_admission_lease(
+        self,
+        recovery_id: str,
+        *,
+        lease_ttl: timedelta,
+        now: datetime,
+    ) -> bool:
+        """Renew one exact active row without requiring a persisted recovery yet."""
+
+        if now.tzinfo is None or now.utcoffset() != timedelta(0):
+            raise ValueError("Admission time must be timezone-aware UTC")
+        if lease_ttl <= timedelta(0):
+            raise ValueError("Live lease policy must contain positive limits")
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            updated = connection.execute(
+                """
+                UPDATE live_admissions
+                SET expires_at = ?
+                WHERE recovery_id = ?
+                  AND released_at IS NULL
+                  AND expires_at > ?
+                """,
+                (
+                    (now + lease_ttl).isoformat(),
+                    recovery_id,
+                    now.isoformat(),
+                ),
+            )
+        return updated.rowcount == 1
+
+    def renew_or_reacquire_live_admission(
+        self,
+        recovery_id: str,
+        *,
+        max_active: int,
+        lease_ttl: timedelta,
+        now: datetime,
+    ) -> bool:
+        """Renew one live lease, or atomically reacquire it without rebilling."""
+
+        if now.tzinfo is None or now.utcoffset() != timedelta(0):
+            raise ValueError("Admission time must be timezone-aware UTC")
+        if max_active <= 0 or lease_ttl <= timedelta(0):
+            raise ValueError("Live lease policy must contain positive limits")
+        now_text = now.isoformat()
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                UPDATE live_admissions
+                SET released_at = ?
+                WHERE released_at IS NULL
+                  AND expires_at <= ?
+                """,
+                (now_text, now_text),
+            )
+            row = connection.execute(
+                """
+                SELECT live_admissions.released_at, recoveries.status,
+                       recoveries.execution_mode
+                FROM live_admissions
+                JOIN recoveries ON recoveries.id = live_admissions.recovery_id
+                WHERE live_admissions.recovery_id = ?
+                """,
+                (recovery_id,),
+            ).fetchone()
+            if (
+                row is None
+                or cast(str, row["execution_mode"]) != "openai_live"
+                or cast(str, row["status"])
+                in {"completed", "closed_without_action", "outcome_unknown"}
+            ):
+                return False
+            if row["released_at"] is None:
+                connection.execute(
+                    "UPDATE live_admissions SET expires_at = ? WHERE recovery_id = ?",
+                    ((now + lease_ttl).isoformat(), recovery_id),
+                )
+                return True
+            active_count = cast(
+                int,
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM live_admissions
+                    WHERE released_at IS NULL AND expires_at > ?
+                    """,
+                    (now_text,),
+                ).fetchone()[0],
+            )
+            if active_count >= max_active:
+                return False
+            updated = connection.execute(
+                """
+                UPDATE live_admissions
+                SET expires_at = ?, released_at = NULL
+                WHERE recovery_id = ?
+                """,
+                ((now + lease_ttl).isoformat(), recovery_id),
+            )
+            return updated.rowcount == 1
 
     def release_live_admission(self, recovery_id: str, *, now: datetime) -> None:
         with self._lock, self._connect() as connection:

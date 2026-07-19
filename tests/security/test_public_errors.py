@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sys
 from typing import NoReturn
+from uuid import UUID
 
 import httpx
 import pytest
@@ -12,7 +14,7 @@ from fastapi.testclient import TestClient
 from server.config import RuntimeSettings
 from server.logging import SafeLogFilter
 from server.main import create_app
-from server.models import ExecutionMode
+from server.models import ExecutionMode, ScenarioId
 from server.store import SQLiteStore
 
 
@@ -22,6 +24,11 @@ class ExplodingOrchestrator:
             "sk-secret Authorization: Bearer private-token prompt=private-prompt "
             "state_json=serialized-state tool_args=private-args tool_results=private-result"
         )
+
+
+class DecisionExplodingOrchestrator:
+    async def approve_decision(self, _recovery_id: str, _payload: object) -> NoReturn:
+        raise RuntimeError("sk-decision-secret state_json=private-decision-state")
 
 
 def test_unhandled_exception_maps_to_generic_correlated_public_error(tmp_path, caplog) -> None:
@@ -63,6 +70,91 @@ def test_unhandled_exception_maps_to_generic_correlated_public_error(tmp_path, c
         assert secret not in combined
 
 
+def test_unhandled_exception_is_sanitized_before_testclient_reraises(tmp_path) -> None:
+    client = TestClient(
+        create_app(
+            RuntimeSettings(live_ready=False),
+            store=SQLiteStore(tmp_path / "testclient-reraise.sqlite3"),
+            orchestrator=ExplodingOrchestrator(),  # type: ignore[arg-type]
+        )
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        client.post(
+            "/api/recoveries",
+            json={"scenarioId": "hotel", "executionMode": "sdk_stub"},
+        )
+
+    assert type(raised.value).__name__ == "SanitizedApplicationError"
+    assert "sk-secret" not in str(raised.value)
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+
+
+def test_server_logger_filter_drops_raw_exception_info(tmp_path, caplog) -> None:
+    create_app(
+        RuntimeSettings(live_ready=False),
+        store=SQLiteStore(tmp_path / "server-logger-filter.sqlite3"),
+    )
+    caplog.set_level(logging.ERROR, logger="uvicorn.error")
+    try:
+        raise RuntimeError("sk-server-secret state_json=private-server-state")
+    except RuntimeError:
+        logging.getLogger("uvicorn.error").error(
+            "Exception in ASGI application",
+            exc_info=sys.exc_info(),
+        )
+
+    assert "sk-server-secret" not in caplog.text
+    assert "private-server-state" not in caplog.text
+    assert "RuntimeError" not in caplog.text
+
+
+def test_unexpected_decision_error_logs_validated_recovery_correlation_only(
+    tmp_path,
+    caplog,
+) -> None:
+    caplog.set_level(logging.ERROR)
+    store = SQLiteStore(tmp_path / "decision-correlation.sqlite3")
+    recovery_id = "11111111-2222-4333-8444-555555555555"
+    UUID(recovery_id)
+    store.create_recovery(
+        recovery_id=recovery_id,
+        scenario_id=ScenarioId.HOTEL,
+        execution_mode=ExecutionMode.SDK_STUB,
+        current_step=0,
+        current_step_summary="Decision correlation fixture.",
+        sdk_version="0.18.3",
+        protocol_version="backchannel.approval.v1",
+        agent_graph_version="backchannel.hotel-agent.v1",
+        definition_digest="sdk-definition",
+    )
+    client = TestClient(
+        create_app(
+            RuntimeSettings(live_ready=False),
+            store=store,
+            orchestrator=DecisionExplodingOrchestrator(),  # type: ignore[arg-type]
+        ),
+        raise_server_exceptions=False,
+    )
+
+    response = client.post(
+        f"/api/recoveries/{recovery_id}/decisions",
+        json={
+            "action": "approve",
+            "clientDecisionId": "decision-correlation",
+            "remedyId": "remedy-correlation",
+            "remedyDigest": "sha256:" + "0" * 64,
+            "toolCallId": "tool-correlation",
+        },
+    )
+
+    assert response.status_code == 500
+    assert f"recovery_id={recovery_id}" in caplog.text
+    assert "sk-decision-secret" not in caplog.text
+    assert "private-decision-state" not in caplog.text
+
+
 @pytest.mark.parametrize(
     "unsafe_message",
     [
@@ -90,6 +182,25 @@ def test_safe_log_filter_redacts_sensitive_payload_markers(unsafe_message: str) 
     rendered = record.getMessage()
     assert unsafe_message not in rendered
     assert "[REDACTED]" in rendered
+
+
+def test_safe_log_filter_never_retains_exception_info() -> None:
+    try:
+        raise RuntimeError("arbitrary body value that must not reach a server traceback")
+    except RuntimeError:
+        record = logging.LogRecord(
+            "uvicorn.error",
+            logging.ERROR,
+            __file__,
+            1,
+            "Exception in ASGI application",
+            (),
+            sys.exc_info(),
+        )
+
+    assert SafeLogFilter().filter(record) is True
+    assert record.exc_info is None
+    assert record.exc_text is None
 
 
 def test_validation_error_never_echoes_oversized_or_extra_payload(tmp_path) -> None:
