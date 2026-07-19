@@ -149,6 +149,76 @@ def test_three_run_child_rejects_malformed_record(monkeypatch) -> None:
     assert result == smoke_live_three._failed_child("LiveSmokeChildProtocolError")
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "approvalCount": 0,
+            "elapsedMs": 1,
+            "errorClass": None,
+            "modelIds": [],
+            "orderedToolNames": [],
+            "status": "passed",
+            "traceId": None,
+        },
+        {
+            "approvalCount": 0,
+            "elapsedMs": 1,
+            "errorClass": "secret/path prompt\ntraceback",
+            "modelIds": [],
+            "orderedToolNames": [],
+            "status": "blocked",
+            "traceId": None,
+        },
+    ],
+)
+def test_three_run_child_rejects_impossible_or_unsafe_status_evidence(
+    monkeypatch,
+    payload: dict[str, Any],
+) -> None:
+    returncode = smoke_live_three.STATUS_EXIT_CODES[payload["status"]]
+    monkeypatch.setattr(
+        smoke_live_three.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args=[],
+            returncode=returncode,
+            stdout=json.dumps(payload),
+            stderr="",
+        ),
+    )
+
+    result = smoke_live_three._run_child(ROOT / "scripts" / "smoke_live.py")
+
+    assert result == smoke_live_three._failed_child("LiveSmokeChildProtocolError")
+
+
+def test_three_run_child_accepts_only_complete_live_pass_evidence(monkeypatch) -> None:
+    payload = {
+        "approvalCount": 1,
+        "elapsedMs": 1,
+        "errorClass": None,
+        "modelIds": ["gpt-5.6-luna", "gpt-5.6-terra"],
+        "orderedToolNames": ["commit_remedy"],
+        "status": "passed",
+        "traceId": "trace_0123456789abcdef0123456789abcdef",
+    }
+    monkeypatch.setattr(
+        smoke_live_three.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=json.dumps(payload),
+            stderr="",
+        ),
+    )
+
+    assert smoke_live_three._run_child(
+        ROOT / "scripts" / "smoke_live.py"
+    ) == payload
+
+
 def test_three_run_main_preserves_three_redacted_records_and_failed_exit(
     monkeypatch,
     capsys,

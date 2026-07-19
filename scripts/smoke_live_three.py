@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+
+from server.trace_ids import is_valid_live_trace_id
 
 RESULT_KEYS = {
     "approvalCount",
@@ -19,6 +22,9 @@ RESULT_KEYS = {
     "traceId",
 }
 STATUS_EXIT_CODES = {"passed": 0, "failed": 1, "blocked": 2}
+LIVE_MODEL_IDS = ["gpt-5.6-luna", "gpt-5.6-terra"]
+LIVE_TOOL_NAMES = ["commit_remedy"]
+SAFE_ERROR_CLASS = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,127}\Z")
 
 
 def _failed_child(error_class: str) -> dict[str, Any]:
@@ -43,7 +49,7 @@ def _is_valid_result(value: object) -> bool:
     tool_names = value.get("orderedToolNames")
     trace_id = value.get("traceId")
     error_class = value.get("errorClass")
-    return (
+    common_valid = (
         isinstance(status, str)
         and status in STATUS_EXIT_CODES
         and isinstance(elapsed_ms, int)
@@ -58,6 +64,25 @@ def _is_valid_result(value: object) -> bool:
         and all(isinstance(item, str) for item in tool_names)
         and (trace_id is None or isinstance(trace_id, str))
         and (error_class is None or isinstance(error_class, str))
+    )
+    if not common_valid:
+        return False
+    if status == "passed":
+        return (
+            approval_count == 1
+            and model_ids == LIVE_MODEL_IDS
+            and tool_names == LIVE_TOOL_NAMES
+            and isinstance(trace_id, str)
+            and is_valid_live_trace_id(trace_id)
+            and error_class is None
+        )
+    return (
+        approval_count == 0
+        and model_ids == []
+        and tool_names == []
+        and trace_id is None
+        and isinstance(error_class, str)
+        and SAFE_ERROR_CLASS.fullmatch(error_class) is not None
     )
 
 
