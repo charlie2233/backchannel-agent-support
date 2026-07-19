@@ -81,7 +81,7 @@ class ReplayEventTemplate(ApiModel):
 
 
 class ReplayReceiptTemplate(ApiModel):
-    status: str
+    status: Literal["simulated_completed"]
     simulated: Literal[True]
     provider_execution: Literal[False] = Field(alias="providerExecution")
     model_ids: list[str] = Field(alias="modelIds", max_length=0)
@@ -249,7 +249,12 @@ class RecoveryEvent(ApiModel):
 class RecoveryReceipt(ApiModel):
     recovery_id: str = Field(alias="recoveryId")
     execution_mode: ExecutionMode = Field(alias="executionMode")
-    status: str
+    status: Literal[
+        "completed",
+        "simulated_completed",
+        "closed_without_action",
+        "outcome_unknown",
+    ]
     simulated: bool
     provider_execution: bool | None = Field(alias="providerExecution")
     model_ids: list[str] = Field(alias="modelIds")
@@ -265,25 +270,48 @@ class RecoveryReceipt(ApiModel):
 
     @model_validator(mode="after")
     def enforce_execution_mode_provenance(self) -> Self:
-        if self.execution_mode is ExecutionMode.REPLAY_FIXTURE and (
-            not self.simulated or self.provider_execution is not False or self.model_ids
-        ):
-            raise ValueError(
-                "Replay receipts require simulated evidence, no provider execution, "
-                "and no model IDs"
-            )
+        if self.execution_mode is ExecutionMode.REPLAY_FIXTURE:
+            if (
+                self.status != "simulated_completed"
+                or not self.simulated
+                or self.provider_execution is not False
+                or self.model_ids
+                or self.approved_remedy_digest is not None
+            ):
+                raise ValueError(
+                    "Replay receipts require simulated-completed evidence, no provider "
+                    "execution, no approved remedy digest, and no model IDs"
+                )
+            return self
+        if self.status == "simulated_completed":
+            raise ValueError("Only replay fixtures may use simulated-completed receipts")
         if self.execution_mode is ExecutionMode.SDK_STUB and (
             not self.simulated or self.model_ids
         ):
             raise ValueError("SDK stub receipts require simulated evidence and no model IDs")
+        if self.status == "completed" and self.provider_execution is not True:
+            raise ValueError("Completed receipts require provider execution evidence")
+        if (
+            self.execution_mode is ExecutionMode.SDK_STUB
+            and self.status == "completed"
+            and self.approved_remedy_digest is None
+        ):
+            raise ValueError(
+                "Completed SDK stub receipts require an approved remedy digest"
+            )
         if self.status == RecoveryStatus.CLOSED_WITHOUT_ACTION.value and (
-            self.provider_execution is not False
+            self.provider_execution is not False or self.approved_remedy_digest is not None
         ):
-            raise ValueError("Closed-without-action receipts require zero provider execution")
+            raise ValueError(
+                "Closed-without-action receipts require zero provider execution and no "
+                "approved digest"
+            )
         if self.status == RecoveryStatus.OUTCOME_UNKNOWN.value and (
-            self.provider_execution is not None
+            self.provider_execution is not None or self.approved_remedy_digest is not None
         ):
-            raise ValueError("Unknown-outcome receipts cannot claim provider execution")
+            raise ValueError(
+                "Unknown-outcome receipts cannot claim provider execution or an approved digest"
+            )
         return self
 
 

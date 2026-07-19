@@ -26,7 +26,11 @@ def make_receipt(
     return RecoveryReceipt(
         recoveryId=recovery_id,
         executionMode=execution_mode,
-        status="completed",
+        status=(
+            "simulated_completed"
+            if execution_mode is ExecutionMode.REPLAY_FIXTURE
+            else "completed"
+        ),
         simulated=True,
         providerExecution=execution_mode is ExecutionMode.SDK_STUB,
         modelIds=[],
@@ -34,6 +38,9 @@ def make_receipt(
         providerResult="Atomic receipt test result.",
         authorizationSource="Atomic receipt test authorization.",
         verificationResults=["Atomic receipt test verification."],
+        approvedRemedyDigest=(
+            APPROVED_DIGEST if execution_mode is ExecutionMode.SDK_STUB else None
+        ),
     )
 
 

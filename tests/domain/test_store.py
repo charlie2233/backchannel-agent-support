@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from threading import Barrier, Event, Thread
 from uuid import UUID
 
 import pytest
@@ -276,3 +277,105 @@ def test_task6_action_migration_preserves_completed_approval_replay(tmp_path) ->
     with pytest.raises(ApprovalDecisionError) as conflict:
         store.claim_approval_decision(recovery_id, changed_action)
     assert conflict.value.code == "decision_id_conflict"
+
+
+def test_concurrent_action_migration_never_rewrites_a_new_decline(tmp_path) -> None:
+    database_path = tmp_path / "task6-concurrent-action-migration.sqlite3"
+    timestamp = "2026-07-18T20:00:00+00:00"
+    recovery_id = "migration-race-recovery"
+    with sqlite3.connect(database_path) as setup:
+        setup.executescript(
+            """
+            CREATE TABLE recoveries (
+                id TEXT PRIMARY KEY,
+                scenario_id TEXT NOT NULL,
+                execution_mode TEXT NOT NULL,
+                status TEXT NOT NULL,
+                current_step INTEGER NOT NULL,
+                current_step_summary TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE approval_decisions (
+                recovery_id TEXT PRIMARY KEY REFERENCES recoveries(id),
+                client_decision_id TEXT NOT NULL UNIQUE,
+                remedy_id TEXT NOT NULL,
+                remedy_digest TEXT NOT NULL,
+                tool_call_id TEXT NOT NULL,
+                request_fingerprint TEXT NOT NULL,
+                status TEXT NOT NULL,
+                result_json TEXT,
+                claimed_at TEXT NOT NULL,
+                completed_at TEXT
+            );
+            """
+        )
+        setup.execute(
+            "INSERT INTO recoveries VALUES (?, 'hotel', 'sdk_stub', "
+            "'pending_approval', 3, 'Pending.', ?, ?)",
+            (recovery_id, timestamp, timestamp),
+        )
+
+    first = sqlite3.connect(database_path, timeout=10, check_same_thread=False)
+    second = sqlite3.connect(database_path, timeout=10, check_same_thread=False)
+    first.row_factory = second.row_factory = sqlite3.Row
+    initial_checks = Barrier(2)
+    allow_second_begin = Event()
+    second_waiting = Event()
+    errors: list[BaseException] = []
+    first_check_seen = [False, False]
+
+    def trace(index: int):
+        def callback(statement: str) -> None:
+            if "table_info(approval_decisions)" in statement and not first_check_seen[index]:
+                first_check_seen[index] = True
+                initial_checks.wait(timeout=5)
+            if index == 1 and statement == "BEGIN IMMEDIATE":
+                second_waiting.set()
+                assert allow_second_begin.wait(timeout=5)
+
+        return callback
+
+    first.set_trace_callback(trace(0))
+    second.set_trace_callback(trace(1))
+
+    def migrate(connection: sqlite3.Connection) -> None:
+        try:
+            SQLiteStore._migrate_task6_approval_decisions(connection)
+        except BaseException as error:
+            errors.append(error)
+
+    first_thread = Thread(target=migrate, args=(first,))
+    second_thread = Thread(target=migrate, args=(second,))
+    try:
+        first_thread.start()
+        second_thread.start()
+        assert second_waiting.wait(timeout=5)
+        first_thread.join(timeout=5)
+        assert not first_thread.is_alive()
+        with sqlite3.connect(database_path) as writer:
+            writer.execute(
+                """
+                INSERT INTO approval_decisions (
+                    recovery_id, client_decision_id, action, remedy_id,
+                    remedy_digest, tool_call_id, request_fingerprint, status,
+                    result_json, claimed_at, completed_at
+                ) VALUES (?, 'decline-race', 'decline', 'remedy-race', ?,
+                    'tool-race', 'decline-fingerprint', 'claimed', NULL, ?, NULL)
+                """,
+                (recovery_id, APPROVED_DIGEST, timestamp),
+            )
+    finally:
+        allow_second_begin.set()
+        first_thread.join(timeout=5)
+        second_thread.join(timeout=5)
+        first.close()
+        second.close()
+
+    assert not second_thread.is_alive()
+    assert errors == []
+    with sqlite3.connect(database_path) as verifier:
+        assert verifier.execute(
+            "SELECT action FROM approval_decisions WHERE recovery_id = ?",
+            (recovery_id,),
+        ).fetchone() == ("decline",)

@@ -555,6 +555,15 @@ class SQLiteStore:
         connection.execute("PRAGMA foreign_keys = OFF")
         try:
             connection.execute("BEGIN IMMEDIATE")
+            locked_columns = {
+                cast(str, row["name"])
+                for row in connection.execute(
+                    "PRAGMA table_info(approval_decisions)"
+                ).fetchall()
+            }
+            if "action" in locked_columns:
+                connection.commit()
+                return
             legacy_rows = connection.execute(
                 "SELECT * FROM approval_decisions ORDER BY claimed_at ASC"
             ).fetchall()
@@ -1607,7 +1616,7 @@ class SQLiteStore:
             receipt = RecoveryReceipt(
                 recoveryId=claim.recovery_id,
                 executionMode=ExecutionMode(cast(str, recovery["execution_mode"])),
-                status=terminal_status.value,
+                status=decision_status,
                 simulated=True,
                 providerExecution=None if may_have_begun else False,
                 modelIds=[],
