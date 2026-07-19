@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
+import os
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -52,6 +56,59 @@ def create_sdk_recovery(client: TestClient) -> dict[str, object]:
     assert snapshot["status"] == "pending_approval"
     assert snapshot["pendingApproval"]["executionStarted"] is False
     return snapshot
+
+
+def _decision_process_worker(
+    database_path: str,
+    job_queue: Any,
+    result_queue: Any,
+    start_barrier: Any,
+) -> None:
+    """Race decisions from one independent interpreter without returning SDK state."""
+
+    iteration = -1
+    store: SQLiteStore | None = None
+    try:
+        store = SQLiteStore(database_path)
+        provider = HotelSimulator(store=store)
+        app = create_app(
+            RuntimeSettings(live_ready=False),
+            store=store,
+            hotel_provider=provider,
+        )
+        with TestClient(app) as client:
+            while True:
+                job = job_queue.get()
+                if job is None:
+                    return
+                iteration, recovery_id, payload = job
+                start_barrier.wait(timeout=30)
+                before_dispatches = provider.dispatch_count
+                response = client.post(
+                    f"/api/recoveries/{recovery_id}/decisions",
+                    json=payload,
+                )
+                result_queue.put(
+                    {
+                        "iteration": iteration,
+                        "pid": os.getpid(),
+                        "status": response.status_code,
+                        "body": response.json(),
+                        "dispatchDelta": provider.dispatch_count - before_dispatches,
+                    }
+                )
+    except BaseException as error:
+        result_queue.put(
+            {
+                "iteration": iteration,
+                "pid": os.getpid(),
+                "errorType": type(error).__name__,
+                "error": str(error)[:200],
+            }
+        )
+    finally:
+        if store is not None:
+            store.close()
 
 
 def test_public_sdk_stub_creation_and_typed_approval_complete_once(
@@ -204,55 +261,104 @@ def test_digest_from_another_recovery_fails_closed(sdk_client) -> None:
     assert store.count_executions(first_id) == 0
 
 
-def test_two_apps_race_twenty_times_with_one_durable_winner(tmp_path) -> None:
-    for iteration in range(20):
-        database_path = tmp_path / f"decision-race-{iteration}.sqlite3"
-        first_store = SQLiteStore(database_path)
-        first_provider = HotelSimulator(store=first_store)
-        first_app = create_app(
-            RuntimeSettings(live_ready=False),
-            store=first_store,
-            hotel_provider=first_provider,
+def test_two_processes_race_twenty_times_with_one_durable_winner(tmp_path) -> None:
+    database_path = tmp_path / "decision-process-races.sqlite3"
+    creator_store = SQLiteStore(database_path)
+    creator_provider = HotelSimulator(store=creator_store)
+    creator_app = create_app(
+        RuntimeSettings(live_ready=False),
+        store=creator_store,
+        hotel_provider=creator_provider,
+    )
+    process_context = multiprocessing.get_context("spawn")
+    first_jobs = process_context.Queue()
+    second_jobs = process_context.Queue()
+    results = process_context.Queue()
+    start_barrier = process_context.Barrier(2)
+    processes = [
+        process_context.Process(
+            target=_decision_process_worker,
+            args=(str(database_path), jobs, results, start_barrier),
         )
-        with TestClient(first_app) as creator:
-            snapshot = create_sdk_recovery(creator)
-        recovery_id = str(snapshot["recoveryId"])
+        for jobs in (first_jobs, second_jobs)
+    ]
+    worker_pids: set[int] = set()
 
-        second_store = SQLiteStore(database_path)
-        second_provider = HotelSimulator(store=second_store)
-        second_app = create_app(
-            RuntimeSettings(live_ready=False),
-            store=second_store,
-            hotel_provider=second_provider,
-        )
-        barrier = Barrier(2)
-
-        def submit(app, decision_id: str):
-            payload = decision_payload(snapshot, client_decision_id=decision_id)
-            with TestClient(app) as client:
-                barrier.wait()
-                response = client.post(
-                    f"/api/recoveries/{recovery_id}/decisions",
-                    json=payload,
+    for process in processes:
+        process.start()
+    try:
+        with TestClient(creator_app) as creator:
+            for iteration in range(20):
+                snapshot = create_sdk_recovery(creator)
+                recovery_id = str(snapshot["recoveryId"])
+                first_jobs.put(
+                    (
+                        iteration,
+                        recovery_id,
+                        decision_payload(
+                            snapshot,
+                            client_decision_id=f"process-a-{iteration}",
+                        ),
+                    )
                 )
-                return response.status_code, response.json()
+                second_jobs.put(
+                    (
+                        iteration,
+                        recovery_id,
+                        decision_payload(
+                            snapshot,
+                            client_decision_id=f"process-b-{iteration}",
+                        ),
+                    )
+                )
+                outcomes = [results.get(timeout=30), results.get(timeout=30)]
 
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            futures = [
-                executor.submit(submit, first_app, f"winner-a-{iteration}"),
-                executor.submit(submit, second_app, f"winner-b-{iteration}"),
-            ]
-            outcomes = [future.result(timeout=15) for future in futures]
+                assert all("error" not in outcome for outcome in outcomes), outcomes
+                assert {outcome["iteration"] for outcome in outcomes} == {iteration}
+                assert len({outcome["pid"] for outcome in outcomes}) == 2
+                worker_pids.update(outcome["pid"] for outcome in outcomes)
+                assert sorted(outcome["status"] for outcome in outcomes) == [200, 409]
+                loser = next(outcome for outcome in outcomes if outcome["status"] == 409)
+                assert loser["body"]["detail"]["code"] == "already_decided"
+                assert sum(outcome["dispatchDelta"] for outcome in outcomes) == 1
 
-        assert sorted(status for status, _body in outcomes) == [200, 409]
-        loser = next(body for status, body in outcomes if status == 409)
-        assert loser["detail"]["code"] == "already_decided"
-        assert first_provider.dispatch_count + second_provider.dispatch_count == 1
-        verifier = SQLiteStore(database_path)
-        assert verifier.count_decisions(recovery_id) == 1
-        assert verifier.count_executions(recovery_id) == 1
-        assert verifier.get_receipt(recovery_id).provider_execution is True
-        assert len([event for event in verifier.list_events(recovery_id) if event.terminal]) == 1
+                verifier = SQLiteStore(database_path)
+                assert verifier.count_decisions(recovery_id) == 1
+                assert verifier.count_executions(recovery_id) == 1
+                assert verifier.get_receipt(recovery_id).provider_execution is True
+                assert len(
+                    [event for event in verifier.list_events(recovery_id) if event.terminal]
+                ) == 1
+                verifier.close()
+                with sqlite3.connect(database_path) as connection:
+                    assert connection.execute(
+                        "SELECT COUNT(*) FROM receipts WHERE recovery_id = ?",
+                        (recovery_id,),
+                    ).fetchone() == (1,)
+                    assert connection.execute(
+                        """
+                        SELECT COUNT(*) FROM executions
+                        WHERE recovery_id = ? AND provider_execution = 1
+                        """,
+                        (recovery_id,),
+                    ).fetchone() == (1,)
+    finally:
+        first_jobs.put(None)
+        second_jobs.put(None)
+        for process in processes:
+            process.join(timeout=30)
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=10)
+        for queue in (first_jobs, second_jobs, results):
+            queue.close()
+            queue.join_thread()
+        creator_store.close()
+
+    assert len(worker_pids) == 2
+    assert os.getpid() not in worker_pids
+    assert all(process.exitcode == 0 for process in processes)
 
 
 def test_same_decision_id_can_race_and_replay_one_result(tmp_path) -> None:

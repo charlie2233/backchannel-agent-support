@@ -300,7 +300,7 @@ class SQLiteStore:
 
     @staticmethod
     def _migrate_task3_pending_approvals(connection: sqlite3.Connection) -> None:
-        """Upgrade legacy envelopes without treating action hashes as consent."""
+        """Rebuild every legacy envelope table to the exact Task 5 contract."""
 
         columns = {
             cast(str, row["name"])
@@ -308,7 +308,9 @@ class SQLiteStore:
                 "PRAGMA table_info(pending_approvals)"
             ).fetchall()
         }
-        required = {
+        task5_columns = {
+            "tool_call_id",
+            "recovery_id",
             "sdk_version",
             "protocol_version",
             "agent_graph_version",
@@ -319,43 +321,54 @@ class SQLiteStore:
             "remedy_id",
             "consent_digest",
             "state_json",
+            "status",
+            "created_at",
+            "updated_at",
         }
-        if required <= columns:
+        if columns == task5_columns:
             return
 
-        if "state_json" in columns:
-            if "action_digest" not in columns:
-                connection.execute("ALTER TABLE pending_approvals ADD COLUMN action_digest TEXT")
-            if "remedy_id" not in columns:
-                connection.execute("ALTER TABLE pending_approvals ADD COLUMN remedy_id TEXT")
-            if "consent_digest" not in columns:
-                connection.execute("ALTER TABLE pending_approvals ADD COLUMN consent_digest TEXT")
-            source_action = (
-                "remedy_digest" if "remedy_digest" in columns else "'legacy-incompatible'"
-            )
-            connection.execute(
-                f"""
-                UPDATE pending_approvals
-                SET action_digest = COALESCE(action_digest, {source_action}),
-                    remedy_id = COALESCE(remedy_id, 'legacy-incompatible'),
-                    consent_digest = COALESCE(consent_digest, 'legacy-incompatible'),
-                    sdk_version = 'legacy-incompatible'
-                WHERE remedy_id IS NULL OR consent_digest IS NULL
-                """
-            )
-            return
-
-        if "serialized_state" not in columns:
+        required_legacy_columns = {
+            "tool_call_id",
+            "recovery_id",
+            "status",
+            "created_at",
+            "updated_at",
+        }
+        if not required_legacy_columns <= columns:
             raise RuntimeError("Unsupported pending approval schema")
+        if "state_json" in columns:
+            state_source = "state_json"
+        elif "serialized_state" in columns:
+            state_source = "serialized_state"
+        else:
+            raise RuntimeError("Unsupported pending approval schema")
+
+        def legacy_value(column: str, fallback: str = "'legacy-incompatible'") -> str:
+            if column not in columns:
+                return fallback
+            return f"COALESCE({column}, {fallback})"
+
+        if "action_digest" in columns:
+            action_source = legacy_value("action_digest")
+        elif "remedy_digest" in columns:
+            action_source = legacy_value("remedy_digest")
+        else:
+            action_source = "'legacy-incompatible'"
+        execution_mode_source = legacy_value(
+            "execution_mode",
+            "COALESCE((SELECT execution_mode FROM recoveries "
+            "WHERE recoveries.id = pending_approvals.recovery_id), 'sdk_stub')",
+        )
 
         connection.commit()
         connection.execute("PRAGMA foreign_keys = OFF")
         try:
             connection.execute("BEGIN IMMEDIATE")
-            connection.execute("DROP TABLE IF EXISTS pending_approvals_task4")
+            connection.execute("DROP TABLE IF EXISTS pending_approvals_task5")
             connection.execute(
                 """
-                CREATE TABLE pending_approvals_task4 (
+                CREATE TABLE pending_approvals_task5 (
                     tool_call_id TEXT PRIMARY KEY,
                     recovery_id TEXT NOT NULL REFERENCES recoveries(id) ON DELETE CASCADE,
                     sdk_version TEXT NOT NULL,
@@ -375,8 +388,8 @@ class SQLiteStore:
                 """
             )
             connection.execute(
-                """
-                INSERT INTO pending_approvals_task4 (
+                f"""
+                INSERT INTO pending_approvals_task5 (
                     tool_call_id, recovery_id, sdk_version, protocol_version,
                     agent_graph_version, definition_digest, root_trace_id,
                     execution_mode, action_digest, remedy_id, consent_digest,
@@ -387,19 +400,15 @@ class SQLiteStore:
                     tool_call_id,
                     recovery_id,
                     'legacy-incompatible',
-                    'legacy-incompatible',
-                    'legacy-incompatible',
-                    'legacy-incompatible',
-                    'legacy-incompatible',
-                    COALESCE(
-                        (SELECT execution_mode FROM recoveries
-                         WHERE recoveries.id = pending_approvals.recovery_id),
-                        'sdk_stub'
-                    ),
-                    'legacy-incompatible',
-                    'legacy-incompatible',
-                    'legacy-incompatible',
-                    serialized_state,
+                    {legacy_value("protocol_version")},
+                    {legacy_value("agent_graph_version")},
+                    {legacy_value("definition_digest")},
+                    {legacy_value("root_trace_id")},
+                    {execution_mode_source},
+                    {action_source},
+                    {legacy_value("remedy_id")},
+                    {legacy_value("consent_digest")},
+                    {state_source},
                     status,
                     created_at,
                     updated_at
@@ -408,7 +417,7 @@ class SQLiteStore:
             )
             connection.execute("DROP TABLE pending_approvals")
             connection.execute(
-                "ALTER TABLE pending_approvals_task4 RENAME TO pending_approvals"
+                "ALTER TABLE pending_approvals_task5 RENAME TO pending_approvals"
             )
             violations = connection.execute("PRAGMA foreign_key_check").fetchall()
             if violations:

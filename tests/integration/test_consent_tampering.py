@@ -201,9 +201,68 @@ def test_task4_pending_rows_are_preserved_but_marked_incompatible(tmp_path) -> N
     assert envelope.state_json == {"legacy": True}
     assert migrated.get_recovery("task4-recovery").pending_approval is None
     assert len(migrated.list_events("task4-recovery")) == 1
+
+    provider = HotelSimulator(store=migrated)
+    orchestrator = RecoveryOrchestrator(store=migrated, hotel_provider=provider)
+    current = asyncio.run(
+        orchestrator.start("hotel", execution_mode=ExecutionMode.SDK_STUB)
+    )
+    approval = current.recovery.pending_approval
+    assert approval is not None
+    response = asyncio.run(
+        orchestrator.approve_decision(
+            current.recovery.recovery_id,
+            ApprovalDecisionRequest(
+                clientDecisionId="post-task4-migration",
+                remedyId=approval.remedy_id,
+                remedyDigest=approval.remedy_digest,
+                toolCallId=approval.tool_call_id,
+            ),
+        )
+    )
+
+    assert response.status == "completed"
+    assert provider.dispatch_count == 1
+    migrated.close()
+
+    reopened = SQLiteStore(database_path)
+    assert reopened.get_pending_approval("task4-recovery").state_json == {
+        "legacy": True
+    }
+    assert reopened.get_receipt(current.recovery.recovery_id).provider_execution is True
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute("SELECT COUNT(*) FROM remedies").fetchone() == (1,)
+        pending_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(pending_approvals)"
+            ).fetchall()
+        }
+        assert pending_columns == {
+            "tool_call_id",
+            "recovery_id",
+            "sdk_version",
+            "protocol_version",
+            "agent_graph_version",
+            "definition_digest",
+            "root_trace_id",
+            "execution_mode",
+            "action_digest",
+            "remedy_id",
+            "consent_digest",
+            "state_json",
+            "status",
+            "created_at",
+            "updated_at",
+        }
+        assert connection.execute("SELECT COUNT(*) FROM pending_approvals").fetchone() == (
+            2,
+        )
+        assert connection.execute("SELECT COUNT(*) FROM remedies").fetchone() == (2,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM events WHERE recovery_id = 'task4-recovery'"
+        ).fetchone() == (1,)
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    reopened.close()
 
 
 def test_remedy_envelope_and_event_roll_back_as_one_atomic_transition(tmp_path) -> None:
