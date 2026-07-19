@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { StrictMode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -35,6 +35,416 @@ function stubHealthWithUnavailableRecovery() {
 }
 
 describe("Backchannel console", () => {
+  it("does not let a delayed terminal refresh replace a newer intentional SDK run", async () => {
+    const oldRecoveryId = "aaaaaaaa-2222-4333-8444-555555555555";
+    const newRecoveryId = "bbbbbbbb-2222-4333-8444-555555555555";
+    let settleOldRefresh: ((response: Response) => void) | undefined;
+    class ControlledEventSource {
+      static instances: ControlledEventSource[] = [];
+      onmessage: ((event: MessageEvent<string>) => void) | null = null;
+      onerror: ((event: Event) => void) | null = null;
+      close = vi.fn();
+
+      constructor(readonly url: string) {
+        ControlledEventSource.instances.push(this);
+      }
+    }
+    vi.stubGlobal("EventSource", ControlledEventSource);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/health") {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                backend: "stub",
+                liveReady: false,
+                providerBoundary: "demo_adapter_only",
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        if (url === "/api/recoveries") {
+          const { executionMode } = JSON.parse(String(init?.body)) as { executionMode: string };
+          const sdk = executionMode === "sdk_stub";
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                recoveryId: sdk ? newRecoveryId : oldRecoveryId,
+                scenarioId: "hotel",
+                executionMode,
+                modelIds: [],
+                rootTraceId: sdk ? "qa_trace_0123456789abcdef0123456789abcdef" : null,
+                status: "in_progress",
+                currentStep: sdk ? 2 : 1,
+                currentStepSummary: sdk
+                  ? "New SDK run remains authoritative."
+                  : "Old replay run is active.",
+                createdAt: "2026-07-19T12:00:00Z",
+                updatedAt: "2026-07-19T12:00:01Z",
+                pendingApproval: null,
+              }),
+              { status: 201, headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        if (url === `/api/recoveries/${oldRecoveryId}`) {
+          return new Promise<Response>((resolve) => {
+            settleOldRefresh = resolve;
+          });
+        }
+        if (url === `/api/recoveries/${oldRecoveryId}/receipt`) {
+          return Promise.resolve(new Response(null, { status: 503 }));
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+
+    render(<App />);
+    expect((await screen.findAllByText("Old replay run is active."))[0]).toBeVisible();
+    await waitFor(() => expect(ControlledEventSource.instances).toHaveLength(1));
+    const source = ControlledEventSource.instances[0];
+    expect(source?.url).toBe(`/api/recoveries/${oldRecoveryId}/events`);
+
+    act(() => {
+      source?.onmessage?.(
+        new MessageEvent("message", {
+          data: JSON.stringify({
+            recoveryId: oldRecoveryId,
+            seq: 8,
+            type: "recovery.completed",
+            terminal: true,
+            data: { summary: "Old recovery reached a terminal event." },
+            createdAt: "2026-07-19T12:00:02Z",
+          }),
+        }),
+      );
+    });
+    await waitFor(() => expect(settleOldRefresh).toBeTypeOf("function"));
+
+    fireEvent.click(screen.getByRole("button", { name: "Run SDK QA trace" }));
+    expect((await screen.findAllByText("New SDK run remains authoritative."))[0]).toBeVisible();
+
+    settleOldRefresh?.(
+      new Response(
+        JSON.stringify({
+          recoveryId: oldRecoveryId,
+          scenarioId: "hotel",
+          executionMode: "replay_fixture",
+          modelIds: [],
+          rootTraceId: null,
+          status: "completed",
+          currentStep: 5,
+          currentStepSummary: "Old terminal refresh must not win.",
+          createdAt: "2026-07-19T12:00:00Z",
+          updatedAt: "2026-07-19T12:00:03Z",
+          pendingApproval: null,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    await waitFor(() =>
+      expect(screen.getAllByText("New SDK run remains authoritative.")[0]).toBeVisible(),
+    );
+    expect(screen.queryByText("Old terminal refresh must not win.")).not.toBeInTheDocument();
+  });
+
+  it("clears a stale replay failure when an intentional SDK run succeeds", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/health") {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                backend: "stub",
+                liveReady: false,
+                providerBoundary: "demo_adapter_only",
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        if (url === "/api/recoveries") {
+          const { executionMode } = JSON.parse(String(init?.body)) as { executionMode: string };
+          if (executionMode === "replay_fixture") {
+            return Promise.resolve(new Response(null, { status: 503 }));
+          }
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                recoveryId: "bbbbbbbb-2222-4333-8444-555555555555",
+                scenarioId: "hotel",
+                executionMode: "sdk_stub",
+                modelIds: [],
+                rootTraceId: "qa_trace_0123456789abcdef0123456789abcdef",
+                status: "in_progress",
+                currentStep: 2,
+                currentStepSummary: "SDK run recovered the workspace.",
+                createdAt: "2026-07-19T12:00:00Z",
+                updatedAt: "2026-07-19T12:00:01Z",
+                pendingApproval: null,
+              }),
+              { status: 201, headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+
+    render(<App />);
+    expect(
+      await screen.findByText("The replay fixture could not be started. You can retry explicitly."),
+    ).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: "Run SDK QA trace" }));
+
+    expect((await screen.findAllByText("SDK run recovered the workspace."))[0]).toBeVisible();
+    expect(
+      screen.queryByText("The replay fixture could not be started. You can retry explicitly."),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps recovery B receipt visible when recovery A receipt resolves later", async () => {
+    const oldRecoveryId = "aaaaaaaa-2222-4333-8444-555555555555";
+    const newRecoveryId = "bbbbbbbb-2222-4333-8444-555555555555";
+    let settleOldReceipt: ((response: Response) => void) | undefined;
+    const snapshot = (recoveryId: string, executionMode: "replay_fixture" | "sdk_stub") => ({
+      recoveryId,
+      scenarioId: "hotel",
+      executionMode,
+      modelIds: [],
+      rootTraceId:
+        executionMode === "sdk_stub" ? "qa_trace_0123456789abcdef0123456789abcdef" : null,
+      status: "completed",
+      currentStep: 5,
+      currentStepSummary:
+        executionMode === "sdk_stub" ? "Recovery B completed." : "Recovery A completed.",
+      createdAt: "2026-07-19T12:00:00Z",
+      updatedAt: "2026-07-19T12:00:01Z",
+      pendingApproval: null,
+    });
+    const newReceipt = {
+      recoveryId: newRecoveryId,
+      executionMode: "sdk_stub",
+      status: "completed",
+      simulated: true,
+      providerExecution: true,
+      modelCall: false,
+      modelIds: [],
+      rootTraceId: "qa_trace_0123456789abcdef0123456789abcdef",
+      sdkVersion: "0.18.3",
+      protocolVersion: "backchannel.approval.v1",
+      agentGraphVersion: "backchannel.hotel-agent.v1",
+      definitionDigest: "b".repeat(64),
+      boundary:
+        "Deterministic Agents SDK model and demo hotel adapter only; no OpenAI model call, real booking, or payment change.",
+      providerResult: "New B receipt remains visible.",
+      authorizationSource: "Approved Agents SDK commit_remedy interruption.",
+      verificationResults: [
+        "Immediate pre-execution remedy digest matched the approved digest.",
+        "Temporary provider-dispatch permission revoked after the approved execution.",
+      ],
+      approvalCount: 1,
+      approvedRemedyDigest: `sha256:${"a".repeat(64)}`,
+    };
+    const oldReceipt = {
+      recoveryId: oldRecoveryId,
+      executionMode: "replay_fixture",
+      status: "simulated_completed",
+      simulated: true,
+      providerExecution: false,
+      modelCall: false,
+      modelIds: [],
+      rootTraceId: null,
+      sdkVersion: null,
+      protocolVersion: null,
+      agentGraphVersion: null,
+      definitionDigest: null,
+      boundary: "Simulated replay receipt — no model call or provider execution.",
+      providerResult: "Old A replay receipt.",
+      authorizationSource: "Recorded fixture",
+      verificationResults: ["No provider dispatch occurred."],
+      approvalCount: 0,
+      approvedRemedyDigest: null,
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/health") {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                backend: "stub",
+                liveReady: false,
+                providerBoundary: "demo_adapter_only",
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        if (url === "/api/recoveries") {
+          const { executionMode } = JSON.parse(String(init?.body)) as {
+            executionMode: "replay_fixture" | "sdk_stub";
+          };
+          return Promise.resolve(
+            new Response(
+              JSON.stringify(
+                snapshot(
+                  executionMode === "sdk_stub" ? newRecoveryId : oldRecoveryId,
+                  executionMode,
+                ),
+              ),
+              { status: 201, headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        if (url === `/api/recoveries/${oldRecoveryId}/receipt`) {
+          return new Promise<Response>((resolve) => {
+            settleOldReceipt = resolve;
+          });
+        }
+        if (url === `/api/recoveries/${newRecoveryId}/receipt`) {
+          return Promise.resolve(
+            new Response(JSON.stringify(newReceipt), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            }),
+          );
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+
+    render(<App />);
+    expect((await screen.findAllByText("Recovery A completed."))[0]).toBeVisible();
+    await waitFor(() => expect(settleOldReceipt).toBeTypeOf("function"));
+
+    fireEvent.click(screen.getByRole("button", { name: "Run SDK QA trace" }));
+    expect(await screen.findByText("New B receipt remains visible.")).toBeVisible();
+
+    await act(async () => {
+      settleOldReceipt?.(
+        new Response(JSON.stringify(oldReceipt), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText("New B receipt remains visible.")).toBeVisible();
+    expect(screen.queryByText("Old A replay receipt.")).not.toBeInTheDocument();
+  });
+
+  it("keeps the intentional SDK QA run when the automatic replay resolves late", async () => {
+    let settleReplay: ((response: Response) => void) | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/health") {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                backend: "stub",
+                liveReady: false,
+                providerBoundary: "demo_adapter_only",
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        if (url === "/api/recoveries") {
+          const body = JSON.parse(String(init?.body)) as { executionMode: string };
+          if (body.executionMode === "replay_fixture") {
+            return new Promise<Response>((resolve) => {
+              settleReplay = resolve;
+            });
+          }
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                recoveryId: "11111111-2222-4333-8444-555555555555",
+                scenarioId: "hotel",
+                executionMode: "sdk_stub",
+                modelIds: [],
+                rootTraceId: "qa_trace_0123456789abcdef0123456789abcdef",
+                status: "pending_approval",
+                currentStep: 3,
+                currentStepSummary: "SDK consent is authoritative.",
+                createdAt: "2026-07-19T12:00:00Z",
+                updatedAt: "2026-07-19T12:00:01Z",
+                pendingApproval: {
+                  remedyId: "remedy-sdk",
+                  remedyDigest: `sha256:${"a".repeat(64)}`,
+                  terms: {
+                    bookingId: "booking-sdk",
+                    action: "replace_room",
+                    replacement: { fromRoomType: "double", toRoomType: "king" },
+                    stay: { checkIn: "2026-08-14", checkOut: "2026-08-16" },
+                    currency: "USD",
+                  },
+                  costDeltaMinor: 0,
+                  changedFields: ["room_type"],
+                  providerCommitments: ["No additional charge"],
+                  expiry: "2026-08-01T18:45:30Z",
+                  hardConstraintSatisfied: true,
+                  delegatedAuthoritySatisfied: true,
+                  toolCallId: "server-call",
+                  executionStarted: false,
+                },
+              }),
+              { status: 201, headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+
+    render(<App />);
+    const sdkAction = await screen.findByRole(
+      "button",
+      { name: "Run SDK QA trace" },
+      { timeout: 3_000 },
+    );
+    fireEvent.click(sdkAction);
+    expect((await screen.findAllByText("SDK consent is authoritative."))[0]).toBeVisible();
+    expect(screen.getByText(/viewing the deterministic SDK QA trace/i)).toBeVisible();
+
+    settleReplay?.(
+      new Response(
+        JSON.stringify({
+          recoveryId: "aaaaaaaa-2222-4333-8444-555555555555",
+          scenarioId: "hotel",
+          executionMode: "replay_fixture",
+          modelIds: [],
+          rootTraceId: null,
+          status: "in_progress",
+          currentStep: 1,
+          currentStepSummary: "Late replay must not replace SDK consent.",
+          createdAt: "2026-07-19T12:00:00Z",
+          updatedAt: "2026-07-19T12:00:02Z",
+          pendingApproval: null,
+        }),
+        { status: 201, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    await waitFor(() =>
+      expect(screen.getAllByText("SDK consent is authoritative.")[0]).toBeVisible(),
+    );
+    expect(screen.queryAllByText("Late replay must not replace SDK consent.")).toHaveLength(0);
+  });
+
   it("runs API quota only through the zero-approval SDK stub and renders its proof", async () => {
     const requests: Array<{ scenarioId: string; executionMode: string }> = [];
     vi.stubGlobal(
@@ -197,7 +607,7 @@ describe("Backchannel console", () => {
     ]);
   });
 
-  it("coalesces rapid quota clicks, keeps SDK provenance on failure, and permits retry", async () => {
+  it("coalesces rapid quota clicks, waits for server provenance on failure, and permits retry", async () => {
     const quotaRequests: string[] = [];
     let settleFirstQuotaRequest: ((response: Response) => void) | undefined;
     vi.stubGlobal(
@@ -277,7 +687,8 @@ describe("Backchannel console", () => {
     fireEvent.click(quotaButton);
 
     expect(quotaRequests).toEqual(["sdk_stub"]);
-    expect(screen.getByText("SDK QA workspace")).toBeVisible();
+    expect(screen.getByText("Awaiting run evidence")).toBeVisible();
+    expect(screen.queryByText("SDK QA workspace")).not.toBeInTheDocument();
     expect(screen.getByText("Loading deterministic trace")).toBeVisible();
     settleFirstQuotaRequest?.(new Response(null, { status: 500 }));
 
@@ -287,7 +698,8 @@ describe("Backchannel console", () => {
       }),
     ).toHaveTextContent("The deterministic quota trace could not be loaded.");
     expect(quotaRequests).toEqual(["sdk_stub"]);
-    expect(screen.getByText("SDK QA workspace")).toBeVisible();
+    expect(screen.getByText("Awaiting run evidence")).toBeVisible();
+    expect(screen.queryByText("SDK QA workspace")).not.toBeInTheDocument();
     expect(screen.getByText("Quota proof unavailable")).toBeVisible();
     expect(screen.getByText("No completed quota receipt is being shown.")).toBeVisible();
     expect(screen.queryByText("Completed fixture")).not.toBeInTheDocument();
@@ -533,11 +945,10 @@ describe("Backchannel console", () => {
   });
 
   it.each([
-    { backend: "stub", liveReady: true, executionMode: "openai_live" },
-    { backend: "openai", liveReady: false, executionMode: "openai_live" },
-    { backend: "openai", liveReady: true, executionMode: "sdk_stub" },
+    { backend: "stub", liveReady: true, executionMode: "replay_fixture" },
+    { backend: "openai", liveReady: false, executionMode: "replay_fixture" },
   ] as const)(
-    "does not render GPT-5.6 agents for $backend/$liveReady/$executionMode mismatch",
+    "does not render GPT-5.6 agents for unverified $backend/$liveReady runtime",
     async ({ backend, liveReady, executionMode }) => {
       vi.stubGlobal(
         "fetch",
@@ -562,14 +973,8 @@ describe("Backchannel console", () => {
                   recoveryId: "11111111-2222-4333-8444-555555555555",
                   scenarioId: "hotel",
                   executionMode,
-                  modelIds:
-                    executionMode === "openai_live"
-                      ? ["gpt-5.6-luna", "gpt-5.6-terra"]
-                      : [],
-                  rootTraceId:
-                    executionMode === "openai_live"
-                      ? "trace_0123456789abcdef0123456789abcdef"
-                      : "qa_trace_0123456789abcdef0123456789abcdef",
+                  modelIds: [],
+                  rootTraceId: null,
                   status: "in_progress",
                   currentStep: 0,
                   currentStepSummary: "Recovery started.",
@@ -587,8 +992,7 @@ describe("Backchannel console", () => {
 
       render(<App />);
 
-      expect(await screen.findByText(executionMode === "sdk_stub" ? "SDK stub" : "OpenAI live"))
-        .toBeVisible();
+      expect(await screen.findByText("Replay fixture")).toBeVisible();
       expect(screen.queryByText("GPT-5.6 agents")).not.toBeInTheDocument();
     },
   );
@@ -599,7 +1003,7 @@ describe("Backchannel console", () => {
       const digest = `sha256:${"a".repeat(64)}`;
       vi.stubGlobal(
         "fetch",
-        vi.fn().mockImplementation((input: string | URL | Request) => {
+        vi.fn().mockImplementation((input: string | URL | Request, init?: RequestInit) => {
           const url = String(input);
           if (url === "/health") {
             return Promise.resolve(
@@ -614,6 +1018,12 @@ describe("Backchannel console", () => {
             );
           }
           if (url === "/api/recoveries") {
+            const { executionMode } = JSON.parse(String(init?.body)) as {
+              executionMode: string;
+            };
+            if (executionMode === "replay_fixture") {
+              return Promise.resolve(new Response(null, { status: 503 }));
+            }
             return Promise.resolve(
               new Response(
                 JSON.stringify({
@@ -660,8 +1070,10 @@ describe("Backchannel console", () => {
 
       render(<App />);
 
+      fireEvent.click(await screen.findByRole("button", { name: "Run SDK QA trace" }));
+
       expect(
-        await screen.findByRole("heading", { name: "Decide exact remedy" }),
+        await screen.findByRole("heading", { name: "Approve exact remedy" }),
       ).toBeVisible();
       expect(await screen.findByText("SDK stub")).toBeVisible();
       expect(screen.getByText("server-booking")).toBeVisible();
@@ -695,7 +1107,7 @@ describe("Backchannel console", () => {
       expect.stringContaining("Verify & seal"),
     ]);
 
-    expect(await screen.findByText("Replay fixture")).toBeInTheDocument();
+    expect(await screen.findByText("Awaiting run evidence")).toBeInTheDocument();
     expect(screen.queryByText(/GPT-5\.6 agents/i)).not.toBeInTheDocument();
   });
 
@@ -758,21 +1170,31 @@ describe("Backchannel console", () => {
       label: "Completed",
       authorization: "Exact remedy approval was accepted by the server.",
       execution: "Approved provider dispatch completed.",
-      verification: "Completed server evidence sealed.",
+      verification: "Provider verification and receipt sealing were recorded.",
+      stepLabels: ["Recorded", "Recorded", "Recorded", "Recorded", "Recorded", "Recorded"],
     },
     {
       status: "closed_without_action",
       label: "Closed without action",
       authorization: "The exact remedy was declined and its permission was revoked.",
       execution: "Provider dispatch did not begin.",
-      verification: "Closed without action server evidence sealed.",
+      verification: "Cancellation evidence was sealed by the server.",
+      stepLabels: ["Recorded", "Recorded", "Recorded", "Declined", "Not run", "Closed"],
     },
     {
       status: "outcome_unknown",
       label: "Outcome unknown",
       authorization: "The decline was recorded after dispatch may have begun.",
       execution: "Provider dispatch may have begun; its outcome is unknown.",
-      verification: "Outcome unknown server evidence sealed.",
+      verification: "Uncertain-outcome evidence was sealed by the server.",
+      stepLabels: [
+        "Recorded",
+        "Recorded",
+        "Recorded",
+        "Declined",
+        "Unknown",
+        "Outcome unknown",
+      ],
     },
   ] as const)("renders $status as a truthful terminal server outcome", async ({
     status,
@@ -780,6 +1202,7 @@ describe("Backchannel console", () => {
     authorization,
     execution,
     verification,
+    stepLabels,
   }) => {
     vi.stubGlobal(
       "fetch",
@@ -803,9 +1226,9 @@ describe("Backchannel console", () => {
               JSON.stringify({
                 recoveryId: "11111111-2222-4333-8444-555555555555",
                 scenarioId: "hotel",
-                executionMode: "sdk_stub",
+                executionMode: "replay_fixture",
                 modelIds: [],
-                rootTraceId: "qa_trace_0123456789abcdef0123456789abcdef",
+                rootTraceId: null,
                 status,
                 currentStep: 5,
                 currentStepSummary: `${label} server evidence sealed.`,
@@ -823,10 +1246,11 @@ describe("Backchannel console", () => {
 
     render(<App />);
 
-    expect(await screen.findByText(label)).toBeVisible();
-    expect(screen.getByText(status)).toBeVisible();
+    expect((await screen.findAllByText(label))[0]).toBeVisible();
     const lifecycle = screen.getByRole("list", { name: "Recovery lifecycle" });
-    expect(within(lifecycle).getAllByText("Recorded")).toHaveLength(6);
+    expect(within(lifecycle).getAllByRole("listitem").map((item) => item.textContent)).toEqual(
+      stepLabels.map((stepLabel) => expect.stringContaining(stepLabel)),
+    );
     expect(within(lifecycle).getByText(authorization)).toBeVisible();
     expect(within(lifecycle).getByText(execution)).toBeVisible();
     expect(within(lifecycle).getByText(verification)).toBeVisible();

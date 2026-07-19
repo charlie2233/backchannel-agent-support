@@ -220,6 +220,14 @@ def test_public_sdk_stub_creation_and_typed_approval_complete_once(
     receipt = client.get(f"/api/recoveries/{recovery_id}/receipt").json()
     assert receipt["approvedRemedyDigest"] == payload["remedyDigest"]
     assert receipt["providerExecution"] is True
+    assert (
+        "Immediate pre-execution remedy digest matched the approved digest."
+        in receipt["verificationResults"]
+    )
+    assert (
+        "Temporary provider-dispatch permission revoked after the approved execution."
+        in receipt["verificationResults"]
+    )
     public_output = json.dumps({"snapshot": completed, "receipt": receipt}).lower()
     assert "state_json" not in public_output
     assert "statejson" not in public_output

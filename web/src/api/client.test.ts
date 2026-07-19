@@ -6,6 +6,8 @@ import {
   LIVE_ADMISSION_MESSAGES,
   LiveAdmissionError,
   createRecovery,
+  getRecovery,
+  getReceipt,
   postDecision,
 } from "./client";
 
@@ -177,4 +179,211 @@ describe("postDecision public errors", () => {
       ).rejects.toThrow(`Decision request failed with status ${status}`);
     },
   );
+});
+
+describe("getReceipt runtime validation", () => {
+  const validReceipt = {
+    recoveryId: "11111111-2222-4333-8444-555555555555",
+    executionMode: "sdk_stub",
+    status: "completed",
+    simulated: true,
+    providerExecution: true,
+    modelCall: false,
+    modelIds: [],
+    rootTraceId: "qa_trace_0123456789abcdef0123456789abcdef",
+    sdkVersion: "0.18.3",
+    protocolVersion: "backchannel.approval.v1",
+    agentGraphVersion: "backchannel.hotel-agent.v1",
+    definitionDigest: "b".repeat(64),
+    boundary:
+      "Deterministic Agents SDK model and demo hotel adapter only; no OpenAI model call, real booking, or payment change.",
+    providerResult: "Demo adapter confirmed the authorized action.",
+    authorizationSource: "Approved Agents SDK commit_remedy interruption.",
+    verificationResults: [
+      "Immediate pre-execution remedy digest matched the approved digest.",
+      "Temporary provider-dispatch permission revoked after the approved execution.",
+    ],
+    approvalCount: 1,
+    approvedRemedyDigest: `sha256:${"a".repeat(64)}`,
+  };
+
+  it("accepts a complete mode-bound terminal receipt", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify(validReceipt), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+
+    await expect(getReceipt(validReceipt.recoveryId)).resolves.toEqual(validReceipt);
+  });
+
+  it("accepts recorded live snapshot model IDs without hard-coding a model family", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            recoveryId: validReceipt.recoveryId,
+            scenarioId: "hotel",
+            executionMode: "openai_live",
+            modelIds: ["recorded-model-a", "recorded-model-b"],
+            rootTraceId: "trace_0123456789abcdef0123456789abcdef",
+            status: "in_progress",
+            currentStep: 0,
+            currentStepSummary: "Live recovery started.",
+            createdAt: "2026-07-19T12:00:00Z",
+            updatedAt: "2026-07-19T12:00:01Z",
+            pendingApproval: null,
+          }),
+          { status: 201, headers: { "Content-Type": "application/json" } },
+        ),
+      ),
+    );
+
+    await expect(createRecovery("hotel", "openai_live")).resolves.toEqual(
+      expect.objectContaining({ modelIds: ["recorded-model-a", "recorded-model-b"] }),
+    );
+  });
+
+  it("rejects a receipt returned for another recovery", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            ...validReceipt,
+            recoveryId: "99999999-2222-4333-8444-555555555555",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      ),
+    );
+
+    await expect(getReceipt(validReceipt.recoveryId)).rejects.toThrow(
+      "Receipt response did not match the receipt contract",
+    );
+  });
+
+  it("accepts a canonical zero-approval SDK quota receipt", async () => {
+    const quotaReceipt = {
+      ...validReceipt,
+      approvalCount: 0,
+      approvedRemedyDigest: null,
+      boundary:
+        "Deterministic Agents SDK stub and demo quota adapter only; no OpenAI model call or real quota change.",
+      providerResult:
+        "Demo quota adapter verified 1200 units against a temporary 1250-unit US-region ceiling; no real quota was changed.",
+      authorizationSource:
+        "Predelegated API quota policy: US-only, at most 500 USD minor units, for at most 900 seconds.",
+      verificationResults: [
+        "Provider proved the baseline quota ceiling at 1000 units.",
+        "Temporary US-region burst granted: 250 units for 900 seconds.",
+        "All hard constraints remained satisfied.",
+        "Extra cost of 300 USD minor units stayed within the delegated 500-unit limit.",
+        "Approval count is zero; no human interruption was created.",
+        "Execution verified at an effective ceiling of 1250 units.",
+        "Temporary quota permission revoked; baseline ceiling restored to 1000 units.",
+      ],
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify(quotaReceipt), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+
+    await expect(getReceipt(quotaReceipt.recoveryId)).resolves.toEqual(quotaReceipt);
+  });
+
+  it.each([
+    { name: "an extra public field", update: { leakedState: "serialized" } },
+    { name: "a replay model claim", update: { executionMode: "replay_fixture", rootTraceId: null } },
+    { name: "an invalid definition digest", update: { definitionDigest: "not-a-digest" } },
+  ])("rejects $name instead of rendering unvalidated evidence", async ({ update }) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ ...validReceipt, ...update }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+
+    await expect(getReceipt(validReceipt.recoveryId)).rejects.toThrow(
+      "Receipt response did not match the receipt contract",
+    );
+  });
+});
+
+describe("recovery response correlation", () => {
+  const requestedRecoveryId = "11111111-2222-4333-8444-555555555555";
+  const validSnapshot = {
+    recoveryId: requestedRecoveryId,
+    scenarioId: "hotel",
+    executionMode: "sdk_stub",
+    modelIds: [],
+    rootTraceId: "qa_trace_0123456789abcdef0123456789abcdef",
+    status: "in_progress",
+    currentStep: 1,
+    currentStepSummary: "Server recovery is active.",
+    createdAt: "2026-07-19T12:00:00Z",
+    updatedAt: "2026-07-19T12:00:01Z",
+    pendingApproval: null,
+  };
+
+  it("rejects a shape-valid GET response for a different recovery", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            ...validSnapshot,
+            recoveryId: "99999999-2222-4333-8444-555555555555",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      ),
+    );
+
+    await expect(getRecovery(requestedRecoveryId)).rejects.toThrow(
+      "Recovery response did not match the requested recovery",
+    );
+  });
+
+  it.each([
+    {
+      name: "scenario",
+      response: { ...validSnapshot, scenarioId: "api-quota" },
+    },
+    {
+      name: "execution mode",
+      response: {
+        ...validSnapshot,
+        executionMode: "replay_fixture",
+        rootTraceId: null,
+      },
+    },
+  ])("rejects a shape-valid create response for another $name", async ({ response }) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify(response), {
+          status: 201,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+
+    await expect(createRecovery("hotel", "sdk_stub")).rejects.toThrow(
+      "Recovery response did not match the requested creation",
+    );
+  });
 });

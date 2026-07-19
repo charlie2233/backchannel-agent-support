@@ -99,8 +99,10 @@ def test_decline_seals_zero_execution_terminal_evidence(rejection_client: Any) -
         "User declined the exact Agents SDK commit_remedy interruption."
     )
     assert receipt["verificationResults"] == [
+        "Human consent requested.",
+        "Remedy declined by operator.",
         "Exact interruption rejected.",
-        "No replacement remedy selected.",
+        "No replacement action selected.",
         "Execution count is zero.",
         "Provider dispatch did not begin.",
         "Temporary permission revoked.",
@@ -174,8 +176,12 @@ def test_decline_after_approval_may_have_begun_marks_outcome_unknown(
     assert receipt["providerExecution"] is None
     assert "may have begun" in receipt["providerResult"]
     assert "cancellation was not claimed" in receipt["authorizationSource"]
+    assert "Execution count is zero." not in receipt["verificationResults"]
+    assert "Provider dispatch did not begin." not in receipt["verificationResults"]
+    assert "Cancellation receipt sealed." not in receipt["verificationResults"]
     assert store.count_executions(recovery_id) == 0
     assert provider.dispatch_count == 0
     terminal_events = [event for event in store.list_events(recovery_id) if event.terminal]
     assert len(terminal_events) == 1
     assert terminal_events[0].type == "recovery.outcome_unknown"
+    assert "executionCount" not in terminal_events[0].data

@@ -24,8 +24,10 @@ def test_keyless_stub_smoke_proves_approve_and_decline(
     assert output["sdkDeclineExecutionCount"] == 0
     assert output["sdkDeclineProviderDispatchCount"] == 0
     assert output["sdkDeclineVerificationResults"] == [
+        "Human consent requested.",
+        "Remedy declined by operator.",
         "Exact interruption rejected.",
-        "No replacement remedy selected.",
+        "No replacement action selected.",
         "Execution count is zero.",
         "Provider dispatch did not begin.",
         "Temporary permission revoked.",

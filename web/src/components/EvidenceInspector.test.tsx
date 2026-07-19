@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { DECISION_CAPACITY_MESSAGE } from "../api/client";
@@ -55,6 +55,23 @@ afterEach(() => {
 });
 
 describe("EvidenceInspector exact consent", () => {
+  it("keeps the pending tool-call ID visible before collapsed mobile technical evidence", () => {
+    const { container } = render(
+      <EvidenceInspector
+        mobile
+        open={false}
+        scenario={recoveryScenarios[0]}
+        snapshot={pendingSnapshot()}
+      />,
+    );
+
+    const technical = container.querySelector("details");
+    expect(technical).not.toBeNull();
+    expect(technical).not.toHaveAttribute("open");
+    expect(within(technical as HTMLElement).queryByText("call-server-742")).not.toBeInTheDocument();
+    expect(screen.getByText("call-server-742")).toBeInTheDocument();
+  });
+
   it("renders every consent value from the supplied server snapshot", () => {
     render(
       <EvidenceInspector
@@ -64,9 +81,9 @@ describe("EvidenceInspector exact consent", () => {
     );
 
     const inspector = screen.getByRole("complementary", {
-      name: "Decide exact remedy",
+      name: "Approve exact remedy",
     });
-    expect(within(inspector).getByRole("heading", { name: "Decide exact remedy" })).toBeVisible();
+    expect(within(inspector).getByRole("heading", { name: "Approve exact remedy" })).toBeVisible();
     expect(
       within(inspector).getByText("11111111-2222-4333-8444-555555555555"),
     ).toBeVisible();
@@ -252,6 +269,232 @@ describe("EvidenceInspector exact consent", () => {
     await waitFor(() => expect(onServerSuccess).toHaveBeenCalledTimes(1));
     expect(
       screen.getByText("Decline accepted by the server. Refreshing recovery evidence."),
+    ).toBeVisible();
+  });
+
+  it("keeps a server-accepted decision locked when refreshed evidence is unavailable", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            action: "approve",
+            clientDecisionId: "decision-refresh-failure-742",
+            recoveryId: "11111111-2222-4333-8444-555555555555",
+            status: "completed",
+            approvedRemedyDigest: fullDigest,
+            executionStarted: true,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      ),
+    );
+    render(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={pendingSnapshot()}
+        clientDecisionIdFactory={() => "decision-refresh-failure-742"}
+        onServerSuccess={vi.fn().mockRejectedValue(new Error("refresh unavailable"))}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Approve remedy" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Approval accepted, but refreshed recovery evidence is unavailable.",
+    );
+    expect(
+      screen.getByText("Approval accepted by the server. Refreshing recovery evidence."),
+    ).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Approve remedy" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Decline" })).not.toBeInTheDocument();
+  });
+
+  it("ignores a late decision from recovery A while recovery B is submitting", async () => {
+    let resolveA: ((response: Response) => void) | undefined;
+    let resolveB: ((response: Response) => void) | undefined;
+    const fetchMock = vi.fn().mockImplementation((_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { clientDecisionId: string };
+      return new Promise<Response>((resolve) => {
+        if (body.clientDecisionId === "decision-a") resolveA = resolve;
+        else resolveB = resolve;
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const idFactory = vi
+      .fn<() => string>()
+      .mockReturnValueOnce("decision-a")
+      .mockReturnValueOnce("decision-b");
+    const snapshotA = pendingSnapshot();
+    const snapshotB: RecoverySnapshot = {
+      ...pendingSnapshot(),
+      recoveryId: "bbbbbbbb-2222-4333-8444-555555555555",
+      currentStepSummary: "Recovery B awaits its own decision.",
+      pendingApproval: {
+        ...pendingSnapshot().pendingApproval!,
+        remedyId: "remedy-server-b",
+        toolCallId: "call-server-b",
+      },
+    };
+    const onServerSuccess = vi.fn().mockResolvedValue(undefined);
+    const { rerender } = render(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={snapshotA}
+        clientDecisionIdFactory={idFactory}
+        onServerSuccess={onServerSuccess}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Approve remedy" }));
+    rerender(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={snapshotB}
+        clientDecisionIdFactory={idFactory}
+        onServerSuccess={onServerSuccess}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Approve remedy" })).not.toBeDisabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Approve remedy" }));
+    expect(screen.getByRole("button", { name: "Submitting approval…" })).toBeDisabled();
+
+    resolveA?.(
+      new Response(
+        JSON.stringify({
+          action: "approve",
+          clientDecisionId: "decision-a",
+          recoveryId: snapshotA.recoveryId,
+          status: "completed",
+          approvedRemedyDigest: fullDigest,
+          executionStarted: true,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole("button", { name: "Submitting approval…" })).toBeDisabled();
+    expect(screen.queryByText(/accepted by the server/i)).not.toBeInTheDocument();
+    expect(onServerSuccess).not.toHaveBeenCalled();
+
+    resolveB?.(
+      new Response(
+        JSON.stringify({
+          action: "approve",
+          clientDecisionId: "decision-b",
+          recoveryId: snapshotB.recoveryId,
+          status: "completed",
+          approvedRemedyDigest: fullDigest,
+          executionStarted: true,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    expect(
+      await screen.findByText("Approval accepted by the server. Refreshing recovery evidence."),
+    ).toBeVisible();
+    expect(onServerSuccess).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: "Approve remedy" })).not.toBeInTheDocument();
+  });
+
+  it("ignores an original recovery A decision after switching A to B to A", async () => {
+    let resolveOriginalA: ((response: Response) => void) | undefined;
+    let resolveNewA: ((response: Response) => void) | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((_input: string | URL | Request, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body)) as { clientDecisionId: string };
+        return new Promise<Response>((resolve) => {
+          if (body.clientDecisionId === "decision-original-a") resolveOriginalA = resolve;
+          else resolveNewA = resolve;
+        });
+      }),
+    );
+    const idFactory = vi
+      .fn<() => string>()
+      .mockReturnValueOnce("decision-original-a")
+      .mockReturnValueOnce("decision-new-a");
+    const snapshotA = pendingSnapshot();
+    const snapshotB: RecoverySnapshot = {
+      ...pendingSnapshot(),
+      recoveryId: "bbbbbbbb-2222-4333-8444-555555555555",
+      currentStepSummary: "Recovery B transition.",
+      pendingApproval: {
+        ...pendingSnapshot().pendingApproval!,
+        remedyId: "remedy-server-b",
+        toolCallId: "call-server-b",
+      },
+    };
+    const { rerender } = render(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={snapshotA}
+        clientDecisionIdFactory={idFactory}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Approve remedy" }));
+    rerender(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={snapshotB}
+        clientDecisionIdFactory={idFactory}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Approve remedy" })).not.toBeDisabled(),
+    );
+    rerender(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={snapshotA}
+        clientDecisionIdFactory={idFactory}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Approve remedy" })).not.toBeDisabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Approve remedy" }));
+
+    resolveOriginalA?.(
+      new Response(
+        JSON.stringify({
+          action: "approve",
+          clientDecisionId: "decision-original-a",
+          recoveryId: snapshotA.recoveryId,
+          status: "completed",
+          approvedRemedyDigest: fullDigest,
+          executionStarted: true,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.getByRole("button", { name: "Submitting approval…" })).toBeDisabled();
+    expect(screen.queryByText(/accepted by the server/i)).not.toBeInTheDocument();
+
+    resolveNewA?.(
+      new Response(
+        JSON.stringify({
+          action: "approve",
+          clientDecisionId: "decision-new-a",
+          recoveryId: snapshotA.recoveryId,
+          status: "completed",
+          approvedRemedyDigest: fullDigest,
+          executionStarted: true,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    expect(
+      await screen.findByText("Approval accepted by the server. Refreshing recovery evidence."),
     ).toBeVisible();
   });
 

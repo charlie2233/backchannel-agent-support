@@ -69,6 +69,33 @@ export interface RecoverySnapshot {
   pendingApproval: PendingApproval | null;
 }
 
+export type ReceiptStatus =
+  | "completed"
+  | "simulated_completed"
+  | "closed_without_action"
+  | "outcome_unknown";
+
+export interface RecoveryReceipt {
+  recoveryId: string;
+  executionMode: ExecutionMode;
+  status: ReceiptStatus;
+  simulated: boolean;
+  providerExecution: boolean | null;
+  modelCall: boolean;
+  modelIds: string[];
+  rootTraceId: string | null;
+  sdkVersion: string | null;
+  protocolVersion: string | null;
+  agentGraphVersion: string | null;
+  definitionDigest: string | null;
+  boundary: string;
+  providerResult: string;
+  authorizationSource: string;
+  verificationResults: string[];
+  approvalCount: number;
+  approvedRemedyDigest: `sha256:${string}` | null;
+}
+
 export interface ApprovalDecisionRequest {
   action: DecisionAction;
   clientDecisionId: string;

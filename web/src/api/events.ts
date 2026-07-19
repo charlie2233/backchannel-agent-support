@@ -13,6 +13,20 @@ interface EventSourceContract {
   close(): void;
 }
 
+function hasExactKeys(value: Record<string, unknown>, keys: ReadonlyArray<string>): boolean {
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+
+function isUtcTimestamp(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    (value.endsWith("Z") || value.endsWith("+00:00")) &&
+    !Number.isNaN(Date.parse(value))
+  );
+}
+
 export type EventSourceFactory = (url: string) => EventSourceContract;
 
 export interface RecoveryEventHandlers {
@@ -26,6 +40,7 @@ function isRecoveryEvent(value: unknown): value is RecoveryEvent {
   }
   const candidate = value as Record<string, unknown>;
   return (
+    hasExactKeys(candidate, ["recoveryId", "seq", "type", "terminal", "data", "createdAt"]) &&
     typeof candidate.recoveryId === "string" &&
     Number.isInteger(candidate.seq) &&
     typeof candidate.seq === "number" &&
@@ -35,7 +50,7 @@ function isRecoveryEvent(value: unknown): value is RecoveryEvent {
     typeof candidate.data === "object" &&
     candidate.data !== null &&
     !Array.isArray(candidate.data) &&
-    typeof candidate.createdAt === "string"
+    isUtcTimestamp(candidate.createdAt)
   );
 }
 

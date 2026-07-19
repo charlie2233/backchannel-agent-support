@@ -174,8 +174,10 @@ def _run_smoke() -> None:
             assert decline_receipt.approved_remedy_digest is None
             assert decline_receipt.provider_result == "Provider dispatch did not begin."
             assert decline_receipt.verification_results == [
+                "Human consent requested.",
+                "Remedy declined by operator.",
                 "Exact interruption rejected.",
-                "No replacement remedy selected.",
+                "No replacement action selected.",
                 "Execution count is zero.",
                 "Provider dispatch did not begin.",
                 "Temporary permission revoked.",

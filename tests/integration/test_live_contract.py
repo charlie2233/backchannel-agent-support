@@ -444,6 +444,14 @@ def test_live_graph_uses_one_redacted_root_and_resumes_with_durable_provenance(
         assert receipt.agent_graph_version == envelope.agent_graph_version
         assert receipt.definition_digest == envelope.definition_digest
         assert "demo hotel adapter" in receipt.boundary.lower()
+        assert (
+            "Immediate pre-execution remedy digest matched the approved digest."
+            in receipt.verification_results
+        )
+        assert (
+            "Temporary provider-dispatch permission revoked after the approved execution."
+            in receipt.verification_results
+        )
         assert len(capture.started_traces) == 1
         assert {span.trace_id for span in capture.ended_spans} == {snapshot.root_trace_id}
         for span in capture.ended_spans:

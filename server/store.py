@@ -1908,8 +1908,13 @@ class SQLiteStore:
             providerResult=provider_result,
             authorizationSource="Approved Agents SDK commit_remedy interruption.",
             verificationResults=[
+                "Immediate pre-execution remedy digest matched the approved digest.",
                 "Demo provider dispatch returned confirmed.",
                 "Provider result stored under one idempotency key.",
+                (
+                    "Temporary provider-dispatch permission revoked after the "
+                    "approved execution."
+                ),
             ],
             approvedRemedyDigest=execution.remedy_digest,
         )
@@ -2197,8 +2202,10 @@ class SQLiteStore:
                     "User declined the exact Agents SDK commit_remedy interruption."
                 )
                 verification_results = [
+                    "Human consent requested.",
+                    "Remedy declined by operator.",
                     "Exact interruption rejected.",
-                    "No replacement remedy selected.",
+                    "No replacement action selected.",
                     "Execution count is zero.",
                     "Provider dispatch did not begin.",
                     "Temporary permission revoked.",
@@ -2260,11 +2267,12 @@ class SQLiteStore:
             terminal_data: dict[str, JsonValue] = {
                 "recoveryId": claim.recovery_id,
                 "executionMode": receipt.execution_mode.value,
-                "executionCount": len(execution_rows),
                 "providerExecution": receipt.provider_execution,
                 "phase": "Verify & seal",
                 "summary": summary,
             }
+            if not may_have_begun:
+                terminal_data["executionCount"] = len(execution_rows)
             next_sequence = cast(
                 int,
                 connection.execute(

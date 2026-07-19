@@ -3,18 +3,31 @@ import type { RuntimePresentation } from "../domain/runtime";
 interface ProvenanceStripProps {
   presentation: RuntimePresentation | null;
   healthError: boolean;
+  awaitingSnapshot?: boolean;
 }
 
-export function ProvenanceStrip({ presentation, healthError }: ProvenanceStripProps) {
+export function ProvenanceStrip({
+  presentation,
+  healthError,
+  awaitingSnapshot = false,
+}: ProvenanceStripProps) {
   if (presentation === null) {
     return (
       <section className="provenance-strip provenance-strip--pending" aria-live="polite">
         <span className="provenance-dot" aria-hidden="true" />
         <div>
-          <strong>{healthError ? "Runtime unavailable" : "Checking runtime"}</strong>
+          <strong>
+            {healthError
+              ? "Runtime unavailable"
+              : awaitingSnapshot
+                ? "Awaiting run evidence"
+                : "Checking runtime"}
+          </strong>
           <p>
             {healthError
               ? "The health endpoint could not be verified, so no runtime claim is shown."
+              : awaitingSnapshot
+                ? "Waiting for a server recovery snapshot before making an execution-mode claim."
               : "Waiting for /health before making a runtime claim."}
           </p>
         </div>

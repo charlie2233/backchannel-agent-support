@@ -12,6 +12,11 @@ export interface RecoveryState {
   error: string | null;
 }
 
+export interface RecoveryEventState {
+  events: ReadonlyArray<RecoveryEvent>;
+  error: string | null;
+}
+
 export const initialRecoveryState: RecoveryState = {
   snapshot: null,
   events: [],
@@ -92,4 +97,22 @@ export function useRecovery(recoveryId: string | null): RecoveryState {
   }, [recoveryId]);
 
   return state;
+}
+
+export function useRecoveryEvents(recoveryId: string | null): RecoveryEventState {
+  const [state, dispatch] = useReducer(recoveryReducer, initialRecoveryState);
+
+  useEffect(() => {
+    dispatch({ type: "reset" });
+    if (recoveryId === null) {
+      return;
+    }
+
+    return connectRecoveryEvents(recoveryId, {
+      onEvent: (event) => dispatch({ type: "eventReceived", event }),
+      onError: (error) => dispatch({ type: "failed", message: error.message }),
+    });
+  }, [recoveryId]);
+
+  return { events: state.events, error: state.error };
 }

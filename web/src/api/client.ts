@@ -5,6 +5,7 @@ import type {
   ApprovalDecisionResponse,
   HotelRemedyTerms,
   PendingApproval,
+  RecoveryReceipt,
   RecoverySnapshot,
   ScenarioId,
 } from "../domain/recovery";
@@ -250,7 +251,6 @@ export function isRecoverySnapshot(value: unknown): value is RecoverySnapshot {
         /^qa_trace_[0-9a-f]{32}$/.test(value.rootTraceId)) ||
       (value.executionMode === "openai_live" &&
         value.modelIds.length > 0 &&
-        value.modelIds.every((modelId) => modelId.startsWith("gpt-5.6-")) &&
         typeof value.rootTraceId === "string" &&
         /^trace_[0-9a-f]{32}$/.test(value.rootTraceId)));
   return (
@@ -269,6 +269,173 @@ export function isRecoverySnapshot(value: unknown): value is RecoverySnapshot {
     modeProvenanceIsValid &&
     approvalIsValid &&
     (value.status === "pending_approval" || value.pendingApproval === null)
+  );
+}
+
+export function isRecoveryReceipt(value: unknown): value is RecoveryReceipt {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, [
+      "recoveryId",
+      "executionMode",
+      "status",
+      "simulated",
+      "providerExecution",
+      "modelCall",
+      "modelIds",
+      "rootTraceId",
+      "sdkVersion",
+      "protocolVersion",
+      "agentGraphVersion",
+      "definitionDigest",
+      "boundary",
+      "providerResult",
+      "authorizationSource",
+      "verificationResults",
+      "approvalCount",
+      "approvedRemedyDigest",
+    ])
+  ) {
+    return false;
+  }
+
+  const modeIsValid =
+    value.executionMode === "openai_live" ||
+    value.executionMode === "sdk_stub" ||
+    value.executionMode === "replay_fixture";
+  const statusIsValid =
+    value.status === "completed" ||
+    value.status === "simulated_completed" ||
+    value.status === "closed_without_action" ||
+    value.status === "outcome_unknown";
+  const versionFieldsAreValid = [
+    value.sdkVersion,
+    value.protocolVersion,
+    value.agentGraphVersion,
+  ].every((field) => field === null || typeof field === "string");
+  const digestFieldsAreValid =
+    (value.definitionDigest === null ||
+      (typeof value.definitionDigest === "string" && /^[0-9a-f]{64}$/.test(value.definitionDigest))) &&
+    (value.approvedRemedyDigest === null ||
+      (typeof value.approvedRemedyDigest === "string" &&
+        /^sha256:[0-9a-f]{64}$/.test(value.approvedRemedyDigest)));
+  const commonFieldsAreValid =
+    typeof value.recoveryId === "string" &&
+    modeIsValid &&
+    statusIsValid &&
+    typeof value.simulated === "boolean" &&
+    (typeof value.providerExecution === "boolean" || value.providerExecution === null) &&
+    typeof value.modelCall === "boolean" &&
+    isStringArray(value.modelIds) &&
+    (value.rootTraceId === null || typeof value.rootTraceId === "string") &&
+    versionFieldsAreValid &&
+    digestFieldsAreValid &&
+    typeof value.boundary === "string" &&
+    typeof value.providerResult === "string" &&
+    typeof value.authorizationSource === "string" &&
+    isStringArray(value.verificationResults) &&
+    Number.isInteger(value.approvalCount) &&
+    Number(value.approvalCount) >= 0;
+  if (!commonFieldsAreValid) {
+    return false;
+  }
+  if (!isStringArray(value.modelIds) || !isStringArray(value.verificationResults)) {
+    return false;
+  }
+
+  if (value.executionMode === "replay_fixture") {
+    return (
+      value.status === "simulated_completed" &&
+      value.simulated === true &&
+      value.providerExecution === false &&
+      value.modelCall === false &&
+      value.modelIds.length === 0 &&
+      value.rootTraceId === null &&
+      value.sdkVersion === null &&
+      value.protocolVersion === null &&
+      value.agentGraphVersion === null &&
+      value.definitionDigest === null &&
+      value.approvalCount === 0 &&
+      value.approvedRemedyDigest === null
+    );
+  }
+
+  const versioned =
+    typeof value.sdkVersion === "string" &&
+    typeof value.protocolVersion === "string" &&
+    typeof value.agentGraphVersion === "string" &&
+    typeof value.definitionDigest === "string";
+  const modeProvenance =
+    value.executionMode === "sdk_stub"
+      ? value.modelCall === false &&
+        value.modelIds.length === 0 &&
+        typeof value.rootTraceId === "string" &&
+        /^qa_trace_[0-9a-f]{32}$/.test(value.rootTraceId)
+      : value.modelCall === true &&
+        value.modelIds.length === 2 &&
+        value.modelIds[0] === "gpt-5.6-luna" &&
+        value.modelIds[1] === "gpt-5.6-terra" &&
+        typeof value.rootTraceId === "string" &&
+        /^trace_[0-9a-f]{32}$/.test(value.rootTraceId);
+  if (!versioned || !modeProvenance || value.simulated !== true) {
+    return false;
+  }
+  const sdkBoundary =
+    "Deterministic Agents SDK model and demo hotel adapter only; no OpenAI model call, real booking, or payment change.";
+  const quotaBoundary =
+    "Deterministic Agents SDK stub and demo quota adapter only; no OpenAI model call or real quota change.";
+  const liveBoundary =
+    "OpenAI agent model calls and demo hotel adapter only; no real booking or payment change.";
+  if (value.executionMode === "openai_live" && value.boundary !== liveBoundary) {
+    return false;
+  }
+  if (value.status === "completed") {
+    if (value.providerExecution !== true) {
+      return false;
+    }
+    if (value.executionMode === "openai_live") {
+      return value.approvalCount === 1 && value.approvedRemedyDigest !== null;
+    }
+    if (value.approvalCount === 1) {
+      return value.boundary === sdkBoundary && value.approvedRemedyDigest !== null;
+    }
+    const quotaVerificationResults = [
+      "Provider proved the baseline quota ceiling at 1000 units.",
+      "Temporary US-region burst granted: 250 units for 900 seconds.",
+      "All hard constraints remained satisfied.",
+      "Extra cost of 300 USD minor units stayed within the delegated 500-unit limit.",
+      "Approval count is zero; no human interruption was created.",
+      "Execution verified at an effective ceiling of 1250 units.",
+      "Temporary quota permission revoked; baseline ceiling restored to 1000 units.",
+    ];
+    return (
+      value.approvalCount === 0 &&
+      value.approvedRemedyDigest === null &&
+      value.boundary === quotaBoundary &&
+      value.providerResult ===
+        "Demo quota adapter verified 1200 units against a temporary 1250-unit US-region ceiling; no real quota was changed." &&
+      value.authorizationSource ===
+        "Predelegated API quota policy: US-only, at most 500 USD minor units, for at most 900 seconds." &&
+      value.verificationResults.length === quotaVerificationResults.length &&
+      value.verificationResults.every(
+        (result, index) => result === quotaVerificationResults[index],
+      )
+    );
+  }
+  if (value.status === "closed_without_action") {
+    return (
+      value.approvalCount === 0 &&
+      value.providerExecution === false &&
+      value.approvedRemedyDigest === null &&
+      (value.executionMode !== "sdk_stub" || value.boundary === sdkBoundary)
+    );
+  }
+  return (
+    value.status === "outcome_unknown" &&
+    value.approvalCount === 0 &&
+    value.providerExecution === null &&
+    value.approvedRemedyDigest === null &&
+    (value.executionMode !== "sdk_stub" || value.boundary === sdkBoundary)
   );
 }
 
@@ -291,7 +458,32 @@ export async function getRecovery(
   if (!response.ok) {
     throw new Error(`Recovery request failed with status ${response.status}`);
   }
-  return readRecovery(response);
+  const snapshot = await readRecovery(response);
+  if (snapshot.recoveryId !== recoveryId) {
+    throw new Error("Recovery response did not match the requested recovery");
+  }
+  return snapshot;
+}
+
+export async function getReceipt(
+  recoveryId: string,
+  signal?: AbortSignal,
+): Promise<RecoveryReceipt> {
+  const response = await fetch(
+    `/api/recoveries/${encodeURIComponent(recoveryId)}/receipt`,
+    {
+      headers: { Accept: "application/json" },
+      signal,
+    },
+  );
+  if (!response.ok) {
+    throw new Error(`Receipt request failed with status ${response.status}`);
+  }
+  const body: unknown = await response.json();
+  if (!isRecoveryReceipt(body) || body.recoveryId !== recoveryId) {
+    throw new Error("Receipt response did not match the receipt contract");
+  }
+  return body;
 }
 
 export async function createRecovery(
@@ -321,7 +513,11 @@ export async function createRecovery(
     }
     throw new Error(`Recovery creation failed with status ${response.status}`);
   }
-  return readRecovery(response);
+  const snapshot = await readRecovery(response);
+  if (snapshot.scenarioId !== scenarioId || snapshot.executionMode !== executionMode) {
+    throw new Error("Recovery response did not match the requested creation");
+  }
+  return snapshot;
 }
 
 function isDecisionResponse(value: unknown): value is ApprovalDecisionResponse {
