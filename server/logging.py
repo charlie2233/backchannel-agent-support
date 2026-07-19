@@ -35,7 +35,9 @@ class SafeLogFilter(logging.Filter):
             rendered = record.getMessage()
         except Exception:
             rendered = ""
-        if _UNSAFE_LOG_CONTENT.search(rendered):
+        if (
+            record.name == "uvicorn.access" and "?" in rendered
+        ) or _UNSAFE_LOG_CONTENT.search(rendered):
             record.msg = "[REDACTED]"
             record.args = ()
             record.exc_info = None

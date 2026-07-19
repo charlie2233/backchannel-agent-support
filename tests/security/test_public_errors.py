@@ -201,9 +201,20 @@ def test_unexpected_live_start_error_logs_generated_recovery_correlation(
     assert "private-live-start" not in caplog.text
 
 
+@pytest.mark.parametrize(
+    "request_target",
+    [
+        "/health?prompt=private-query&state_json=private-state&key=sk-access-secret",
+        "/health?client_secret=private-client-secret",
+        "/health?refresh_token=private-refresh-token",
+        "/health?password=private-password",
+        "/health?page=2",
+    ],
+)
 def test_uvicorn_access_log_never_retains_query_string_secret_markers(
     tmp_path,
     caplog,
+    request_target: str,
 ) -> None:
     create_app(
         RuntimeSettings(live_ready=False),
@@ -214,14 +225,13 @@ def test_uvicorn_access_log_never_retains_query_string_secret_markers(
         '%s - "%s %s HTTP/%s" %d',
         "198.51.100.20:5000",
         "GET",
-        "/health?prompt=private-query&state_json=private-state&key=sk-access-secret",
+        request_target,
         "1.1",
         200,
     )
 
-    assert "private-query" not in caplog.text
-    assert "private-state" not in caplog.text
-    assert "sk-access-secret" not in caplog.text
+    assert request_target not in caplog.text
+    assert "private" not in caplog.text
     assert "[REDACTED]" in caplog.text
 
 
