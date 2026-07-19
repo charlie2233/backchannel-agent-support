@@ -285,7 +285,7 @@ class RecoveryOrchestrator:
                 strict_context=True,
             )
         except Exception:
-            logger.exception(
+            logger.error(
                 "Agents SDK state restore failed recovery_id=%s",
                 recovery_id,
             )
