@@ -17,9 +17,8 @@ from server.agents.stub_model import DeterministicApprovalModel
 from server.agents.versioning import (
     HOTEL_AGENT_INSTRUCTIONS,
     HOTEL_AGENT_NAME,
-    broker_remedy_action_digest,
 )
-from server.models import ExecutionMode, RecoveryReceipt, RecoveryStatus
+from server.models import ExecutionMode, RecoveryReceipt
 from server.providers.hotel_simulator import HotelDispatchRequest, HotelSimulator
 from server.store import SQLiteStore
 
@@ -29,7 +28,7 @@ class HotelAgentContext:
     recovery_id: str
     store: SQLiteStore
     hotel_provider: HotelSimulator
-    remedy_digest: str | None = None
+    approved_remedy_digest: str | None = None
 
 
 def build_hotel_agent(
@@ -51,8 +50,13 @@ def build_hotel_agent(
         if consumer_proof.booking_id != provider_proof.booking_id:
             raise ValueError("Consumer and provider proofs identify different bookings")
 
-        remedy_digest = (
-            tool_context.context.remedy_digest or broker_remedy_action_digest(remedy)
+        remedy_digest = tool_context.context.approved_remedy_digest
+        if remedy_digest is None or not remedy_digest.startswith("sha256:"):
+            raise ValueError("Exact public consent digest is required before dispatch")
+        tool_context.context.store.assert_provider_dispatch_authorized(
+            recovery_id=tool_context.context.recovery_id,
+            tool_call_id=tool_context.tool_call_id,
+            remedy_digest=remedy_digest,
         )
         idempotency_key = f"{tool_context.context.recovery_id}:{tool_context.tool_call_id}"
         idempotency_key = f"{idempotency_key}:{remedy_digest}"
@@ -82,18 +86,15 @@ def build_hotel_agent(
                 "Demo provider dispatch returned confirmed.",
                 "Provider result stored under one idempotency key.",
             ],
+            approvedRemedyDigest=remedy_digest,
         )
-        tool_context.context.store.record_transition(
-            tool_context.context.recovery_id,
-            status=RecoveryStatus.COMPLETED,
-            current_step=5,
-            current_step_summary="Demo provider result verified and receipt sealed.",
-            event_type="recovery.completed",
-            event_data={
-                "phase": "Verify & seal",
-                "providerExecution": True,
-                "summary": "One idempotent demo-provider dispatch completed.",
-            },
+        execution = tool_context.context.store.get_completed_execution(
+            tool_context.context.recovery_id
+        )
+        if execution is None:
+            raise RuntimeError("Durable provider result was not recorded")
+        tool_context.context.store.finalize_completed_execution(
+            execution,
             receipt=receipt,
         )
         return dispatch.model_dump_json()

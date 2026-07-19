@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 from pathlib import Path
@@ -13,8 +12,7 @@ from fastapi.testclient import TestClient
 
 from server.config import RuntimeSettings
 from server.main import create_app
-from server.models import ExecutionMode, RecoveryStatus
-from server.orchestrator import RecoveryOrchestrator
+from server.models import ExecutionMode
 from server.providers.hotel_simulator import HotelSimulator
 from server.store import SQLiteStore
 
@@ -24,10 +22,12 @@ def main() -> None:
     with TemporaryDirectory(prefix="backchannel-smoke-") as temporary_directory:
         database_path = Path(temporary_directory) / "smoke.sqlite3"
         store = SQLiteStore(database_path)
+        hotel_provider = HotelSimulator(store=store)
         with TestClient(
             create_app(
                 RuntimeSettings(live_ready=False, demo_reset_enabled=True),
                 store=store,
+                hotel_provider=hotel_provider,
             )
         ) as client:
             health = client.get("/health")
@@ -52,32 +52,42 @@ def main() -> None:
             boundary = cast(str, receipt["boundary"])
             assert "no model call or provider execution" in boundary.lower()
 
-        hotel_provider = HotelSimulator(store=store)
-        orchestrator = RecoveryOrchestrator(
-            store=store,
-            hotel_provider=hotel_provider,
-        )
-        pending = asyncio.run(
-            orchestrator.start("hotel", execution_mode=ExecutionMode.SDK_STUB)
-        )
-        assert pending.recovery.status is RecoveryStatus.PENDING_APPROVAL
-        assert len(pending.sdk_result.interruptions) == 1
-        assert hotel_provider.dispatch_count == 0
-        sdk_recovery_id = pending.recovery.recovery_id
+            sdk_created = client.post(
+                "/api/recoveries",
+                json={"scenarioId": "hotel", "executionMode": "sdk_stub"},
+            )
+            sdk_created.raise_for_status()
+            sdk_snapshot = cast(dict[str, object], sdk_created.json())
+            assert sdk_snapshot["status"] == "pending_approval"
+            approval = cast(dict[str, object], sdk_snapshot["pendingApproval"])
+            assert approval["executionStarted"] is False
+            assert hotel_provider.dispatch_count == 0
+            sdk_recovery_id = cast(str, sdk_snapshot["recoveryId"])
+            decision_payload = {
+                "clientDecisionId": "smoke-restart-approval",
+                "remedyId": cast(str, approval["remedyId"]),
+                "remedyDigest": cast(str, approval["remedyDigest"]),
+                "toolCallId": cast(str, approval["toolCallId"]),
+            }
 
         store.close()
-        del orchestrator, hotel_provider, pending, store
+        del hotel_provider, store
 
         restarted_store = SQLiteStore(database_path)
         restarted_provider = HotelSimulator(store=restarted_store)
-        restarted_orchestrator = RecoveryOrchestrator(
-            store=restarted_store,
-            hotel_provider=restarted_provider,
-        )
-        completed_result = asyncio.run(
-            restarted_orchestrator.resume_approved(sdk_recovery_id)
-        )
-        assert completed_result.interruptions == []
+        with TestClient(
+            create_app(
+                RuntimeSettings(live_ready=False, demo_reset_enabled=True),
+                store=restarted_store,
+                hotel_provider=restarted_provider,
+            )
+        ) as restarted_client:
+            completed = restarted_client.post(
+                f"/api/recoveries/{sdk_recovery_id}/decisions",
+                json=decision_payload,
+            )
+            completed.raise_for_status()
+            assert completed.json()["status"] == "completed"
         assert restarted_provider.dispatch_count == 1
         sdk_receipt = restarted_store.get_receipt(sdk_recovery_id)
         assert sdk_receipt.execution_mode is ExecutionMode.SDK_STUB
@@ -90,7 +100,7 @@ def main() -> None:
                     "runtimeMode": "stub_keyless",
                     "replayMode": "replay_fixture",
                     "replayProviderDispatchCount": 0,
-                    "sdkProofLane": "internal_orchestrator",
+                    "sdkProofLane": "public_typed_decision",
                     "sdkMode": "sdk_stub",
                     "sdkApprovalCount": 1,
                     "sdkPreapprovalDispatchCount": 0,

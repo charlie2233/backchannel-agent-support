@@ -10,6 +10,8 @@ from fastapi.responses import StreamingResponse
 from server.config import RuntimeSettings
 from server.events import stream_recovery_events
 from server.models import (
+    ApprovalDecisionRequest,
+    ApprovalDecisionResponse,
     CreateRecoveryRequest,
     DemoResetResponse,
     ExecutionMode,
@@ -21,22 +23,38 @@ from server.models import (
     RuntimeBackend,
     ScenarioResponse,
 )
+from server.orchestrator import (
+    RecoveryOrchestrator,
+    ResumeIncompatibleError,
+    UnsupportedOrchestrationError,
+)
+from server.providers.hotel_simulator import HotelSimulator
 from server.replay.engine import ReplayEngine, UnsupportedExecutionModeError
 from server.replay.loader import ScenarioLoader, ScenarioNotFoundError
-from server.store import RecoveryNotFoundError, SQLiteStore
+from server.store import ApprovalDecisionError, RecoveryNotFoundError, SQLiteStore
 
 
 def create_app(
     settings: RuntimeSettings | None = None,
     *,
     store: SQLiteStore | None = None,
+    hotel_provider: HotelSimulator | None = None,
+    orchestrator: RecoveryOrchestrator | None = None,
 ) -> FastAPI:
     runtime_settings = settings or RuntimeSettings.from_environment()
     recovery_store = store or SQLiteStore(runtime_settings.database_path)
     scenario_loader = ScenarioLoader()
     replay_engine = ReplayEngine(recovery_store, scenario_loader)
+    recovery_orchestrator = orchestrator
+    if recovery_orchestrator is None:
+        provider = hotel_provider or HotelSimulator(store=recovery_store)
+        recovery_orchestrator = RecoveryOrchestrator(
+            store=recovery_store,
+            hotel_provider=provider,
+        )
     application = FastAPI(title="Backchannel API", version="0.3.0")
     application.state.recovery_store = recovery_store
+    application.state.recovery_orchestrator = recovery_orchestrator
     application.add_middleware(
         CORSMiddleware,
         allow_origins=list(runtime_settings.development_cors_origins),
@@ -75,21 +93,55 @@ def create_app(
         response_model=RecoverySnapshot,
         status_code=status.HTTP_201_CREATED,
     )
-    def create_recovery(payload: CreateRecoveryRequest) -> RecoverySnapshot:
-        if payload.execution_mode is not ExecutionMode.REPLAY_FIXTURE:
+    async def create_recovery(payload: CreateRecoveryRequest) -> RecoverySnapshot:
+        if payload.execution_mode is ExecutionMode.REPLAY_FIXTURE:
+            try:
+                return replay_engine.start(
+                    payload.scenario_id,
+                    execution_mode=payload.execution_mode,
+                )
+            except (ScenarioNotFoundError, UnsupportedExecutionModeError) as error:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail=str(error),
+                ) from error
+        if payload.execution_mode is not ExecutionMode.SDK_STUB:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail="Public recovery creation supports replay_fixture only",
+                detail="Public recovery creation does not support openai_live",
             )
         try:
-            return replay_engine.start(
+            pending = await recovery_orchestrator.start(
                 payload.scenario_id,
                 execution_mode=payload.execution_mode,
             )
-        except (ScenarioNotFoundError, UnsupportedExecutionModeError) as error:
+            return pending.recovery
+        except UnsupportedOrchestrationError as error:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=str(error),
+            ) from error
+
+    @application.post(
+        "/api/recoveries/{recovery_id}/decisions",
+        response_model=ApprovalDecisionResponse,
+    )
+    async def approve_recovery(
+        recovery_id: UUID,
+        payload: ApprovalDecisionRequest,
+    ) -> ApprovalDecisionResponse:
+        recovery_key = str(recovery_id)
+        try:
+            return await recovery_orchestrator.approve_decision(recovery_key, payload)
+        except ApprovalDecisionError as error:
+            raise HTTPException(
+                status_code=error.status_code,
+                detail=error.public_detail,
+            ) from error
+        except ResumeIncompatibleError as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=error.public_detail,
             ) from error
 
     @application.get(

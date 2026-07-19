@@ -6,34 +6,48 @@ from unittest.mock import AsyncMock
 import pytest
 from agents import RunState
 
-from server.models import ExecutionMode
+from server.models import ApprovalDecisionRequest, ExecutionMode
 from server.orchestrator import (
     RecoveryOrchestrator,
     ResumeIncompatibleError,
 )
 from server.providers.hotel_simulator import HotelSimulator
-from server.store import RecoveryNotFoundError, SQLiteStore
+from server.store import ApprovalDecisionError, RecoveryNotFoundError, SQLiteStore
 
 SENSITIVE_STATE_SENTINEL = "SENSITIVE_STATE_SENTINEL"
 
 
+def approval_request(pending, decision_id: str) -> ApprovalDecisionRequest:
+    approval = pending.recovery.pending_approval
+    assert approval is not None
+    return ApprovalDecisionRequest(
+        clientDecisionId=decision_id,
+        remedyId=approval.remedy_id,
+        remedyDigest=approval.remedy_digest,
+        toolCallId=approval.tool_call_id,
+    )
+
+
 @pytest.mark.parametrize(
-    "marker",
+    ("marker", "expected_code"),
     [
-        "sdk_version",
-        "protocol_version",
-        "agent_graph_version",
-        "definition_digest",
-        "root_trace_id",
-        "execution_mode",
-        "tool_call_id",
-        "remedy_digest",
+        ("sdk_version", "resume_incompatible"),
+        ("protocol_version", "resume_incompatible"),
+        ("agent_graph_version", "resume_incompatible"),
+        ("definition_digest", "resume_incompatible"),
+        ("root_trace_id", "resume_incompatible"),
+        ("execution_mode", "resume_incompatible"),
+        ("tool_call_id", "tool_call_mismatch"),
+        ("action_digest", "resume_incompatible"),
+        ("remedy_id", "remedy_mismatch"),
+        ("consent_digest", "remedy_digest_mismatch"),
     ],
 )
 def test_resume_rejects_incompatible_markers_before_sdk_restore_or_dispatch(
     tmp_path,
     monkeypatch,
     marker: str,
+    expected_code: str,
 ) -> None:
     database_path = tmp_path / f"incompatible-{marker}.sqlite3"
     store = SQLiteStore(database_path)
@@ -43,6 +57,7 @@ def test_resume_rejects_incompatible_markers_before_sdk_restore_or_dispatch(
         orchestrator.start("hotel", execution_mode=ExecutionMode.SDK_STUB)
     )
     recovery_id = pending.recovery.recovery_id
+    request = approval_request(pending, f"incompatible-{marker}")
     store.close()
 
     with sqlite3.connect(database_path) as connection:
@@ -60,13 +75,13 @@ def test_resume_rejects_incompatible_markers_before_sdk_restore_or_dispatch(
     restore_spy = AsyncMock(side_effect=AssertionError("SDK restore must not run"))
     monkeypatch.setattr(RunState, "from_json", restore_spy)
 
-    with pytest.raises(ResumeIncompatibleError) as caught:
-        asyncio.run(fresh_orchestrator.resume_approved(recovery_id))
+    with pytest.raises((ResumeIncompatibleError, ApprovalDecisionError)) as caught:
+        asyncio.run(fresh_orchestrator.approve_decision(recovery_id, request))
 
-    assert caught.value.code == "resume_incompatible"
+    assert caught.value.code == expected_code
     assert caught.value.recovery_id == recovery_id
     assert caught.value.public_detail == {
-        "code": "resume_incompatible",
+        "code": expected_code,
         "recoveryId": recovery_id,
     }
     restore_spy.assert_not_awaited()
@@ -88,6 +103,7 @@ def test_sdk_restore_failure_logs_no_serialized_state_or_exception_message(
         orchestrator.start("hotel", execution_mode=ExecutionMode.SDK_STUB)
     )
     recovery_id = pending.recovery.recovery_id
+    request = approval_request(pending, "corrupt-state")
     store.close()
 
     with sqlite3.connect(database_path) as connection:
@@ -112,7 +128,7 @@ def test_sdk_restore_failure_logs_no_serialized_state_or_exception_message(
     caplog.set_level("ERROR", logger="server.orchestrator")
 
     with pytest.raises(ResumeIncompatibleError) as caught:
-        asyncio.run(fresh_orchestrator.resume_approved(recovery_id))
+        asyncio.run(fresh_orchestrator.approve_decision(recovery_id, request))
 
     assert caught.value.public_detail == {
         "code": "resume_incompatible",

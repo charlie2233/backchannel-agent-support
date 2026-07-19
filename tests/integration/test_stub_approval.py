@@ -1,15 +1,28 @@
 import asyncio
 
+import pytest
 from agents import RunContextWrapper, Runner, RunResult, RunState
+from agents.exceptions import UserError
 from agents.items import ToolApprovalItem
 
 from server.agents.factory import HotelAgentContext, build_hotel_agent
 from server.agents.schemas import CommitRemedyArguments, deterministic_hotel_arguments
 from server.agents.tracing import configure_sdk_stub_tracing
-from server.models import ExecutionMode, RecoveryStatus
+from server.models import ApprovalDecisionRequest, ExecutionMode, RecoveryStatus
 from server.orchestrator import RecoveryOrchestrator
 from server.providers.hotel_simulator import HotelSimulator
 from server.store import SQLiteStore
+
+
+def approval_request(pending, decision_id: str) -> ApprovalDecisionRequest:
+    approval = pending.recovery.pending_approval
+    assert approval is not None
+    return ApprovalDecisionRequest(
+        clientDecisionId=decision_id,
+        remedyId=approval.remedy_id,
+        remedyDigest=approval.remedy_digest,
+        toolCallId=approval.tool_call_id,
+    )
 
 
 def test_sdk_stub_pauses_and_resumes_through_the_agents_sdk(tmp_path) -> None:
@@ -35,9 +48,14 @@ def test_sdk_stub_pauses_and_resumes_through_the_agents_sdk(tmp_path) -> None:
     assert arguments.remedy.cost_delta_minor == 0
     assert provider.dispatch_count == 0
 
-    completed_result = asyncio.run(orchestrator.resume_approved(pending))
+    decision = asyncio.run(
+        orchestrator.approve_decision(
+            pending.recovery.recovery_id,
+            approval_request(pending, "stub-approval"),
+        )
+    )
 
-    assert completed_result.interruptions == []
+    assert decision.status == "completed"
     assert provider.dispatch_count == 1
     completed = store.get_recovery(pending.recovery.recovery_id)
     assert completed.status is RecoveryStatus.COMPLETED
@@ -49,7 +67,7 @@ def test_sdk_stub_pauses_and_resumes_through_the_agents_sdk(tmp_path) -> None:
     assert receipt.model_ids == []
 
 
-def test_sdk_state_resumes_with_an_equivalent_fresh_agent(tmp_path) -> None:
+def test_direct_sdk_approval_cannot_bypass_exact_public_decision(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "fresh-agent-resume.sqlite3")
     provider = HotelSimulator()
     orchestrator = RecoveryOrchestrator(store=store, hotel_provider=provider)
@@ -62,6 +80,9 @@ def test_sdk_state_resumes_with_an_equivalent_fresh_agent(tmp_path) -> None:
         recovery_id=pending.recovery.recovery_id,
         store=store,
         hotel_provider=provider,
+        approved_remedy_digest=approval_request(
+            pending, "unclaimed-direct-bypass"
+        ).remedy_digest,
     )
     fresh_agent = build_hotel_agent(
         context=fresh_context,
@@ -78,15 +99,22 @@ def test_sdk_state_resumes_with_an_equivalent_fresh_agent(tmp_path) -> None:
     assert len(interruptions) == 1
     restored_state.approve(interruptions[0])
 
-    completed = asyncio.run(
-        Runner.run(
-            fresh_agent,
-            restored_state,
-            run_config=configure_sdk_stub_tracing(),
+    with pytest.raises(UserError, match="decision_unavailable"):
+        asyncio.run(
+            Runner.run(
+                fresh_agent,
+                restored_state,
+                run_config=configure_sdk_stub_tracing(),
+            )
+        )
+
+    assert provider.dispatch_count == 0
+    assert store.count_executions(pending.recovery.recovery_id) == 0
+    decision = asyncio.run(
+        orchestrator.approve_decision(
+            pending.recovery.recovery_id,
+            approval_request(pending, "typed-after-bypass"),
         )
     )
-
-    assert completed.last_agent is fresh_agent
-    assert completed.interruptions == []
-    assert len(completed.raw_responses) == 2
+    assert decision.status == "completed"
     assert provider.dispatch_count == 1

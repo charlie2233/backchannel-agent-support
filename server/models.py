@@ -1,10 +1,17 @@
 """Typed public and replay-fixture contracts for Backchannel."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    field_validator,
+    model_validator,
+)
 
 
 class ApiModel(BaseModel):
@@ -92,6 +99,94 @@ class CreateRecoveryRequest(ApiModel):
     execution_mode: ExecutionMode = Field(alias="executionMode")
 
 
+class HotelReplacementTerms(ApiModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid", frozen=True)
+
+    from_room_type: str = Field(alias="fromRoomType")
+    to_room_type: str = Field(alias="toRoomType")
+
+
+class HotelStayTerms(ApiModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid", frozen=True)
+
+    check_in: str = Field(alias="checkIn")
+    check_out: str = Field(alias="checkOut")
+
+
+class HotelRemedyTerms(ApiModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid", frozen=True)
+
+    booking_id: str = Field(alias="bookingId")
+    action: Literal["replace_room"]
+    replacement: HotelReplacementTerms
+    stay: HotelStayTerms
+    currency: Literal["USD"]
+
+
+class PendingApprovalView(ApiModel):
+    """Strict public consent record; opaque SDK state never enters this model."""
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid", frozen=True)
+
+    remedy_id: str = Field(alias="remedyId")
+    remedy_digest: str = Field(
+        alias="remedyDigest",
+        pattern=r"^sha256:[0-9a-f]{64}$",
+    )
+    terms: HotelRemedyTerms
+    cost_delta_minor: int = Field(alias="costDeltaMinor", strict=True)
+    changed_fields: list[str] = Field(alias="changedFields", min_length=1)
+    provider_commitments: list[str] = Field(
+        alias="providerCommitments", min_length=1
+    )
+    expiry: datetime
+    hard_constraint_satisfied: bool = Field(alias="hardConstraintSatisfied")
+    delegated_authority_satisfied: bool = Field(
+        alias="delegatedAuthoritySatisfied"
+    )
+    tool_call_id: str = Field(alias="toolCallId")
+    execution_started: Literal[False] = Field(alias="executionStarted")
+
+    @field_validator("changed_fields", "provider_commitments")
+    @classmethod
+    def require_canonical_set_order(cls, value: list[str]) -> list[str]:
+        if value != sorted(value):
+            raise ValueError("Set-like consent fields must use canonical sorted order")
+        return value
+
+    @field_validator("expiry")
+    @classmethod
+    def require_utc_expiry(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() != timedelta(0):
+            raise ValueError("Consent expiry must be timezone-aware UTC")
+        return value
+
+
+class ApprovalDecisionRequest(ApiModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid", frozen=True)
+
+    client_decision_id: str = Field(alias="clientDecisionId", min_length=1, max_length=128)
+    remedy_id: str = Field(alias="remedyId", min_length=1)
+    remedy_digest: str = Field(
+        alias="remedyDigest",
+        pattern=r"^sha256:[0-9a-f]{64}$",
+    )
+    tool_call_id: str = Field(alias="toolCallId", min_length=1)
+
+
+class ApprovalDecisionResponse(ApiModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid", frozen=True)
+
+    client_decision_id: str = Field(alias="clientDecisionId")
+    recovery_id: str = Field(alias="recoveryId")
+    status: Literal["completed"]
+    approved_remedy_digest: str = Field(
+        alias="approvedRemedyDigest",
+        pattern=r"^sha256:[0-9a-f]{64}$",
+    )
+    execution_started: Literal[True] = Field(alias="executionStarted")
+
+
 class RecoverySnapshot(ApiModel):
     recovery_id: str = Field(alias="recoveryId")
     scenario_id: ScenarioId = Field(alias="scenarioId")
@@ -101,6 +196,9 @@ class RecoverySnapshot(ApiModel):
     current_step_summary: str = Field(alias="currentStepSummary")
     created_at: datetime = Field(alias="createdAt")
     updated_at: datetime = Field(alias="updatedAt")
+    pending_approval: PendingApprovalView | None = Field(
+        default=None, alias="pendingApproval"
+    )
 
 
 class RecoveryEvent(ApiModel):
@@ -123,6 +221,11 @@ class RecoveryReceipt(ApiModel):
     provider_result: str = Field(alias="providerResult")
     authorization_source: str = Field(alias="authorizationSource")
     verification_results: list[str] = Field(alias="verificationResults")
+    approved_remedy_digest: str | None = Field(
+        default=None,
+        alias="approvedRemedyDigest",
+        pattern=r"^sha256:[0-9a-f]{64}$",
+    )
 
     @model_validator(mode="after")
     def enforce_execution_mode_provenance(self) -> Self:

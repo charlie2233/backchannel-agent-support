@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any, NoReturn
 from uuid import uuid4
 
@@ -20,18 +21,29 @@ from server.agents.versioning import (
     new_qa_trace_id,
     remedy_action_digest,
 )
+from server.digest import remedy_consent_digest
 from server.models import (
+    ApprovalDecisionRequest,
+    ApprovalDecisionResponse,
     ExecutionMode,
     RecoveryReceipt,
     RecoverySnapshot,
     RecoveryStatus,
     ScenarioId,
 )
+from server.policy import (
+    DETERMINISTIC_HOTEL_AUTHORITY,
+    evaluate_hotel_policy,
+    exact_hotel_terms,
+)
 from server.providers.hotel_simulator import HotelDispatchResult, HotelSimulator
 from server.store import (
+    ApprovalDecisionClaim,
+    ApprovalDecisionError,
     DurableExecution,
     PendingApprovalEnvelope,
     RecoveryNotFoundError,
+    RemedyConsentRecord,
     SQLiteStore,
 )
 
@@ -76,6 +88,7 @@ class RecoveryOrchestrator:
         self._hotel_provider.bind_store(store)
         self._version_policy = version_policy or ApprovalVersionPolicy.current()
         self._reconcile_completed_executions()
+        self._reconcile_claimed_decisions()
 
     @staticmethod
     def _context_serializer(_context: HotelAgentContext) -> dict[str, Any]:
@@ -105,6 +118,22 @@ class RecoveryOrchestrator:
                 "Demo provider dispatch returned confirmed.",
                 "Provider result stored under one idempotency key.",
             ],
+            approvedRemedyDigest=(
+                execution.remedy_digest
+                if execution.remedy_digest is not None
+                and execution.remedy_digest.startswith("sha256:")
+                else None
+            ),
+        )
+
+    @staticmethod
+    def _decision_response(claim: ApprovalDecisionClaim) -> ApprovalDecisionResponse:
+        return ApprovalDecisionResponse(
+            clientDecisionId=claim.request.client_decision_id,
+            recoveryId=claim.recovery_id,
+            status="completed",
+            approvedRemedyDigest=claim.request.remedy_digest,
+            executionStarted=True,
         )
 
     def _reconcile_completed_executions(self) -> None:
@@ -122,6 +151,22 @@ class RecoveryOrchestrator:
                     execution.recovery_id,
                 )
                 raise
+
+    def _reconcile_claimed_decisions(self) -> None:
+        """Complete claimed responses whose durable dispatch already committed."""
+
+        for claim in self._store.list_claimed_decisions():
+            execution = self._store.get_completed_execution(claim.recovery_id)
+            if execution is None:
+                continue
+            self._store.finalize_completed_execution(
+                execution,
+                receipt=self._receipt_for_execution(execution),
+            )
+            self._store.complete_approval_decision(
+                claim,
+                self._decision_response(claim),
+            )
 
     @staticmethod
     def _raise_incompatible(recovery_id: str, marker: str) -> NoReturn:
@@ -159,12 +204,11 @@ class RecoveryOrchestrator:
             current_step_summary="Deterministic Agents SDK recovery started.",
         )
         arguments = deterministic_hotel_arguments()
-        remedy_digest = remedy_action_digest(arguments)
+        action_digest = remedy_action_digest(arguments)
         context = HotelAgentContext(
             recovery_id=recovery_id,
             store=self._store,
             hotel_provider=self._hotel_provider,
-            remedy_digest=remedy_digest,
         )
         original_root_agent = build_hotel_agent(
             context=context,
@@ -188,6 +232,25 @@ class RecoveryOrchestrator:
             context_serializer=self._context_serializer,
             strict_context=True,
         )
+        terms = exact_hotel_terms(arguments)
+        expiry = datetime.now(UTC) + timedelta(minutes=30)
+        changed_fields = tuple(sorted(arguments.remedy.changed_fields))
+        provider_commitments = tuple(sorted(arguments.remedy.provider_commitments))
+        consent_digest = remedy_consent_digest(
+            {
+                "recoveryId": recovery_id,
+                "remedyId": arguments.remedy.remedy_id,
+                "terms": terms.model_dump(mode="json", by_alias=True),
+                "costDeltaMinor": arguments.remedy.cost_delta_minor,
+                "changedFields": list(changed_fields),
+                "providerCommitments": list(provider_commitments),
+                "expiry": expiry,
+            }
+        )
+        policy_result = evaluate_hotel_policy(
+            arguments,
+            DETERMINISTIC_HOTEL_AUTHORITY,
+        )
         envelope = PendingApprovalEnvelope(
             tool_call_id=interruption.call_id,
             recovery_id=recovery_id,
@@ -197,8 +260,25 @@ class RecoveryOrchestrator:
             definition_digest=hotel_definition_digest(original_root_agent),
             root_trace_id=new_qa_trace_id(),
             execution_mode=execution_mode,
-            remedy_digest=remedy_digest,
+            action_digest=action_digest,
+            remedy_id=arguments.remedy.remedy_id,
+            consent_digest=consent_digest,
             state_json=state_json,
+        )
+        remedy_consent = RemedyConsentRecord(
+            remedy_id=arguments.remedy.remedy_id,
+            recovery_id=recovery_id,
+            terms=terms,
+            cost_delta_minor=arguments.remedy.cost_delta_minor,
+            changed_fields=changed_fields,
+            provider_commitments=provider_commitments,
+            expiry=expiry,
+            consent_digest=consent_digest,
+            hard_constraint_satisfied=policy_result.hard_constraint_satisfied,
+            delegated_authority_satisfied=(
+                policy_result.delegated_authority_satisfied
+            ),
+            evidence=arguments,
         )
 
         recovery = self._store.record_transition(
@@ -213,6 +293,7 @@ class RecoveryOrchestrator:
                 "summary": "An internal Agents SDK approval interruption is pending.",
             },
             pending_approval=envelope,
+            remedy_consent=remedy_consent,
         )
         return PendingSdkApproval(
             recovery=recovery,
@@ -220,26 +301,69 @@ class RecoveryOrchestrator:
             original_root_agent=original_root_agent,
         )
 
-    async def resume_approved(self, pending: PendingSdkApproval | str) -> RunResult:
-        """Validate, restore, and approve the exact durable SDK interruption once."""
-
-        recovery_id = (
-            pending.recovery.recovery_id
-            if isinstance(pending, PendingSdkApproval)
-            else pending
+    def _complete_committed_claim(
+        self,
+        claim: ApprovalDecisionClaim,
+        execution: DurableExecution,
+    ) -> ApprovalDecisionResponse:
+        self._store.finalize_completed_execution(
+            execution,
+            receipt=self._receipt_for_execution(execution),
         )
+        return self._store.complete_approval_decision(
+            claim,
+            self._decision_response(claim),
+        )
+
+    async def approve_decision(
+        self,
+        recovery_id: str,
+        request: ApprovalDecisionRequest,
+    ) -> ApprovalDecisionResponse:
+        """Claim, resume, and durably replay one exact approval decision."""
+
+        claim = self._store.claim_approval_decision(recovery_id, request)
+        if claim.response is not None:
+            return claim.response
+        execution = self._store.get_completed_execution(recovery_id)
+        if execution is not None:
+            return self._complete_committed_claim(claim, execution)
+        try:
+            completed = await self._resume_claimed_approval(claim)
+        except ApprovalDecisionError:
+            execution = self._store.get_completed_execution(recovery_id)
+            if execution is None:
+                raise
+            return self._complete_committed_claim(claim, execution)
+        if completed is None:
+            replayed = self._store.claim_approval_decision(recovery_id, request)
+            if replayed.response is not None:
+                return replayed.response
+        execution = self._store.get_completed_execution(recovery_id)
+        if execution is None:
+            raise RuntimeError("Approved SDK run completed without a durable execution")
+        return self._complete_committed_claim(claim, execution)
+
+    async def _resume_claimed_approval(
+        self,
+        claim: ApprovalDecisionClaim,
+    ) -> RunResult | None:
+        """Restore and approve only after a durable exact-consent claim."""
+
+        recovery_id = claim.recovery_id
         arguments = deterministic_hotel_arguments()
-        expected_remedy_digest = remedy_action_digest(arguments)
+        expected_action_digest = remedy_action_digest(arguments)
         fresh_context = HotelAgentContext(
             recovery_id=recovery_id,
             store=self._store,
             hotel_provider=self._hotel_provider,
-            remedy_digest=expected_remedy_digest,
+            approved_remedy_digest=claim.request.remedy_digest,
         )
         fresh_agent = build_hotel_agent(context=fresh_context, arguments=arguments)
         try:
             recovery = self._store.get_recovery(recovery_id)
             envelope = self._store.get_pending_approval(recovery_id)
+            consent = self._store.get_remedy_consent(recovery_id)
         except (RecoveryNotFoundError, ValueError, TypeError):
             self._raise_incompatible(recovery_id, "envelope")
 
@@ -250,7 +374,9 @@ class RecoveryOrchestrator:
             "definition_digest": hotel_definition_digest(fresh_agent),
             "execution_mode": ExecutionMode.SDK_STUB,
             "tool_call_id": f"commit-remedy-{recovery_id}",
-            "remedy_digest": expected_remedy_digest,
+            "action_digest": expected_action_digest,
+            "remedy_id": arguments.remedy.remedy_id,
+            "consent_digest": claim.request.remedy_digest,
         }
         actual_markers = {
             "sdk_version": envelope.sdk_version,
@@ -259,7 +385,9 @@ class RecoveryOrchestrator:
             "definition_digest": envelope.definition_digest,
             "execution_mode": envelope.execution_mode,
             "tool_call_id": envelope.tool_call_id,
-            "remedy_digest": envelope.remedy_digest,
+            "action_digest": envelope.action_digest,
+            "remedy_id": envelope.remedy_id,
+            "consent_digest": envelope.consent_digest,
         }
         for marker, expected in expected_markers.items():
             if actual_markers[marker] != expected:
@@ -276,6 +404,39 @@ class RecoveryOrchestrator:
             self._raise_incompatible(recovery_id, "root_trace_id")
         if not isinstance(envelope.state_json, dict) or not envelope.state_json:
             self._raise_incompatible(recovery_id, "state_json")
+        recomputed_consent_digest = remedy_consent_digest(
+            {
+                "recoveryId": consent.recovery_id,
+                "remedyId": consent.remedy_id,
+                "terms": consent.terms.model_dump(mode="json", by_alias=True),
+                "costDeltaMinor": consent.cost_delta_minor,
+                "changedFields": list(consent.changed_fields),
+                "providerCommitments": list(consent.provider_commitments),
+                "expiry": consent.expiry,
+            }
+        )
+        if recomputed_consent_digest != envelope.consent_digest:
+            self._raise_incompatible(recovery_id, "consent_digest_recomputed")
+        if exact_hotel_terms(consent.evidence) != consent.terms:
+            self._raise_incompatible(recovery_id, "consent_terms_evidence")
+        policy_result = evaluate_hotel_policy(
+            consent.evidence,
+            DETERMINISTIC_HOTEL_AUTHORITY,
+        )
+        if (
+            policy_result.hard_constraint_satisfied
+            != consent.hard_constraint_satisfied
+        ):
+            self._raise_incompatible(recovery_id, "hard_constraint_result")
+        if not policy_result.hard_constraint_satisfied:
+            self._raise_incompatible(recovery_id, "hard_constraint_denied")
+        if (
+            policy_result.delegated_authority_satisfied
+            != consent.delegated_authority_satisfied
+        ):
+            self._raise_incompatible(recovery_id, "authority_result")
+        if not policy_result.delegated_authority_satisfied:
+            self._raise_incompatible(recovery_id, "authority_denied")
 
         try:
             state = await RunState.from_json(
@@ -305,9 +466,33 @@ class RecoveryOrchestrator:
             )
         except ValueError:
             self._raise_incompatible(recovery_id, "restored_arguments")
-        if remedy_action_digest(restored_arguments) != envelope.remedy_digest:
-            self._raise_incompatible(recovery_id, "restored_remedy_digest")
+        if restored_arguments != consent.evidence:
+            self._raise_incompatible(recovery_id, "restored_evidence")
+        if remedy_action_digest(restored_arguments) != envelope.action_digest:
+            self._raise_incompatible(recovery_id, "restored_action_digest")
 
+        restored_consent_digest = remedy_consent_digest(
+            {
+                "recoveryId": recovery_id,
+                "remedyId": restored_arguments.remedy.remedy_id,
+                "terms": exact_hotel_terms(restored_arguments).model_dump(
+                    mode="json",
+                    by_alias=True,
+                ),
+                "costDeltaMinor": restored_arguments.remedy.cost_delta_minor,
+                "changedFields": sorted(restored_arguments.remedy.changed_fields),
+                "providerCommitments": sorted(
+                    restored_arguments.remedy.provider_commitments
+                ),
+                "expiry": consent.expiry,
+            }
+        )
+        if restored_consent_digest != envelope.consent_digest:
+            self._raise_incompatible(recovery_id, "restored_consent_digest")
+
+        validated_claim = self._store.validate_claimed_decision(claim)
+        if validated_claim.response is not None:
+            return None
         state.approve(interruption)
         self._store.update_pending_approval_status(recovery_id, status="approved")
         completed = await Runner.run(
@@ -315,5 +500,4 @@ class RecoveryOrchestrator:
             state,
             run_config=configure_sdk_stub_tracing(),
         )
-        self._store.update_pending_approval_status(recovery_id, status="completed")
         return completed

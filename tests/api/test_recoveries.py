@@ -75,7 +75,7 @@ def test_replay_recovery_snapshot_and_receipt_are_durable(client: TestClient) ->
     assert client.get(f"/api/recoveries/{uuid4()}/receipt").status_code == 404
 
 
-def test_sdk_stub_hotel_is_rejected_without_creating_a_recovery(tmp_path) -> None:
+def test_sdk_stub_hotel_creates_a_pending_recovery_without_execution(tmp_path) -> None:
     database_path = tmp_path / "api-sdk-stub.sqlite3"
     store = SQLiteStore(database_path)
     with TestClient(
@@ -89,9 +89,12 @@ def test_sdk_stub_hotel_is_rejected_without_creating_a_recovery(tmp_path) -> Non
             json={"scenarioId": "hotel", "executionMode": "sdk_stub"},
         )
 
-    assert response.status_code == 422
+    assert response.status_code == 201
+    assert response.json()["status"] == "pending_approval"
+    assert response.json()["pendingApproval"]["executionStarted"] is False
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute("SELECT COUNT(*) FROM recoveries").fetchone() == (0,)
+        assert connection.execute("SELECT COUNT(*) FROM recoveries").fetchone() == (1,)
+        assert connection.execute("SELECT COUNT(*) FROM executions").fetchone() == (0,)
 
 
 def test_demo_reset_is_forbidden_by_default_without_deleting_recovery(

@@ -30,7 +30,7 @@ class BrokerRemedy(StubSchema):
     remedy_id: str
     action: Literal["replace_room"]
     room_type: str
-    cost_delta_minor: int
+    cost_delta_minor: int = Field(strict=True)
     currency: Literal["USD"]
     changed_fields: list[str] = Field(min_length=1)
     provider_commitments: list[str] = Field(min_length=1)

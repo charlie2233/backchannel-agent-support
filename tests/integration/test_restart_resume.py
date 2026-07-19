@@ -5,10 +5,21 @@ import sqlite3
 import pytest
 from agents.exceptions import UserError
 
-from server.models import ExecutionMode, RecoveryStatus
+from server.models import ApprovalDecisionRequest, ExecutionMode, RecoveryStatus
 from server.orchestrator import RecoveryOrchestrator
 from server.providers.hotel_simulator import HotelSimulator
 from server.store import RecoveryNotFoundError, SQLiteStore
+
+
+def approval_request(pending, decision_id: str) -> ApprovalDecisionRequest:
+    approval = pending.recovery.pending_approval
+    assert approval is not None
+    return ApprovalDecisionRequest(
+        clientDecisionId=decision_id,
+        remedyId=approval.remedy_id,
+        remedyDigest=approval.remedy_digest,
+        toolCallId=approval.tool_call_id,
+    )
 
 
 def test_pending_sdk_approval_resumes_after_every_runtime_object_is_recreated(
@@ -23,6 +34,7 @@ def test_pending_sdk_approval_resumes_after_every_runtime_object_is_recreated(
         orchestrator.start("hotel", execution_mode=ExecutionMode.SDK_STUB)
     )
     recovery_id = pending.recovery.recovery_id
+    request = approval_request(pending, "restart-approval")
     interruption = pending.sdk_result.interruptions[0]
     envelope = store.get_pending_approval(recovery_id)
 
@@ -33,7 +45,9 @@ def test_pending_sdk_approval_resumes_after_every_runtime_object_is_recreated(
     assert envelope.agent_graph_version
     assert len(envelope.definition_digest) == 64
     assert envelope.root_trace_id.startswith("qa_trace_")
-    assert len(envelope.remedy_digest) == 64
+    assert len(envelope.action_digest) == 64
+    assert envelope.remedy_id == "remedy-king-room"
+    assert envelope.consent_digest.startswith("sha256:")
     assert envelope.state_json
     assert provider.dispatch_count == 0
     public_event_json = json.dumps(
@@ -53,9 +67,9 @@ def test_pending_sdk_approval_resumes_after_every_runtime_object_is_recreated(
         hotel_provider=fresh_provider,
     )
 
-    completed = asyncio.run(fresh_orchestrator.resume_approved(recovery_id))
+    completed = asyncio.run(fresh_orchestrator.approve_decision(recovery_id, request))
 
-    assert completed.interruptions == []
+    assert completed.status == "completed"
     assert fresh_provider.dispatch_count == 1
     assert reopened_store.get_recovery(recovery_id).status is RecoveryStatus.COMPLETED
     assert reopened_store.get_receipt(recovery_id).provider_execution is True
@@ -74,20 +88,21 @@ def test_startup_reconciles_a_committed_execution_without_redispatch(
         orchestrator.start("hotel", execution_mode=ExecutionMode.SDK_STUB)
     )
     recovery_id = pending.recovery.recovery_id
-    original_transition = store.record_transition
+    request = approval_request(pending, "crash-reconcile")
+    original_finalize = store.finalize_completed_execution
 
     class SimulatedProcessCrash(RuntimeError):
         pass
 
     def crash_after_execution(*args, **kwargs):
-        if kwargs.get("status") is RecoveryStatus.COMPLETED:
+        if store.count_executions(recovery_id) == 1:
             raise SimulatedProcessCrash("crash after provider commit")
-        return original_transition(*args, **kwargs)
+        return original_finalize(*args, **kwargs)
 
-    monkeypatch.setattr(store, "record_transition", crash_after_execution)
+    monkeypatch.setattr(store, "finalize_completed_execution", crash_after_execution)
 
     with pytest.raises(UserError, match="crash after provider commit"):
-        asyncio.run(orchestrator.resume_approved(recovery_id))
+        asyncio.run(orchestrator.approve_decision(recovery_id, request))
 
     assert provider.dispatch_count == 1
     assert store.count_executions(recovery_id) == 1
@@ -103,6 +118,7 @@ def test_startup_reconciles_a_committed_execution_without_redispatch(
     assert fresh_store.get_recovery(recovery_id).status is RecoveryStatus.COMPLETED
     assert fresh_store.get_receipt(recovery_id).provider_execution is True
     assert fresh_store.count_executions(recovery_id) == 1
+    assert fresh_store.count_decisions(recovery_id) == 1
     terminal_events = [
         event for event in fresh_store.list_events(recovery_id) if event.terminal
     ]
@@ -111,12 +127,18 @@ def test_startup_reconciles_a_committed_execution_without_redispatch(
 
     second_store = SQLiteStore(database_path)
     second_provider = HotelSimulator(store=second_store)
-    RecoveryOrchestrator(store=second_store, hotel_provider=second_provider)
+    second_orchestrator = RecoveryOrchestrator(
+        store=second_store,
+        hotel_provider=second_provider,
+    )
     assert second_provider.dispatch_count == 0
     second_terminal_events = [
         event for event in second_store.list_events(recovery_id) if event.terminal
     ]
     assert len(second_terminal_events) == 1
+    replayed = asyncio.run(second_orchestrator.approve_decision(recovery_id, request))
+    assert replayed.status == "completed"
+    assert second_provider.dispatch_count == 0
 
 
 def test_task3_schema_migration_preserves_parent_child_rows_and_foreign_keys(
