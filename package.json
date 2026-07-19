@@ -8,16 +8,24 @@
   "scripts": {
     "build": "npm --workspace web run build",
     "check": "npm --workspace web run check && uv run ruff check server tests && uv run mypy server && uv run pytest -q",
+    "openapi:check": "uv run python scripts/export_openapi.py --check",
+    "openapi:export": "uv run python scripts/export_openapi.py",
     "presmoke:production": "npm run build",
     "smoke:live": "uv run python scripts/smoke_live.py",
     "smoke:live:3": "uv run python scripts/smoke_live_three.py",
     "smoke:container": "uv run python scripts/docker_smoke.py",
+    "smoke:docker": "uv run python scripts/docker_smoke.py",
     "smoke:production": "uv run python scripts/docker_smoke.py --launch",
     "smoke:stub": "node scripts/smoke-stub.mjs",
     "start": "uv run python scripts/start.py",
-    "test": "npm --workspace web test -- --run"
+    "secret:scan": "uv run python scripts/secret_scan.py",
+    "test": "npm --workspace web test -- --run",
+    "test:e2e": "bash scripts/capture_release.sh"
   },
   "engines": {
     "node": ">=22.13 <23"
+  },
+  "devDependencies": {
+    "@playwright/cli": "0.1.17"
   }
 }

@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      OPENAI_API_KEY: ""
+      UV_CACHE_DIR: /tmp/backchannel-uv-cache
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+      - run: npm ci
+      - run: uv sync --frozen --all-groups
+      - run: npm run check
+      - run: npm run smoke:stub
+      - run: npm run smoke:production
+      - run: npm run openapi:check
+      - run: npm run secret:scan
+
+  container-smoke:
+    runs-on: ubuntu-latest
+    needs: verify
+    env:
+      OPENAI_API_KEY: ""
+      BACKCHANNEL_SMOKE_BASE_URL: http://127.0.0.1:8000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+      - run: npm ci
+      - run: uv sync --frozen --all-groups
+      - run: docker build -t backchannel:build-week .
+      - name: Prepare masked non-disclosure canary
+        run: |
+          release_canary="sk-ci-$(openssl rand -hex 24)"
+          echo "::add-mask::$release_canary"
+          printf 'BACKCHANNEL_SMOKE_CANARY=%s\n' "$release_canary" >> "$GITHUB_ENV"
+      - name: Start packaged app
+        run: |
+          docker run --rm -d --name backchannel-ci -p 8000:8000 \
+            -e BACKCHANNEL_CORS_ORIGINS=https://judge.example \
+            -e BACKCHANNEL_DEMO_RESET_ENABLED=true \
+            -e BACKCHANNEL_IDENTITY_HASH_SECRET=ci-container-identity-boundary-0123456789 \
+            -e OPENAI_API_KEY="$BACKCHANNEL_SMOKE_CANARY" \
+            backchannel:build-week
+          for attempt in $(seq 1 40); do
+            if curl --fail --silent http://127.0.0.1:8000/readyz >/dev/null; then
+              exit 0
+            fi
+            sleep 0.5
+          done
+          exit 1
+      - run: npm run smoke:docker
+      - if: always()
+        run: docker stop backchannel-ci || true

@@ -1,0 +1,990 @@
+{
+  "components": {
+    "schemas": {
+      "ApprovalDecisionRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/DecisionAction"
+          },
+          "clientDecisionId": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Clientdecisionid",
+            "type": "string"
+          },
+          "remedyDigest": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Remedydigest",
+            "type": "string"
+          },
+          "remedyId": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Remedyid",
+            "type": "string"
+          },
+          "toolCallId": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Toolcallid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "clientDecisionId",
+          "remedyId",
+          "remedyDigest",
+          "toolCallId"
+        ],
+        "title": "ApprovalDecisionRequest",
+        "type": "object"
+      },
+      "ApprovalDecisionResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/DecisionAction"
+          },
+          "approvedRemedyDigest": {
+            "anyOf": [
+              {
+                "pattern": "^sha256:[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approvedremedydigest"
+          },
+          "clientDecisionId": {
+            "title": "Clientdecisionid",
+            "type": "string"
+          },
+          "executionStarted": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Executionstarted"
+          },
+          "recoveryId": {
+            "title": "Recoveryid",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "completed",
+              "closed_without_action",
+              "outcome_unknown"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "clientDecisionId",
+          "recoveryId",
+          "status",
+          "executionStarted"
+        ],
+        "title": "ApprovalDecisionResponse",
+        "type": "object"
+      },
+      "CreateRecoveryRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "executionMode": {
+            "$ref": "#/components/schemas/ExecutionMode"
+          },
+          "scenarioId": {
+            "$ref": "#/components/schemas/ScenarioId"
+          }
+        },
+        "required": [
+          "scenarioId",
+          "executionMode"
+        ],
+        "title": "CreateRecoveryRequest",
+        "type": "object"
+      },
+      "DecisionAction": {
+        "enum": [
+          "approve",
+          "decline"
+        ],
+        "title": "DecisionAction",
+        "type": "string"
+      },
+      "DemoResetResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "reset": {
+            "const": true,
+            "title": "Reset",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "reset"
+        ],
+        "title": "DemoResetResponse",
+        "type": "object"
+      },
+      "ExecutionMode": {
+        "enum": [
+          "openai_live",
+          "sdk_stub",
+          "replay_fixture"
+        ],
+        "title": "ExecutionMode",
+        "type": "string"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "HealthResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "backend": {
+            "$ref": "#/components/schemas/RuntimeBackend"
+          },
+          "liveReady": {
+            "title": "Liveready",
+            "type": "boolean"
+          },
+          "providerBoundary": {
+            "$ref": "#/components/schemas/ProviderBoundary"
+          }
+        },
+        "required": [
+          "backend",
+          "liveReady",
+          "providerBoundary"
+        ],
+        "title": "HealthResponse",
+        "type": "object"
+      },
+      "HotelRemedyTerms": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "const": "replace_room",
+            "title": "Action",
+            "type": "string"
+          },
+          "bookingId": {
+            "title": "Bookingid",
+            "type": "string"
+          },
+          "currency": {
+            "const": "USD",
+            "title": "Currency",
+            "type": "string"
+          },
+          "replacement": {
+            "$ref": "#/components/schemas/HotelReplacementTerms"
+          },
+          "stay": {
+            "$ref": "#/components/schemas/HotelStayTerms"
+          }
+        },
+        "required": [
+          "bookingId",
+          "action",
+          "replacement",
+          "stay",
+          "currency"
+        ],
+        "title": "HotelRemedyTerms",
+        "type": "object"
+      },
+      "HotelReplacementTerms": {
+        "additionalProperties": false,
+        "properties": {
+          "fromRoomType": {
+            "title": "Fromroomtype",
+            "type": "string"
+          },
+          "toRoomType": {
+            "title": "Toroomtype",
+            "type": "string"
+          }
+        },
+        "required": [
+          "fromRoomType",
+          "toRoomType"
+        ],
+        "title": "HotelReplacementTerms",
+        "type": "object"
+      },
+      "HotelStayTerms": {
+        "additionalProperties": false,
+        "properties": {
+          "checkIn": {
+            "title": "Checkin",
+            "type": "string"
+          },
+          "checkOut": {
+            "title": "Checkout",
+            "type": "string"
+          }
+        },
+        "required": [
+          "checkIn",
+          "checkOut"
+        ],
+        "title": "HotelStayTerms",
+        "type": "object"
+      },
+      "PendingApprovalView": {
+        "additionalProperties": false,
+        "description": "Strict public consent record; opaque SDK state never enters this model.",
+        "properties": {
+          "changedFields": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Changedfields",
+            "type": "array"
+          },
+          "costDeltaMinor": {
+            "title": "Costdeltaminor",
+            "type": "integer"
+          },
+          "delegatedAuthoritySatisfied": {
+            "title": "Delegatedauthoritysatisfied",
+            "type": "boolean"
+          },
+          "executionStarted": {
+            "const": false,
+            "title": "Executionstarted",
+            "type": "boolean"
+          },
+          "expiry": {
+            "format": "date-time",
+            "title": "Expiry",
+            "type": "string"
+          },
+          "hardConstraintSatisfied": {
+            "title": "Hardconstraintsatisfied",
+            "type": "boolean"
+          },
+          "providerCommitments": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Providercommitments",
+            "type": "array"
+          },
+          "remedyDigest": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Remedydigest",
+            "type": "string"
+          },
+          "remedyId": {
+            "title": "Remedyid",
+            "type": "string"
+          },
+          "terms": {
+            "$ref": "#/components/schemas/HotelRemedyTerms"
+          },
+          "toolCallId": {
+            "title": "Toolcallid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "remedyId",
+          "remedyDigest",
+          "terms",
+          "costDeltaMinor",
+          "changedFields",
+          "providerCommitments",
+          "expiry",
+          "hardConstraintSatisfied",
+          "delegatedAuthoritySatisfied",
+          "toolCallId",
+          "executionStarted"
+        ],
+        "title": "PendingApprovalView",
+        "type": "object"
+      },
+      "ProviderBoundary": {
+        "enum": [
+          "demo_adapter_only"
+        ],
+        "title": "ProviderBoundary",
+        "type": "string"
+      },
+      "ReadinessResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "ReadinessResponse",
+        "type": "object"
+      },
+      "RecoveryReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "agentGraphVersion": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agentgraphversion"
+          },
+          "approvalCount": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Approvalcount",
+            "type": "integer"
+          },
+          "approvedRemedyDigest": {
+            "anyOf": [
+              {
+                "pattern": "^sha256:[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approvedremedydigest"
+          },
+          "authorizationSource": {
+            "title": "Authorizationsource",
+            "type": "string"
+          },
+          "boundary": {
+            "title": "Boundary",
+            "type": "string"
+          },
+          "definitionDigest": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Definitiondigest"
+          },
+          "executionMode": {
+            "$ref": "#/components/schemas/ExecutionMode"
+          },
+          "modelCall": {
+            "default": false,
+            "title": "Modelcall",
+            "type": "boolean"
+          },
+          "modelIds": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Modelids",
+            "type": "array"
+          },
+          "protocolVersion": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Protocolversion"
+          },
+          "providerExecution": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Providerexecution"
+          },
+          "providerResult": {
+            "title": "Providerresult",
+            "type": "string"
+          },
+          "recoveryId": {
+            "title": "Recoveryid",
+            "type": "string"
+          },
+          "rootTraceId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Roottraceid"
+          },
+          "sdkVersion": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sdkversion"
+          },
+          "simulated": {
+            "title": "Simulated",
+            "type": "boolean"
+          },
+          "status": {
+            "enum": [
+              "completed",
+              "simulated_completed",
+              "closed_without_action",
+              "outcome_unknown"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "verificationResults": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Verificationresults",
+            "type": "array"
+          }
+        },
+        "required": [
+          "recoveryId",
+          "executionMode",
+          "status",
+          "simulated",
+          "providerExecution",
+          "modelIds",
+          "boundary",
+          "providerResult",
+          "authorizationSource",
+          "verificationResults"
+        ],
+        "title": "RecoveryReceipt",
+        "type": "object"
+      },
+      "RecoverySnapshot": {
+        "additionalProperties": false,
+        "properties": {
+          "createdAt": {
+            "format": "date-time",
+            "title": "Createdat",
+            "type": "string"
+          },
+          "currentStep": {
+            "maximum": 5.0,
+            "minimum": 0.0,
+            "title": "Currentstep",
+            "type": "integer"
+          },
+          "currentStepSummary": {
+            "title": "Currentstepsummary",
+            "type": "string"
+          },
+          "executionMode": {
+            "$ref": "#/components/schemas/ExecutionMode"
+          },
+          "modelIds": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Modelids",
+            "type": "array"
+          },
+          "pendingApproval": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PendingApprovalView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "recoveryId": {
+            "title": "Recoveryid",
+            "type": "string"
+          },
+          "rootTraceId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Roottraceid"
+          },
+          "scenarioId": {
+            "$ref": "#/components/schemas/ScenarioId"
+          },
+          "status": {
+            "$ref": "#/components/schemas/RecoveryStatus"
+          },
+          "updatedAt": {
+            "format": "date-time",
+            "title": "Updatedat",
+            "type": "string"
+          }
+        },
+        "required": [
+          "recoveryId",
+          "scenarioId",
+          "executionMode",
+          "modelIds",
+          "rootTraceId",
+          "status",
+          "currentStep",
+          "currentStepSummary",
+          "createdAt",
+          "updatedAt"
+        ],
+        "title": "RecoverySnapshot",
+        "type": "object"
+      },
+      "RecoveryStatus": {
+        "enum": [
+          "in_progress",
+          "pending_approval",
+          "completed",
+          "closed_without_action",
+          "outcome_unknown"
+        ],
+        "title": "RecoveryStatus",
+        "type": "string"
+      },
+      "RuntimeBackend": {
+        "enum": [
+          "openai",
+          "stub"
+        ],
+        "title": "RuntimeBackend",
+        "type": "string"
+      },
+      "ScenarioId": {
+        "enum": [
+          "hotel",
+          "api-quota"
+        ],
+        "title": "ScenarioId",
+        "type": "string"
+      },
+      "ScenarioResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "executionMode": {
+            "$ref": "#/components/schemas/ExecutionMode"
+          },
+          "id": {
+            "$ref": "#/components/schemas/ScenarioId"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "summary",
+          "executionMode"
+        ],
+        "title": "ScenarioResponse",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "Backchannel API",
+    "version": "0.3.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/demo/reset": {
+      "post": {
+        "operationId": "reset_demo_api_demo_reset_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DemoResetResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Reset Demo"
+      }
+    },
+    "/api/recoveries": {
+      "post": {
+        "operationId": "create_recovery_api_recoveries_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateRecoveryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecoverySnapshot"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Recovery"
+      }
+    },
+    "/api/recoveries/{recovery_id}": {
+      "get": {
+        "operationId": "get_recovery_api_recoveries__recovery_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "recovery_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Recovery Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecoverySnapshot"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Recovery"
+      }
+    },
+    "/api/recoveries/{recovery_id}/decisions": {
+      "post": {
+        "operationId": "approve_recovery_api_recoveries__recovery_id__decisions_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "recovery_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Recovery Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApprovalDecisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalDecisionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Approve Recovery"
+      }
+    },
+    "/api/recoveries/{recovery_id}/events": {
+      "get": {
+        "operationId": "recovery_events_api_recoveries__recovery_id__events_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "recovery_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Recovery Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Last-Event-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Last-Event-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Recovery Events"
+      }
+    },
+    "/api/recoveries/{recovery_id}/receipt": {
+      "get": {
+        "operationId": "get_receipt_api_recoveries__recovery_id__receipt_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "recovery_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Recovery Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecoveryReceipt"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Receipt"
+      }
+    },
+    "/api/scenarios": {
+      "get": {
+        "operationId": "scenarios_api_scenarios_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ScenarioResponse"
+                  },
+                  "title": "Response Scenarios Api Scenarios Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Scenarios"
+      }
+    },
+    "/health": {
+      "get": {
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health"
+      }
+    },
+    "/readyz": {
+      "get": {
+        "operationId": "ready_readyz_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadinessResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Ready"
+      }
+    }
+  }
+}

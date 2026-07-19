@@ -1,0 +1,24 @@
+{
+  "browser": {
+    "browserName": "chromium",
+    "isolated": true,
+    "launchOptions": {
+      "channel": "chrome",
+      "headless": true
+    },
+    "contextOptions": {
+      "colorScheme": "light",
+      "locale": "en-US",
+      "reducedMotion": "reduce",
+      "serviceWorkers": "block",
+      "viewport": {
+        "width": 1440,
+        "height": 1024
+      }
+    }
+  },
+  "timeouts": {
+    "action": 15000,
+    "navigation": 20000
+  }
+}
