@@ -52,8 +52,11 @@ model call nor a provider dispatch.
 - Recovery detail is bound to the signed HttpOnly demo session that created or explicitly
   started it. Foreign, expired, missing, and tampered sessions receive the same generic 404.
 - The browser keeps only the last validated hotel recovery UUID in `sessionStorage`. Reload
-  first asks the session-authorized snapshot endpoint to restore that run; an invalid or
-  inaccessible hint is cleared and never causes a replacement live run.
+  first asks the session-authorized snapshot endpoint to restore that run. A malformed local
+  hint, generic authorized 404, or valid correlated wrong-scenario snapshot is terminal and
+  clears it. Network, non-404, malformed-response, and miscorrelated-response failures retain
+  the UUID and expose only a coalesced **Retry saved recovery** GET; they trust no snapshot and
+  never cause a replacement run or automatic decision resume.
 - Hotel execution pauses at the Agents SDK `commit_remedy` interruption. Consent displays
   exact terms, a UTC expiry, and a canonical `sha256:` digest.
 - Approval rechecks the digest, interruption, expiry, hard constraints, and delegated

@@ -241,8 +241,13 @@ code,
   cursor: pointer;
 }
 
-.scenario-button:hover {
+.scenario-button:not(:disabled):hover {
   background: #f0f4f8;
+}
+
+.scenario-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
 }
 
 .scenario-button[aria-current="page"] {
@@ -1190,6 +1195,11 @@ code,
     padding: 0 42px 0 12px;
     font-size: 15px;
     font-weight: 680;
+  }
+
+  .scenario-selector select:disabled {
+    cursor: not-allowed;
+    opacity: 0.65;
   }
 
   .workspace {

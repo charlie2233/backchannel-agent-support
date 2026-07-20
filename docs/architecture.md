@@ -39,13 +39,18 @@ creates an `openai_live` hotel run, and an in-flight guard coalesces rapid activ
 React can re-render the disabled control. After any validated hotel snapshot, the browser may
 store only its canonical UUID in same-tab `sessionStorage`; the signed HttpOnly cookie remains
 the access credential. Reload performs the authorized snapshot GET before any fallback or new
-start. A valid snapshot restores its SSE, consent, and receipt lifecycle. Malformed, stale,
-foreign-session, expired-session, and retention-deleted hints are cleared and leave the UI in a
-truthful no-run state. If live mode is unavailable, that state offers explicit replay and SDK QA
-actions without automatically creating a replacement. While a resume or explicit start is
+start. A valid snapshot restores its SSE, consent, and receipt lifecycle. Malformed local hints,
+generic 404s, and valid correlated wrong-scenario lookup results are terminal: they are cleared
+and leave the UI in a truthful no-run state. Network failures, non-404 responses, and malformed,
+contract-invalid, or miscorrelated success responses are indeterminate instead. They retain exactly
+the canonical UUID, trust no snapshot, and expose only **Retry saved recovery**; rapid activation
+coalesces to the same authorized GET, with no automatic POST, decision resume, or fallback. If that
+retry returns a generic 404 the hint is cleared; a valid hotel snapshot restores normally. If live
+mode is unavailable after a terminal lookup, the no-run state offers explicit replay and SDK QA
+actions without automatically creating a replacement. While a lookup, retry, or explicit start is
 unresolved, the lifecycle remains neutral at **Awaiting server evidence** with no current step or
-execution-mode claim. React StrictMode can probe the idempotent GET effect twice in development,
-but it does not create a recovery; live creation remains explicitly initiated and one-POST.
+execution-mode claim. React StrictMode can probe the idempotent GET effect twice in development, but
+it does not create a recovery; live creation remains explicitly initiated and one-POST.
 
 SQLite persists the pending Agents SDK state envelope, consent evidence, decision claim,
 provider execution record, event ledger, receipt, and opaque recovery-access association. A

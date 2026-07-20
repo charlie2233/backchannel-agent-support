@@ -8,6 +8,8 @@ const HOTEL_RECOVERY_KEY = "backchannel.hotelRecoveryId";
 const LIVE_RECOVERY_ID = "11111111-2222-4333-8444-555555555555";
 const AWAITING_DEMO_COPY =
   "Awaiting authoritative server evidence for the explicitly requested demo run.";
+const RETRYABLE_RESUME_COPY =
+  "Saved recovery evidence is temporarily unavailable. Its same-tab recovery ID was retained, and no server state or action has been accepted.";
 
 function liveHealth(): Response {
   return new Response(
@@ -139,11 +141,13 @@ describe("explicit, reload-safe live recovery", () => {
 
   it("shows neutral awaiting evidence while a validated resume remains unresolved", async () => {
     let settleResume: ((response: Response) => void) | undefined;
+    const requests: Array<{ url: string; method: string }> = [];
     window.sessionStorage.setItem(HOTEL_RECOVERY_KEY, LIVE_RECOVERY_ID);
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockImplementation((input: string | URL | Request) => {
+      vi.fn().mockImplementation((input: string | URL | Request, init?: RequestInit) => {
         const url = String(input);
+        requests.push({ url, method: init?.method ?? "GET" });
         if (url === "/health") return Promise.resolve(liveHealth());
         if (url === `/api/recoveries/${LIVE_RECOVERY_ID}`) {
           return new Promise<Response>((resolve) => {
@@ -161,12 +165,18 @@ describe("explicit, reload-safe live recovery", () => {
     expect(screen.queryByText("No server run started.")).not.toBeInTheDocument();
     expect(screen.queryByText("Replay fixture")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Start live recovery" })).not.toBeInTheDocument();
+    const quotaScenario = screen.getByRole("button", { name: /API quota recovery/i });
+    expect(quotaScenario).toBeDisabled();
+    fireEvent.click(quotaScenario);
+    expect(requests.filter(({ method }) => method === "POST")).toHaveLength(0);
+    expectNoSnapshotLifecycle("Awaiting server evidence");
 
     await act(async () => {
       settleResume?.(jsonResponse(liveSnapshot()));
       await Promise.resolve();
     });
     expect((await screen.findAllByText("Authoritative live recovery loaded."))[0]).toBeVisible();
+    expect(quotaScenario).toBeEnabled();
   });
 
   it("resumes a validated pending recovery before fallback without creating a run", async () => {
@@ -437,6 +447,167 @@ describe("explicit, reload-safe live recovery", () => {
     expect(requestModes).toHaveLength(0);
     expect(screen.getAllByText("No server run started.")[0]).toBeVisible();
     expectNoSnapshotLifecycle("Not started");
+  });
+
+  it("retains an indeterminate hint and coalesces retry before restoring a claimed snapshot", async () => {
+    window.sessionStorage.setItem(HOTEL_RECOVERY_KEY, LIVE_RECOVERY_ID);
+    let recoveryGets = 0;
+    let settleRetry: ((response: Response) => void) | undefined;
+    const requests: Array<{ url: string; method: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? "GET";
+        requests.push({ url, method });
+        if (url === "/health") return Promise.resolve(liveHealth());
+        if (url === `/api/recoveries/${LIVE_RECOVERY_ID}` && method === "GET") {
+          recoveryGets += 1;
+          if (recoveryGets === 1) {
+            return Promise.resolve(
+              new Response("private upstream diagnostics", { status: 503 }),
+            );
+          }
+          return new Promise<Response>((resolve) => {
+            settleRetry = resolve;
+          });
+        }
+        throw new Error(`Unexpected request: ${method} ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    const retry = await screen.findByRole("button", { name: "Retry saved recovery" });
+    expect(screen.getByText(RETRYABLE_RESUME_COPY)).toBeVisible();
+    expect(screen.queryByText(/private upstream diagnostics/i)).not.toBeInTheDocument();
+    expect(window.sessionStorage.getItem(HOTEL_RECOVERY_KEY)).toBe(LIVE_RECOVERY_ID);
+    expectNoSnapshotLifecycle("Awaiting server evidence");
+    expect(screen.queryByRole("button", { name: "Start live recovery" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Run replay fixture" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Run SDK QA trace" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Resume exact/i })).not.toBeInTheDocument();
+    expect(requests.filter(({ method }) => method === "POST")).toHaveLength(0);
+    const quotaScenario = screen.getByRole("button", { name: /API quota recovery/i });
+    expect(quotaScenario).toBeDisabled();
+    fireEvent.click(quotaScenario);
+    expect(screen.getByRole("button", { name: "Retry saved recovery" })).toBeVisible();
+    expect(requests.filter(({ method }) => method === "POST")).toHaveLength(0);
+
+    retry.focus();
+    fireEvent.click(retry);
+    fireEvent.click(retry);
+
+    expect(recoveryGets).toBe(2);
+    const retrying = screen.getByRole("button", { name: "Retrying saved recovery…" });
+    expect(quotaScenario).toBeDisabled();
+    fireEvent.click(quotaScenario);
+    expect(retrying).toBe(retry);
+    expect(retrying).toBeDisabled();
+    expect(retrying).toHaveFocus();
+    expect(retrying.closest("section")).toHaveAttribute("aria-busy", "true");
+    expect(screen.getByText(RETRYABLE_RESUME_COPY)).toBeVisible();
+    expect(requests.filter(({ method }) => method === "POST")).toHaveLength(0);
+    expectNoSnapshotLifecycle("Awaiting server evidence");
+    await act(async () => {
+      settleRetry?.(
+        jsonResponse(
+          liveSnapshot({
+            status: "pending_approval",
+            currentStep: 3,
+            currentStepSummary: "Exact approval remains durably claimed.",
+            claimedDecision: {
+              action: "approve",
+              remedyDigest: `sha256:${"a".repeat(64)}`,
+              expiry: "2099-08-01T18:45:30Z",
+            },
+          }),
+        ),
+      );
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByRole("button", { name: "Resume exact approval" })).toBeVisible();
+    expect(window.sessionStorage.getItem(HOTEL_RECOVERY_KEY)).toBe(LIVE_RECOVERY_ID);
+    expect(quotaScenario).toBeEnabled();
+    expect(requests.filter(({ method }) => method === "POST")).toHaveLength(0);
+  });
+
+  it("retains a miscorrelated response, then clears the hint when explicit retry returns 404", async () => {
+    window.sessionStorage.setItem(HOTEL_RECOVERY_KEY, LIVE_RECOVERY_ID);
+    let recoveryGets = 0;
+    const requests: Array<{ url: string; method: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? "GET";
+        requests.push({ url, method });
+        if (url === "/health") return Promise.resolve(liveHealth());
+        if (url === `/api/recoveries/${LIVE_RECOVERY_ID}` && method === "GET") {
+          recoveryGets += 1;
+          return Promise.resolve(
+            recoveryGets === 1
+              ? jsonResponse(
+                  liveSnapshot({
+                    recoveryId: "99999999-2222-4333-8444-555555555555",
+                  }),
+                )
+              : new Response(null, { status: 404 }),
+          );
+        }
+        throw new Error(`Unexpected request: ${method} ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    const retry = await screen.findByRole("button", { name: "Retry saved recovery" });
+    expect(window.sessionStorage.getItem(HOTEL_RECOVERY_KEY)).toBe(LIVE_RECOVERY_ID);
+    expectNoSnapshotLifecycle("Awaiting server evidence");
+    expect(requests.filter(({ method }) => method === "POST")).toHaveLength(0);
+
+    fireEvent.click(retry);
+
+    expect(await screen.findByRole("button", { name: "Start live recovery" })).toBeVisible();
+    expect(recoveryGets).toBe(2);
+    expect(window.sessionStorage.getItem(HOTEL_RECOVERY_KEY)).toBeNull();
+    expectNoSnapshotLifecycle("Not started");
+    expect(requests.filter(({ method }) => method === "POST")).toHaveLength(0);
+  });
+
+  it("clears a correlated wrong-scenario snapshot as terminal without creating a run", async () => {
+    window.sessionStorage.setItem(HOTEL_RECOVERY_KEY, LIVE_RECOVERY_ID);
+    const requests: Array<{ url: string; method: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? "GET";
+        requests.push({ url, method });
+        if (url === "/health") return Promise.resolve(liveHealth());
+        if (url === `/api/recoveries/${LIVE_RECOVERY_ID}`) {
+          return Promise.resolve(
+            jsonResponse(
+              liveSnapshot({
+                scenarioId: "api-quota",
+                executionMode: "sdk_stub",
+                modelIds: [],
+                rootTraceId: "qa_trace_0123456789abcdef0123456789abcdef",
+              }),
+            ),
+          );
+        }
+        throw new Error(`Unexpected request: ${method} ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    expect(await screen.findByRole("button", { name: "Start live recovery" })).toBeVisible();
+    expect(window.sessionStorage.getItem(HOTEL_RECOVERY_KEY)).toBeNull();
+    expectNoSnapshotLifecycle("Not started");
+    expect(requests.filter(({ method }) => method === "POST")).toHaveLength(0);
   });
 
   it.each([

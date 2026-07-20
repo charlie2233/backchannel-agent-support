@@ -5,6 +5,7 @@ import {
   DecisionCapacityError,
   LIVE_ADMISSION_MESSAGES,
   LiveAdmissionError,
+  RecoveryLookupError,
   createRecovery,
   getRecovery,
   getReceipt,
@@ -453,7 +454,81 @@ describe("recovery response correlation", () => {
     claimedDecision: null,
   };
 
-  it("rejects a shape-valid GET response for a different recovery", async () => {
+  it("classifies a generic 404 as a terminal saved-recovery lookup", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response(null, { status: 404 })),
+    );
+
+    await expect(getRecovery(requestedRecoveryId)).rejects.toEqual(
+      expect.objectContaining<Partial<RecoveryLookupError>>({
+        name: "RecoveryLookupError",
+        disposition: "terminal",
+      }),
+    );
+  });
+
+  it.each([
+    {
+      name: "network failure",
+      fetchResult: () => Promise.reject(new Error("private network details")),
+    },
+    {
+      name: "503 response",
+      fetchResult: () =>
+        Promise.resolve(new Response("private upstream details", { status: 503 })),
+    },
+    {
+      name: "malformed JSON response",
+      fetchResult: () =>
+        Promise.resolve(
+          new Response("not-json", {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        ),
+    },
+    {
+      name: "contract-invalid response",
+      fetchResult: () =>
+        Promise.resolve(
+          new Response(JSON.stringify({
+            ...validSnapshot,
+            unexpected: "private contract detail",
+          }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        ),
+    },
+  ])("classifies a $name as a retryable saved-recovery lookup", async ({ fetchResult }) => {
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(fetchResult));
+
+    const error = await getRecovery(requestedRecoveryId).catch(
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toEqual(
+      expect.objectContaining<Partial<RecoveryLookupError>>({
+        name: "RecoveryLookupError",
+        disposition: "retryable",
+      }),
+    );
+    expect((error as Error).message).toBe(
+      "Saved recovery evidence is temporarily unavailable.",
+    );
+  });
+
+  it("passes an abort error through unchanged", async () => {
+    const abortError = Object.assign(new Error("request aborted"), {
+      name: "AbortError",
+    });
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(abortError));
+
+    await expect(getRecovery(requestedRecoveryId)).rejects.toBe(abortError);
+  });
+
+  it("classifies a shape-valid GET response for a different recovery as retryable", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue(
@@ -467,8 +542,11 @@ describe("recovery response correlation", () => {
       ),
     );
 
-    await expect(getRecovery(requestedRecoveryId)).rejects.toThrow(
-      "Recovery response did not match the requested recovery",
+    await expect(getRecovery(requestedRecoveryId)).rejects.toEqual(
+      expect.objectContaining<Partial<RecoveryLookupError>>({
+        name: "RecoveryLookupError",
+        disposition: "retryable",
+      }),
     );
   });
 

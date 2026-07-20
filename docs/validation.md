@@ -65,13 +65,17 @@ application process. They do not prove a shared limit across workers or containe
 `scripts/start.py` is separately asserted to launch one worker.
 The explicit-live suites prove zero live POSTs on initial mount and authorized restore,
 synchronous one-POST activation coalescing under StrictMode, UUID-only storage with exception
-safety, valid consent/receipt restoration, invalid-hint clearing, truthful snapshotless UI, and
-no stale resume/start continuation after unmount. StrictMode may repeat the idempotent snapshot
-GET during its development effect probe; the gate is that it accepts one current result and
-never turns that probe into recovery creation.
+safety, valid consent/receipt restoration, terminal invalid-hint clearing, truthful snapshotless
+UI, and no stale resume/start continuation after unmount. Retry coverage distinguishes terminal
+generic 404 and valid wrong-scenario snapshots from indeterminate network, non-404, malformed, and
+miscorrelated responses. It proves that indeterminate state retains only the UUID, exposes fixed
+copy and one coalesced same-GET retry, trusts no snapshot, performs no POST or automatic decision
+resume, restores a valid claimed snapshot without resuming it, and clears on a later 404. StrictMode
+may repeat the idempotent snapshot GET during its development effect probe; the gate is that it
+accepts one current result and never turns that probe into recovery creation.
 Snapshotless lifecycle coverage also distinguishes stable **Not started** from unresolved
-**Awaiting server evidence**, with no current step in either phase, and proves a failed keyless
-resume exposes explicit replay/SDK choices without an automatic replacement POST.
+**Awaiting server evidence**, with no current step in either phase, and proves a terminal failed
+keyless lookup exposes explicit replay/SDK choices without an automatic replacement POST.
 
 When a Docker-compatible engine is available, run:
 

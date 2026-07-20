@@ -61,9 +61,15 @@ The UI stores no cookie, session correlation, serialized run state, approval pay
 provenance claim in browser storage. It may retain one syntactically validated hotel recovery
 UUID in same-tab `sessionStorage` as a non-authoritative reload hint. The server-authorized GET
 must return a contract-valid hotel snapshot before that hint can restore the event stream,
-consent, or receipt. Any failed lookup clears the hint and does not create a replacement run.
-On a keyless runtime, the browser then offers replay and SDK QA as explicit actions; it does not
-reuse copy that claims an automatic fallback is underway.
+consent, or receipt. A generic authorized 404 or a valid correlated snapshot for another scenario
+clears the hint; these cover missing, foreign-session, expired-session, and retention-deleted state
+without distinguishing them. Network errors, non-404 responses, malformed JSON, and contract-invalid
+or miscorrelated success responses retain the UUID but authorize no snapshot or action. The browser
+shows fixed redacted copy and only **Retry saved recovery**; repeated activation coalesces to the same
+GET. It never surfaces response text or automatically creates a run, starts a replay, or resumes a
+decision. A retry 404 clears the hint, while a valid hotel snapshot restores the ordinary lifecycle.
+On a keyless runtime after a terminal lookup, the browser offers replay and SDK QA as explicit
+actions; it does not reuse copy that claims an automatic fallback is underway.
 
 ## Provenance modes
 

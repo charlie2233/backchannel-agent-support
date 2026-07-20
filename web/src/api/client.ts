@@ -49,6 +49,29 @@ export class DecisionCapacityError extends Error {
   }
 }
 
+export type RecoveryLookupDisposition = "terminal" | "retryable";
+
+export class RecoveryLookupError extends Error {
+  readonly name = "RecoveryLookupError";
+
+  constructor(readonly disposition: RecoveryLookupDisposition) {
+    super(
+      disposition === "terminal"
+        ? "Saved recovery is unavailable."
+        : "Saved recovery evidence is temporarily unavailable.",
+    );
+  }
+}
+
+function isAbortError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "name" in error &&
+    error.name === "AbortError"
+  );
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -474,18 +497,23 @@ export async function getRecovery(
   recoveryId: string,
   signal?: AbortSignal,
 ): Promise<RecoverySnapshot> {
-  const response = await fetch(`/api/recoveries/${encodeURIComponent(recoveryId)}`, {
-    headers: { Accept: "application/json" },
-    signal,
-  });
-  if (!response.ok) {
-    throw new Error(`Recovery request failed with status ${response.status}`);
+  try {
+    const response = await fetch(`/api/recoveries/${encodeURIComponent(recoveryId)}`, {
+      headers: { Accept: "application/json" },
+      signal,
+    });
+    if (!response.ok) {
+      throw new RecoveryLookupError(response.status === 404 ? "terminal" : "retryable");
+    }
+    const snapshot = await readRecovery(response);
+    if (snapshot.recoveryId !== recoveryId) {
+      throw new RecoveryLookupError("retryable");
+    }
+    return snapshot;
+  } catch (error: unknown) {
+    if (isAbortError(error) || error instanceof RecoveryLookupError) throw error;
+    throw new RecoveryLookupError("retryable");
   }
-  const snapshot = await readRecovery(response);
-  if (snapshot.recoveryId !== recoveryId) {
-    throw new Error("Recovery response did not match the requested recovery");
-  }
-  return snapshot;
 }
 
 export async function getReceipt(

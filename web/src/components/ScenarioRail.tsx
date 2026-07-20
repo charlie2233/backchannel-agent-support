@@ -3,6 +3,7 @@ import type { RecoveryScenario, ScenarioId } from "../domain/recovery";
 interface ScenarioRailProps {
   scenarios: ReadonlyArray<RecoveryScenario>;
   activeId: ScenarioId;
+  disabled?: boolean;
   mobile?: boolean;
   onSelect: (id: ScenarioId) => void;
 }
@@ -10,6 +11,7 @@ interface ScenarioRailProps {
 export function ScenarioRail({
   scenarios,
   activeId,
+  disabled = false,
   mobile = false,
   onSelect,
 }: ScenarioRailProps) {
@@ -20,8 +22,11 @@ export function ScenarioRail({
         <select
           id="scenario-select"
           aria-label="Scenario"
+          disabled={disabled}
           value={activeId}
-          onChange={(event) => onSelect(event.target.value as ScenarioId)}
+          onChange={(event) => {
+            if (!disabled) onSelect(event.target.value as ScenarioId);
+          }}
         >
           {scenarios.map((scenario) => (
             <option key={scenario.id} value={scenario.id}>
@@ -48,7 +53,10 @@ export function ScenarioRail({
                 className="scenario-button"
                 type="button"
                 aria-current={isActive ? "page" : undefined}
-                onClick={() => onSelect(scenario.id)}
+                disabled={disabled}
+                onClick={() => {
+                  if (!disabled) onSelect(scenario.id);
+                }}
               >
                 <span className="scenario-index" aria-hidden="true">
                   {String(index + 1).padStart(2, "0")}
