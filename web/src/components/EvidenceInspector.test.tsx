@@ -1,11 +1,11 @@
 import { StrictMode } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DECISION_CAPACITY_MESSAGE } from "../api/client";
 import type { RecoverySnapshot } from "../domain/recovery";
 import { recoveryScenarios } from "../fixtures/recoveries";
-import { EvidenceInspector } from "./EvidenceInspector";
+import { DECISION_REQUEST_TIMEOUT_MS, EvidenceInspector } from "./EvidenceInspector";
 
 const fullDigest = `sha256:${"0123456789abcdef".repeat(4)}` as `sha256:${string}`;
 
@@ -65,6 +65,22 @@ function claimedSnapshot(
     },
   } as RecoverySnapshot;
 }
+
+beforeEach(() => {
+  Object.defineProperty(HTMLDialogElement.prototype, "showModal", {
+    configurable: true,
+    value: vi.fn(function showModal(this: HTMLDialogElement) {
+      this.open = true;
+    }),
+  });
+  Object.defineProperty(HTMLDialogElement.prototype, "close", {
+    configurable: true,
+    value: vi.fn(function close(this: HTMLDialogElement) {
+      this.open = false;
+      this.dispatchEvent(new Event("close"));
+    }),
+  });
+});
 
 afterEach(() => {
   cleanup();
@@ -223,6 +239,319 @@ describe("EvidenceInspector exact consent", () => {
     fireEvent.click(button);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("aborts a timed-out approval once, releases the mobile sheet, and ignores a late success", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-20T12:00:00.000Z"));
+    let resolveDecision: ((response: Response) => void) | undefined;
+    let requestSignal: AbortSignal | undefined;
+    const fetchMock = vi.fn().mockImplementation(
+      (_input: string | URL | Request, init?: RequestInit) =>
+        new Promise<Response>((resolve) => {
+          resolveDecision = resolve;
+          requestSignal = init?.signal ?? undefined;
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const onClose = vi.fn();
+    const onServerSuccess = vi.fn().mockResolvedValue(undefined);
+    const renderInspector = (open: boolean) => (
+      <EvidenceInspector
+        mobile
+        open={open}
+        scenario={recoveryScenarios[0]}
+        snapshot={pendingSnapshot()}
+        clientDecisionIdFactory={() => "decision-timeout-mobile"}
+        onClose={onClose}
+        onServerSuccess={onServerSuccess}
+      />
+    );
+    const { rerender } = render(renderInspector(true));
+
+    fireEvent.click(screen.getByRole("button", { name: "Approve remedy" }));
+    const closeButton = screen.getByRole("button", { name: "Close evidence sheet" });
+    expect(closeButton).toBeDisabled();
+    expect(requestSignal).toBeDefined();
+    const abortListener = vi.fn();
+    requestSignal?.addEventListener("abort", abortListener);
+
+    await act(async () => {
+      vi.advanceTimersByTime(DECISION_REQUEST_TIMEOUT_MS);
+      await Promise.resolve();
+    });
+
+    expect(requestSignal?.aborted).toBe(true);
+    expect(abortListener).toHaveBeenCalledTimes(1);
+    expect(closeButton).toBeEnabled();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Approval request timed out. Retry only this exact approval; the decline action remains disabled.",
+    );
+    const cancelEvent = new Event("cancel", { cancelable: true });
+    fireEvent(screen.getByRole("dialog", { name: "Approve exact remedy" }), cancelEvent);
+    expect(cancelEvent.defaultPrevented).toBe(false);
+    fireEvent.click(closeButton);
+    expect(onClose).toHaveBeenCalledTimes(1);
+    rerender(renderInspector(false));
+    rerender(renderInspector(true));
+    expect(screen.getByRole("button", { name: "Approve remedy" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Decline" })).toBeDisabled();
+
+    resolveDecision?.(
+      new Response(
+        JSON.stringify({
+          action: "approve",
+          clientDecisionId: "decision-timeout-mobile",
+          recoveryId: "11111111-2222-4333-8444-555555555555",
+          status: "completed",
+          approvedRemedyDigest: fullDigest,
+          executionStarted: true,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      vi.advanceTimersByTime(DECISION_REQUEST_TIMEOUT_MS);
+    });
+
+    expect(abortListener).toHaveBeenCalledTimes(1);
+    expect(onServerSuccess).not.toHaveBeenCalled();
+    expect(screen.queryByText(/accepted by the server/i)).not.toBeInTheDocument();
+  });
+
+  it("retires the transport deadline before awaiting a hanging server refresh", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-20T12:00:00.000Z"));
+    let requestSignal: AbortSignal | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((_input: string | URL | Request, init?: RequestInit) => {
+        requestSignal = init?.signal ?? undefined;
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              action: "approve",
+              clientDecisionId: "decision-refresh-hangs",
+              recoveryId: "11111111-2222-4333-8444-555555555555",
+              status: "completed",
+              approvedRemedyDigest: fullDigest,
+              executionStarted: true,
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+        );
+      }),
+    );
+    const onClose = vi.fn();
+    const onServerSuccess = vi.fn(() => new Promise<void>(() => {}));
+    render(
+      <EvidenceInspector
+        mobile
+        open
+        scenario={recoveryScenarios[0]}
+        snapshot={pendingSnapshot()}
+        clientDecisionIdFactory={() => "decision-refresh-hangs"}
+        onClose={onClose}
+        onServerSuccess={onServerSuccess}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Approve remedy" }));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(onServerSuccess).toHaveBeenCalledTimes(1);
+    expect(
+      screen.getByText("Approval accepted by the server. Refreshing recovery evidence."),
+    ).toBeVisible();
+    const closeButton = screen.getByRole("button", { name: "Close evidence sheet" });
+    expect(closeButton).toBeEnabled();
+    await act(async () => {
+      vi.advanceTimersByTime(DECISION_REQUEST_TIMEOUT_MS * 2);
+      await Promise.resolve();
+    });
+    expect(requestSignal?.aborted).toBe(false);
+    expect(screen.queryByText(/request timed out/i)).not.toBeInTheDocument();
+    fireEvent.click(closeButton);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("locks an ambiguous decision to the original action and ID across deadline retries", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-20T12:00:00.000Z"));
+    let resolveFirst: ((response: Response) => void) | undefined;
+    const fetchMock = vi.fn().mockImplementation(
+      (_input: string | URL | Request, init?: RequestInit) =>
+        new Promise<Response>((resolve) => {
+          if (fetchMock.mock.calls.length === 1) resolveFirst = resolve;
+          expect(init?.signal).toBeInstanceOf(AbortSignal);
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const idFactory = vi.fn(() => "decision-timeout-retry");
+    const onServerSuccess = vi.fn().mockResolvedValue(undefined);
+    render(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={pendingSnapshot()}
+        clientDecisionIdFactory={idFactory}
+        onServerSuccess={onServerSuccess}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Approve remedy" }));
+    await act(async () => {
+      vi.advanceTimersByTime(DECISION_REQUEST_TIMEOUT_MS);
+      await Promise.resolve();
+    });
+
+    const declineButton = screen.getByRole("button", { name: "Decline" });
+    expect(declineButton).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Approve remedy" })).toBeEnabled();
+    fireEvent.click(declineButton);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: "Approve remedy" }));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(idFactory).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls.map(([, init]) => JSON.parse(String(init?.body)))).toEqual([
+      expect.objectContaining({
+        action: "approve",
+        clientDecisionId: "decision-timeout-retry",
+      }),
+      expect.objectContaining({
+        action: "approve",
+        clientDecisionId: "decision-timeout-retry",
+      }),
+    ]);
+
+    resolveFirst?.(
+      new Response(
+        JSON.stringify({
+          action: "approve",
+          clientDecisionId: "decision-timeout-retry",
+          recoveryId: "11111111-2222-4333-8444-555555555555",
+          status: "completed",
+          approvedRemedyDigest: fullDigest,
+          executionStarted: true,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.getByRole("button", { name: "Submitting approval…" })).toBeDisabled();
+    expect(onServerSuccess).not.toHaveBeenCalled();
+    expect(screen.queryByText(/accepted by the server/i)).not.toBeInTheDocument();
+  });
+
+  it("bounds claimed-decision resume and ignores a late rejection", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-20T12:00:00.000Z"));
+    let rejectResume: ((reason: Error) => void) | undefined;
+    let requestSignal: AbortSignal | undefined;
+    const fetchMock = vi.fn().mockImplementation(
+      (_input: string | URL | Request, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          rejectResume = reject;
+          requestSignal = init?.signal ?? undefined;
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const onServerSuccess = vi.fn().mockResolvedValue(undefined);
+    render(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={claimedSnapshot("decline")}
+        onServerSuccess={onServerSuccess}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Resume exact decline" }));
+    const abortListener = vi.fn();
+    requestSignal?.addEventListener("abort", abortListener);
+    await act(async () => {
+      vi.advanceTimersByTime(DECISION_REQUEST_TIMEOUT_MS);
+      await Promise.resolve();
+    });
+
+    expect(abortListener).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Resume exact decline" })).toBeEnabled();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Exact decline resume timed out. Retry only this same server-authored action.",
+    );
+    rejectResume?.(new Error("late transport failure"));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.getByRole("alert")).toHaveTextContent("resume timed out");
+    expect(onServerSuccess).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Resume exact decline" }));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("aborts active decision deadlines on context change and unmount, then clears the action lock", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-20T12:00:00.000Z"));
+    const requestSignals: AbortSignal[] = [];
+    const fetchMock = vi.fn().mockImplementation(
+      (_input: string | URL | Request, init?: RequestInit) => {
+        if (init?.signal !== undefined && init.signal !== null) requestSignals.push(init.signal);
+        return new Promise<Response>(() => {});
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const snapshotB: RecoverySnapshot = {
+      ...pendingSnapshot(),
+      recoveryId: "bbbbbbbb-2222-4333-8444-555555555555",
+      pendingApproval: {
+        ...pendingSnapshot().pendingApproval!,
+        remedyId: "remedy-server-b",
+        toolCallId: "call-server-b",
+      },
+    };
+    const { rerender, unmount } = render(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={pendingSnapshot()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Approve remedy" }));
+    const firstAbortListener = vi.fn();
+    requestSignals[0]?.addEventListener("abort", firstAbortListener);
+    rerender(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={snapshotB}
+      />,
+    );
+    await act(async () => { await Promise.resolve(); });
+
+    expect(firstAbortListener).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Approve remedy" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Decline" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Decline" }));
+    const secondAbortListener = vi.fn();
+    requestSignals[1]?.addEventListener("abort", secondAbortListener);
+    unmount();
+
+    expect(secondAbortListener).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      vi.advanceTimersByTime(DECISION_REQUEST_TIMEOUT_MS * 2);
+      await Promise.resolve();
+    });
+    expect(firstAbortListener).toHaveBeenCalledTimes(1);
+    expect(secondAbortListener).toHaveBeenCalledTimes(1);
   });
 
   it("keeps the pending tool-call ID visible before collapsed mobile technical evidence", () => {
@@ -700,6 +1029,10 @@ describe("EvidenceInspector exact consent", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Approval could not be recorded. Try again with the same decision.",
     );
+    const declineButton = screen.getByRole("button", { name: "Decline" });
+    expect(declineButton).toBeDisabled();
+    fireEvent.click(declineButton);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByRole("button", { name: "Approve remedy" }));
 
     await waitFor(() => expect(onServerSuccess).toHaveBeenCalledTimes(1));
@@ -807,6 +1140,10 @@ describe("EvidenceInspector exact consent", () => {
       "Decline could not be recorded. Try again with the same decision.",
     );
     expect(onServerSuccess).not.toHaveBeenCalled();
+    const approveButton = screen.getByRole("button", { name: "Approve remedy" });
+    expect(approveButton).toBeDisabled();
+    fireEvent.click(approveButton);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByRole("button", { name: "Decline" }));
 
     await waitFor(() => expect(onServerSuccess).toHaveBeenCalledTimes(1));
@@ -884,58 +1221,89 @@ describe("EvidenceInspector exact consent", () => {
     expect(onServerSuccess).toHaveBeenCalledTimes(1);
   });
 
-  it("shares one authoritative refresh with a decision already in flight at the deadline", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-09-01T18:45:29.000Z"));
-    let resolveDecision: ((response: Response) => void) | undefined;
-    const fetchMock = vi.fn().mockImplementation(
-      () =>
-        new Promise<Response>((resolve) => {
-          resolveDecision = resolve;
-        }),
-    );
-    vi.stubGlobal("fetch", fetchMock);
-    const onServerSuccess = vi.fn().mockResolvedValue(undefined);
-    render(
-      <EvidenceInspector
-        scenario={recoveryScenarios[0]}
-        snapshot={pendingSnapshot()}
-        clientDecisionIdFactory={() => "decision-at-deadline"}
-        onServerSuccess={onServerSuccess}
-      />,
-    );
+  it.each(["resolve", "reject"] as const)(
+    "lets authoritative expiry retire an in-flight decision and ignores its late %s",
+    async (outcome) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-09-01T18:45:29.000Z"));
+      let resolveDecision: ((response: Response) => void) | undefined;
+      let rejectDecision: ((reason: Error) => void) | undefined;
+      let requestSignal: AbortSignal | undefined;
+      const fetchMock = vi.fn().mockImplementation(
+        (_input: string | URL | Request, init?: RequestInit) =>
+          new Promise<Response>((resolve, reject) => {
+            resolveDecision = resolve;
+            rejectDecision = reject;
+            requestSignal = init?.signal ?? undefined;
+          }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+      const onClose = vi.fn();
+      const onServerSuccess = vi.fn().mockResolvedValue(undefined);
+      render(
+        <EvidenceInspector
+          mobile
+          open
+          scenario={recoveryScenarios[0]}
+          snapshot={pendingSnapshot()}
+          clientDecisionIdFactory={() => "decision-at-deadline"}
+          onClose={onClose}
+          onServerSuccess={onServerSuccess}
+        />,
+      );
 
-    fireEvent.click(screen.getByRole("button", { name: "Approve remedy" }));
-    await act(async () => {
-      vi.advanceTimersByTime(1_000);
-      await Promise.resolve();
-    });
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(onServerSuccess).toHaveBeenCalledTimes(1);
+      fireEvent.click(screen.getByRole("button", { name: "Approve remedy" }));
+      const abortListener = vi.fn();
+      requestSignal?.addEventListener("abort", abortListener);
+      await act(async () => {
+        vi.advanceTimersByTime(1_000);
+        await Promise.resolve();
+      });
 
-    resolveDecision?.(
-      new Response(
-        JSON.stringify({
-          action: "approve",
-          clientDecisionId: "decision-at-deadline",
-          recoveryId: "11111111-2222-4333-8444-555555555555",
-          status: "completed",
-          approvedRemedyDigest: fullDigest,
-          executionStarted: true,
-        }),
-        { status: 200, headers: { "Content-Type": "application/json" } },
-      ),
-    );
-    await act(async () => {
-      await Promise.resolve();
-      await Promise.resolve();
-    });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(requestSignal?.aborted).toBe(true);
+      expect(abortListener).toHaveBeenCalledTimes(1);
+      expect(onServerSuccess).toHaveBeenCalledTimes(1);
+      expect(
+        screen.getByText("Consent deadline reached — checking the authoritative outcome"),
+      ).toBeVisible();
+      expect(screen.getByRole("button", { name: "Approve remedy" })).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Decline" })).toBeDisabled();
+      const closeButton = screen.getByRole("button", { name: "Close evidence sheet" });
+      expect(closeButton).toBeEnabled();
 
-    expect(onServerSuccess).toHaveBeenCalledTimes(1);
-    expect(
-      screen.getByText("Approval accepted by the server. Refreshing recovery evidence."),
-    ).toBeVisible();
-  });
+      await act(async () => {
+        if (outcome === "resolve") {
+          resolveDecision?.(
+            new Response(
+              JSON.stringify({
+                action: "approve",
+                clientDecisionId: "decision-at-deadline",
+                recoveryId: "11111111-2222-4333-8444-555555555555",
+                status: "completed",
+                approvedRemedyDigest: fullDigest,
+                executionStarted: true,
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        } else {
+          rejectDecision?.(new Error("late decision transport failure"));
+        }
+        await Promise.resolve();
+        await Promise.resolve();
+        vi.advanceTimersByTime(DECISION_REQUEST_TIMEOUT_MS + 1);
+        await Promise.resolve();
+      });
+
+      expect(abortListener).toHaveBeenCalledTimes(1);
+      expect(onServerSuccess).toHaveBeenCalledTimes(1);
+      expect(screen.queryByText(/request timed out/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/accepted by the server/i)).not.toBeInTheDocument();
+      fireEvent.click(closeButton);
+      expect(onClose).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it("cancels an old deadline across context changes and refreshes only the active recovery", async () => {
     vi.useFakeTimers();
