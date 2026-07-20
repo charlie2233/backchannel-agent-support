@@ -85,7 +85,13 @@ describe("EvidenceInspector exact consent", () => {
       const inspector = screen.getByRole("complementary", {
         name: "Approve exact remedy",
       });
-      expect(within(inspector).getByRole("heading", { name: "Approve exact remedy" })).toBeVisible();
+      expect(inspector).toHaveClass("evidence-inspector--consent");
+      const approvalHeading = within(inspector).getByRole("heading", {
+        name: "Approve exact remedy",
+      });
+      expect(approvalHeading).toBeVisible();
+      expect(approvalHeading).toHaveAttribute("id", "approval-heading");
+      expect(approvalHeading).toHaveAttribute("tabindex", "-1");
       expect(
         within(inspector).getByText("11111111-2222-4333-8444-555555555555"),
       ).toBeVisible();
@@ -111,6 +117,12 @@ describe("EvidenceInspector exact consent", () => {
       expect(within(inspector).queryByText(fullDigest)).not.toBeInTheDocument();
       const decline = within(inspector).getByRole("button", { name: "Decline" });
       const approve = within(inspector).getByRole("button", { name: "Approve remedy" });
+      const actionGroups = inspector.querySelectorAll(".consent-actions");
+      expect(actionGroups).toHaveLength(1);
+      expect(within(actionGroups[0] as HTMLElement).getAllByRole("button")).toEqual([
+        decline,
+        approve,
+      ]);
       expect(decline).toBeVisible();
       expect(approve).toBeVisible();
       expect(decline).not.toHaveFocus();
@@ -404,7 +416,13 @@ describe("EvidenceInspector exact consent", () => {
       />,
     );
 
-    expect(screen.getByRole("heading", { name: "Decision in progress" })).toBeVisible();
+    const inspector = screen.getByRole("complementary", {
+      name: "Decision in progress",
+    });
+    expect(inspector).not.toHaveClass("evidence-inspector--consent");
+    expect(
+      within(inspector).getByRole("heading", { name: "Decision in progress" }),
+    ).toBeVisible();
     expect(screen.queryByRole("button", { name: "Approve remedy" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Decline" })).not.toBeInTheDocument();
     expect(screen.queryByText("Execution has not begun.")).not.toBeInTheDocument();

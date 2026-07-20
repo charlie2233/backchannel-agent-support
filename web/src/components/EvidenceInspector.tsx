@@ -511,10 +511,15 @@ export function EvidenceInspector({
 
     const actionsDisabled = effectiveSubmittingAction !== null || acceptedAction !== null;
     return (
-      <aside className="evidence-inspector" aria-labelledby="approval-heading">
+      <aside
+        className="evidence-inspector evidence-inspector--consent"
+        aria-labelledby="approval-heading"
+      >
         <div className="inspector-heading">
           <p className="eyebrow">Server consent record</p>
-          <h2 id="approval-heading">Approve exact remedy</h2>
+          <h2 id="approval-heading" tabIndex={-1}>
+            Approve exact remedy
+          </h2>
           <p>{snapshot.currentStepSummary}</p>
         </div>
 

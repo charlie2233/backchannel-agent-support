@@ -55,6 +55,57 @@ beforeEach(() => {
 });
 
 describe("persisted consent first paint", () => {
+  it("renders one user-controlled remedy link beside an actionable hotel recovery", () => {
+    sessionStorage.setItem("backchannel.hotelRecovery.v1", recoveryId);
+
+    const markup = renderToStaticMarkup(<App />);
+    const document = new DOMParser().parseFromString(markup, "text/html");
+    const links = Array.from(
+      document.querySelectorAll<HTMLAnchorElement>('a[href="#approval-heading"]'),
+    );
+
+    expect(links).toHaveLength(1);
+    expect(links[0]?.textContent).toBe("Review exact remedy");
+    expect(links[0]?.closest(".recovery-heading")).not.toBeNull();
+    expect(document.querySelectorAll("#approval-heading")).toHaveLength(1);
+  });
+
+  it.each([
+    [
+      "decision already claimed",
+      {
+        ...pendingSnapshot,
+        currentStepSummary: "Exact decision claimed.",
+        pendingApproval: null,
+      },
+    ],
+    [
+      "terminal recovery",
+      {
+        ...pendingSnapshot,
+        status: "completed",
+        currentStep: 5,
+        currentStepSummary: "Receipt sealed.",
+        pendingApproval: null,
+      },
+    ],
+  ])("omits the remedy link when the hotel recovery is %s", (_label, snapshot) => {
+    sessionStorage.setItem("backchannel.hotelRecovery.v1", recoveryId);
+    useRecoveryMock.mockReturnValue({
+      snapshot,
+      receipt: null,
+      events: [],
+      lastSeq: 0,
+      loading: false,
+      error: null,
+    });
+
+    const markup = renderToStaticMarkup(<App />);
+    const document = new DOMParser().parseFromString(markup, "text/html");
+
+    expect(document.querySelector('a[href="#approval-heading"]')).toBeNull();
+  });
+
   it.each([
     ["approve", "Approving…"],
     ["decline", "Declining…"],

@@ -567,6 +567,13 @@ export default function App() {
     !quotaContentPending;
   const contentPending = hotelContentPending || quotaContentPending;
   const contentUnavailable = hotelContentUnavailable || quotaContentUnavailable;
+  const consentReviewAvailable =
+    !contentPending &&
+    !contentUnavailable &&
+    activeId === "hotel" &&
+    activeSnapshot?.scenarioId === "hotel" &&
+    activeSnapshot.status === "pending_approval" &&
+    activeSnapshot.pendingApproval !== null;
 
   return (
     <div className="app-frame">
@@ -667,6 +674,11 @@ export default function App() {
             <div>
               <p className="eyebrow">Active recovery</p>
               <h1 id="recovery-title">{activeScenarioView.title}</h1>
+              {consentReviewAvailable ? (
+                <a className="consent-review-link" href="#approval-heading">
+                  Review exact remedy
+                </a>
+              ) : null}
             </div>
             <span className="recovery-state">
               {recoveryStateLabel(activeSnapshot, activeScenarioView)}
