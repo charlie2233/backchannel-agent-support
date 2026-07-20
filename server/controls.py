@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import hmac
 import json
@@ -11,10 +12,10 @@ import secrets
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from http.cookies import CookieError, SimpleCookie
 from ipaddress import IPv4Address, IPv6Address, ip_address, ip_network
-from typing import Any, Literal, Protocol
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -129,6 +130,89 @@ class InvalidForwardedHeader(ValueError):
 class PublicIdentity:
     session_hash: str
     ip_hash: str
+    session_expires_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class DemoSessionCredential:
+    """Verified, stateless public-demo session material."""
+
+    nonce: str
+    expires_at: datetime
+
+
+class DemoSessionCookieCodec:
+    """Mint and verify bounded, domain-separated signed demo-session cookies."""
+
+    _VERSION = "v1"
+    _NONCE_PATTERN = re.compile(r"[A-Za-z0-9_-]{43}")
+    _SIGNATURE_PATTERN = re.compile(r"[A-Za-z0-9_-]{43}")
+
+    def __init__(self, secret: bytes, *, lifetime_seconds: int) -> None:
+        if len(secret) < 32:
+            raise ValueError("Identity HMAC secret must contain at least 32 UTF-8 bytes")
+        if lifetime_seconds < 1:
+            raise ValueError("Demo session lifetime must be positive")
+        self._secret = secret
+        self._lifetime_seconds = lifetime_seconds
+
+    @staticmethod
+    def _encode(raw: bytes) -> str:
+        return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+    def _signature(self, *, expires_at: int, nonce: str) -> str:
+        message = (
+            f"backchannel:demo-session-cookie:v1\0{self._VERSION}\0"
+            f"{expires_at}\0{nonce}"
+        ).encode("ascii")
+        return self._encode(hmac.new(self._secret, message, hashlib.sha256).digest())
+
+    def mint(self, *, now: datetime) -> tuple[str, DemoSessionCredential]:
+        if now.tzinfo is None or now.utcoffset() != timedelta(0):
+            raise ValueError("Demo session time must be timezone-aware UTC")
+        expires_epoch = int(now.timestamp()) + self._lifetime_seconds
+        nonce = secrets.token_urlsafe(32)
+        signature = self._signature(expires_at=expires_epoch, nonce=nonce)
+        value = f"{self._VERSION}.{expires_epoch}.{nonce}.{signature}"
+        return value, DemoSessionCredential(
+            nonce=nonce,
+            expires_at=datetime.fromtimestamp(expires_epoch, tz=UTC),
+        )
+
+    def verify(
+        self,
+        value: str | None,
+        *,
+        now: datetime,
+    ) -> DemoSessionCredential | None:
+        if value is None:
+            return None
+        if len(value) > 128:
+            return None
+        if now.tzinfo is None or now.utcoffset() != timedelta(0):
+            raise ValueError("Demo session time must be timezone-aware UTC")
+        parts = value.split(".")
+        if len(parts) != 4:
+            return None
+        version, raw_expiry, nonce, signature = parts
+        if (
+            version != self._VERSION
+            or re.fullmatch(r"[0-9]{1,12}", raw_expiry) is None
+            or self._NONCE_PATTERN.fullmatch(nonce) is None
+            or self._SIGNATURE_PATTERN.fullmatch(signature) is None
+        ):
+            return None
+        expires_epoch = int(raw_expiry)
+        now_epoch = int(now.timestamp())
+        if expires_epoch <= now_epoch or expires_epoch - now_epoch > self._lifetime_seconds:
+            return None
+        expected = self._signature(expires_at=expires_epoch, nonce=nonce)
+        if not hmac.compare_digest(signature, expected):
+            return None
+        return DemoSessionCredential(
+            nonce=nonce,
+            expires_at=datetime.fromtimestamp(expires_epoch, tz=UTC),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +251,16 @@ class PublicIdentityHasher:
 
     def ip(self, client_ip: str) -> str:
         return self._digest("ip", client_ip)
+
+    def demo_session_cookie_codec(
+        self,
+        *,
+        lifetime_seconds: int,
+    ) -> DemoSessionCookieCodec:
+        return DemoSessionCookieCodec(
+            self._secret,
+            lifetime_seconds=lifetime_seconds,
+        )
 
 
 def resolve_client_ip(
@@ -236,15 +330,6 @@ class LiveConcurrencyGate:
         finally:
             async with self._lock:
                 self._active -= 1
-
-
-class DemoSessionStore(Protocol):
-    def is_demo_session_active(
-        self,
-        *,
-        session_hash: str,
-        now: datetime,
-    ) -> bool: ...
 
 
 def new_request_id() -> str:
@@ -339,6 +424,15 @@ def identity_from_scope(scope: Scope) -> PublicIdentity:
     raise RuntimeError("Public identity middleware is not installed")
 
 
+def optional_identity_from_scope(scope: Scope) -> PublicIdentity | None:
+    state = scope.get("state")
+    if isinstance(state, dict):
+        identity = state.get("public_identity")
+        if isinstance(identity, PublicIdentity):
+            return identity
+    return None
+
+
 class PublicBoundaryMiddleware:
     """Enforce byte/media bounds and attach safe identity and response headers."""
 
@@ -351,7 +445,6 @@ class PublicBoundaryMiddleware:
         *,
         max_body_bytes: int,
         identity_hasher: PublicIdentityHasher,
-        session_store: DemoSessionStore,
         session_ttl_seconds: int,
         trusted_proxy_cidrs: tuple[str, ...],
         deployed: bool,
@@ -360,8 +453,10 @@ class PublicBoundaryMiddleware:
         self.app = app
         self._max_body_bytes = max_body_bytes
         self._hasher = identity_hasher
-        self._session_store = session_store
         self._session_ttl_seconds = session_ttl_seconds
+        self._cookie_codec = identity_hasher.demo_session_cookie_codec(
+            lifetime_seconds=session_ttl_seconds,
+        )
         self._trusted_proxy_cidrs = trusted_proxy_cidrs
         self._deployed = deployed
         self._allowed_origins = frozenset(allowed_origins)
@@ -374,19 +469,26 @@ class PublicBoundaryMiddleware:
         }
 
     @staticmethod
-    def _valid_session(value: str | None) -> str | None:
-        if value is None or re.fullmatch(r"[A-Za-z0-9_-]{43}", value) is None:
-            return None
-        return value
-
-    def _session_candidate(self, headers: Mapping[str, str]) -> str | None:
+    def _session_candidate(
+        headers: Mapping[str, str],
+    ) -> tuple[str | None, bool]:
+        raw_cookie = headers.get("cookie")
+        if raw_cookie is None:
+            return None, False
+        if len(raw_cookie) > 8_192:
+            return None, True
         cookie = SimpleCookie()
         try:
-            cookie.load(headers.get("cookie", ""))
+            cookie.load(raw_cookie)
         except CookieError:
-            cookie = SimpleCookie()
+            return None, True
+        segments = [segment.strip() for segment in raw_cookie.split(";")]
+        if any(segment and "=" not in segment for segment in segments):
+            return None, True
+        if raw_cookie.strip() and not cookie:
+            return None, True
         morsel = cookie.get(DEMO_SESSION_COOKIE)
-        return self._valid_session(morsel.value if morsel is not None else None)
+        return (morsel.value if morsel is not None else None), False
 
     def _set_cookie_value(self, session_id: str) -> str:
         cookie = SimpleCookie()
@@ -643,6 +745,10 @@ class PublicBoundaryMiddleware:
             )
             return
 
+        now = datetime.now(UTC)
+        raw_session, malformed_cookie = self._session_candidate(headers)
+        credential = self._cookie_codec.verify(raw_session, now=now)
+        provisional_cookie: str | None = None
         if scope.get("method") == "POST" and path == "/api/recoveries":
             forwarded_values = [
                 value.decode("latin-1")
@@ -689,24 +795,20 @@ class PublicBoundaryMiddleware:
                 )
                 return
 
-            now = datetime.now(UTC)
-            session_id = self._session_candidate(headers)
-            candidate_hash: str | None = None
-            session_is_new = True
+            if malformed_cookie or (raw_session is not None and credential is None):
+                await self._send_error(
+                    send,
+                    status_code=400,
+                    code="invalid_request",
+                    request_id=request_id,
+                    response_headers=fixed_headers,
+                    recovery_id=scoped_recovery_id,
+                )
+                return
             try:
-                if session_id is not None:
-                    candidate_hash = self._hasher.session(session_id)
-                    if self._session_store.is_demo_session_active(
-                        session_hash=candidate_hash,
-                        now=now,
-                    ):
-                        session_is_new = False
-                if session_is_new:
-                    session_id = secrets.token_urlsafe(32)
-                    session_hash = self._hasher.session(session_id)
-                else:
-                    assert candidate_hash is not None
-                    session_hash = candidate_hash
+                if credential is None:
+                    provisional_cookie, credential = self._cookie_codec.mint(now=now)
+                session_hash = self._hasher.session(credential.nonce)
             except Exception:
                 await self._send_error(
                     send,
@@ -717,19 +819,19 @@ class PublicBoundaryMiddleware:
                     recovery_id=scoped_recovery_id,
                 )
                 return
-            assert session_id is not None
             state["public_identity"] = PublicIdentity(
                 session_hash=session_hash,
                 ip_hash=self._hasher.ip(client_ip),
+                session_expires_at=credential.expires_at,
             )
-            if session_is_new:
-                fixed_headers = (
-                    *fixed_headers,
-                    (
-                        b"set-cookie",
-                        self._set_cookie_value(session_id).encode("latin-1"),
-                    ),
-                )
+        elif credential is not None:
+            client = scope.get("client")
+            peer_ip = client[0] if client is not None else "0.0.0.0"
+            state["public_identity"] = PublicIdentity(
+                session_hash=self._hasher.session(credential.nonce),
+                ip_hash=self._hasher.ip(peer_ip),
+                session_expires_at=credential.expires_at,
+            )
 
         message_index = 0
 
@@ -754,7 +856,14 @@ class PublicBoundaryMiddleware:
                     for key, value in message.get("headers", ())
                     if key.lower() not in canonical_names
                 ]
-                session_headers = fixed_headers[len(security_headers) :]
+                session_headers: tuple[tuple[bytes, bytes], ...] = ()
+                if provisional_cookie is not None and message.get("status") == 201:
+                    session_headers = (
+                        (
+                            b"set-cookie",
+                            self._set_cookie_value(provisional_cookie).encode("latin-1"),
+                        ),
+                    )
                 message["headers"] = [
                     *downstream_headers,
                     *security_headers,

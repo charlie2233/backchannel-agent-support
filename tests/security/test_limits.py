@@ -22,7 +22,6 @@ from server.controls import (
     resolve_client_ip,
 )
 from server.main import create_app
-from server.models import ExecutionMode, ScenarioId
 from server.store import SQLiteStore
 
 
@@ -67,7 +66,6 @@ def _raw_boundary_request(
         identity_hasher=PublicIdentityHasher(
             "test-identity-secret-that-is-at-least-32-bytes"
         ),
-        session_store=session_store,
         session_ttl_seconds=3600,
         trusted_proxy_cidrs=trusted_proxy_cidrs,
         deployed=False,
@@ -399,7 +397,6 @@ def test_boundary_replaces_inner_security_headers_and_closes_failed_stream(
         identity_hasher=PublicIdentityHasher(
             "test-identity-secret-that-is-at-least-32-bytes"
         ),
-        session_store=_SessionStoreSpy(),
         session_ttl_seconds=3600,
         trusted_proxy_cidrs=(),
         deployed=False,
@@ -534,28 +531,34 @@ def test_deployed_reset_rejects_cross_origin_and_form_style_posts(tmp_path) -> N
         demo_reset_enabled=True,
     )
     store = SQLiteStore(tmp_path / "reset-origin.sqlite3")
-    store.create_recovery(
-        recovery_id="reset-origin-protected",
-        scenario_id=ScenarioId.HOTEL,
-        execution_mode=ExecutionMode.REPLAY_FIXTURE,
-        current_step=0,
-        current_step_summary="Protected from cross-origin reset.",
-    )
 
     with TestClient(create_app(settings, store=store)) as client:
+        created = client.post(
+            "/api/recoveries",
+            json={"scenarioId": "hotel", "executionMode": "replay_fixture"},
+            headers={"Origin": "https://demo.example"},
+        )
+        assert created.status_code == 201
+        assert store.count_recoveries() == 1
+        session_cookie = _cookie_value(created.headers["set-cookie"])
+        cookie_header = f"backchannel_demo_session={session_cookie}"
         cross_origin = client.post(
             "/api/demo/reset",
             content=b"",
             headers={
                 "Origin": "https://evil.example",
                 "Content-Type": "application/x-www-form-urlencoded",
+                "Cookie": cookie_header,
             },
         )
         assert store.count_recoveries() == 1
         no_origin_form = client.post(
             "/api/demo/reset",
             content=b"",
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Cookie": cookie_header,
+            },
         )
         assert store.count_recoveries() == 1
         same_origin_json = client.post(
@@ -564,6 +567,7 @@ def test_deployed_reset_rejects_cross_origin_and_form_style_posts(tmp_path) -> N
             headers={
                 "Origin": "https://demo.example",
                 "Content-Type": "application/json",
+                "Cookie": cookie_header,
             },
         )
 
@@ -600,13 +604,19 @@ def _cookie_value(set_cookie: str) -> str:
     return parsed["backchannel_demo_session"].value
 
 
-def test_unknown_and_expired_well_shaped_session_cookies_rotate(tmp_path) -> None:
+def test_unknown_and_expired_session_cookies_fail_closed_without_rotation(tmp_path) -> None:
     settings = RuntimeSettings(
         live_ready=False,
         identity_hmac_secret="test-identity-secret-that-is-at-least-32-bytes",
     )
-    database_path = tmp_path / "cookie-rotation.sqlite3"
-    store = SQLiteStore(database_path)
+    store = SQLiteStore(tmp_path / "cookie-rejection.sqlite3")
+    hasher = PublicIdentityHasher(settings.identity_hmac_secret)
+    codec = hasher.demo_session_cookie_codec(
+        lifetime_seconds=int(settings.demo_session_ttl.total_seconds())
+    )
+    expired, _credential = codec.mint(
+        now=datetime.now(UTC) - settings.demo_session_ttl - timedelta(seconds=1)
+    )
 
     with TestClient(create_app(settings, store=store)) as client:
         unknown = "A" * 43
@@ -615,35 +625,18 @@ def test_unknown_and_expired_well_shaped_session_cookies_rotate(tmp_path) -> Non
             "/api/recoveries",
             json={"scenarioId": "hotel", "executionMode": "replay_fixture"},
         )
-        first_issued = _cookie_value(unknown_response.headers["set-cookie"])
-        assert first_issued != unknown
-
-        hasher = PublicIdentityHasher(settings.identity_hmac_secret)
-        first_hash = hasher.session(first_issued)
-        admitted_at = datetime.now(UTC)
-        store.claim_public_live_admission(
-            session_hash=first_hash,
-            ip_hash=hasher.ip("127.0.0.1"),
-            now=admitted_at,
-            cooldown=timedelta(0),
-            daily_budget=10,
-            session_expires_at=admitted_at + timedelta(days=1),
-        )
-        with sqlite3.connect(database_path) as connection:
-            connection.execute(
-                "UPDATE demo_sessions SET expires_at = ? WHERE session_hash = ?",
-                ((datetime.now(UTC) - timedelta(seconds=1)).isoformat(), first_hash),
-            )
         client.cookies.clear()
-        client.cookies.set("backchannel_demo_session", first_issued)
+        client.cookies.set("backchannel_demo_session", expired)
         expired_response = client.post(
             "/api/recoveries",
             json={"scenarioId": "hotel", "executionMode": "replay_fixture"},
         )
-        second_issued = _cookie_value(expired_response.headers["set-cookie"])
 
-    assert second_issued != first_issued
-    assert len(second_issued) == 43
+    for response in (unknown_response, expired_response):
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "invalid_request"
+        assert "set-cookie" not in response.headers
+    assert store.count_recoveries() == 0
 
 
 def test_irrelevant_routes_preflight_and_replays_do_not_allocate_durable_sessions(
@@ -692,9 +685,12 @@ def test_non_live_creation_requests_do_not_refresh_an_admitted_session(
     )
     database_path = tmp_path / "admission-owned-session.sqlite3"
     store = SQLiteStore(database_path)
-    raw_session = "B" * 43
     hasher = PublicIdentityHasher(settings.identity_hmac_secret)
-    session_hash = hasher.session(raw_session)
+    codec = hasher.demo_session_cookie_codec(
+        lifetime_seconds=int(settings.demo_session_ttl.total_seconds())
+    )
+    signed_session, credential = codec.mint(now=datetime.now(UTC))
+    session_hash = hasher.session(credential.nonce)
     admitted_at = datetime.now(UTC) - timedelta(minutes=5)
     store.claim_public_live_admission(
         session_hash=session_hash,
@@ -734,7 +730,7 @@ def test_non_live_creation_requests_do_not_refresh_an_admitted_session(
     before = identity_rows()
     headers = {"Origin": "https://demo.example"}
     with TestClient(create_app(settings, store=store)) as client:
-        client.cookies.set("backchannel_demo_session", raw_session)
+        client.cookies.set("backchannel_demo_session", signed_session)
         replay = client.post(
             "/api/recoveries",
             json={"scenarioId": "hotel", "executionMode": "replay_fixture"},

@@ -499,6 +499,8 @@ def test_same_decision_id_can_race_and_replay_one_result(tmp_path) -> None:
     )
     with TestClient(first_app) as creator:
         snapshot = create_sdk_recovery(creator)
+        session_cookie = creator.cookies.get("backchannel_demo_session")
+        assert session_cookie is not None
     recovery_id = str(snapshot["recoveryId"])
     second_store = SQLiteStore(database_path)
     second_provider = HotelSimulator(store=second_store)
@@ -511,6 +513,7 @@ def test_same_decision_id_can_race_and_replay_one_result(tmp_path) -> None:
 
     def submit(app):
         with TestClient(app) as client:
+            client.cookies.set("backchannel_demo_session", session_cookie)
             barrier.wait()
             response = client.post(
                 f"/api/recoveries/{recovery_id}/decisions",

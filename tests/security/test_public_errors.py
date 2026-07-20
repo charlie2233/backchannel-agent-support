@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 from fastapi.testclient import TestClient
 
 from server.config import RuntimeSettings
+from server.controls import PublicIdentityHasher
 from server.logging import log_public_event, safe_recovery_log_id
 from server.main import create_app
 from server.models import ExecutionMode, ScenarioId
+from server.orchestrator import RecoveryOrchestrator
+from server.providers.hotel_simulator import HotelSimulator
 from server.store import SQLiteStore
 
 
@@ -46,13 +50,24 @@ class _FailingOrchestrator:
     async def shutdown(self) -> None:
         return None
 
-    async def start(self, scenario_id: object, *, execution_mode: ExecutionMode) -> object:
-        del scenario_id, execution_mode
+    async def start(
+        self,
+        scenario_id: object,
+        *,
+        execution_mode: ExecutionMode,
+        session_hash: str | None = None,
+    ) -> object:
+        del scenario_id, execution_mode, session_hash
         raise RuntimeError(
             "prompt-canary authorization-canary sdk-state-canary tool-payload-canary"
         )
 
-    async def decide(self, recovery_id: str, payload: object) -> object:
+    async def decide(
+        self,
+        recovery_id: str,
+        payload: object,
+        **_kwargs: object,
+    ) -> object:
         del recovery_id, payload
         raise RuntimeError("decision-prompt-canary serialized-state-canary")
 
@@ -137,6 +152,10 @@ def test_internal_failure_response_and_allowlisted_log_disclose_no_raw_data(
         store=store,
         orchestrator=_FailingOrchestrator(),  # type: ignore[arg-type]
     )
+    hasher = PublicIdentityHasher(settings.identity_hmac_secret)
+    signed_cookie, _credential = hasher.demo_session_cookie_codec(
+        lifetime_seconds=int(settings.demo_session_ttl.total_seconds())
+    ).mint(now=datetime.now(UTC))
     with caplog.at_level(logging.INFO, logger="server.public"):
         with TestClient(app, raise_server_exceptions=False) as client:
             response = client.post(
@@ -144,7 +163,10 @@ def test_internal_failure_response_and_allowlisted_log_disclose_no_raw_data(
                 json={"scenarioId": "hotel", "executionMode": "openai_live"},
                 headers={
                     "Authorization": "Bearer authorization-header-canary",
-                    "Cookie": "backchannel_demo_session=cookie-canary",
+                    "Cookie": (
+                        "unrelated=cookie-canary; "
+                        f"backchannel_demo_session={signed_cookie}"
+                    ),
                 },
             )
 
@@ -185,28 +207,41 @@ def test_recovery_scoped_validation_and_internal_errors_keep_safe_correlation(
         identity_hmac_secret="test-identity-secret-that-is-at-least-32-bytes",
     )
     store = SQLiteStore(tmp_path / "scoped-errors.sqlite3")
-    store.create_recovery(
-        recovery_id=recovery_id,
-        scenario_id=ScenarioId.HOTEL,
-        execution_mode=ExecutionMode.SDK_STUB,
-        current_step=3,
-        current_step_summary="Pending scoped error probe.",
+    hasher = PublicIdentityHasher(settings.identity_hmac_secret)
+    signed_cookie, credential = hasher.demo_session_cookie_codec(
+        lifetime_seconds=int(settings.demo_session_ttl.total_seconds())
+    ).mint(now=datetime.now(UTC))
+    session_hash = hasher.session(credential.nonce)
+    setup_orchestrator = RecoveryOrchestrator(
+        store=store,
+        hotel_provider=HotelSimulator(store=store),
     )
+    pending = asyncio.run(
+        setup_orchestrator.start(
+            ScenarioId.HOTEL,
+            execution_mode=ExecutionMode.SDK_STUB,
+            session_hash=session_hash,
+        )
+    )
+    recovery_id = pending.recovery.recovery_id
     app = create_app(
         settings,
         store=store,
         orchestrator=_FailingOrchestrator(),  # type: ignore[arg-type]
     )
+    approval = pending.recovery.pending_approval
+    assert approval is not None
     valid_decision = {
         "decision": "decline",
         "clientDecisionId": "scoped-error-decision",
-        "remedyId": "scoped-error-remedy",
-        "remedyDigest": f"sha256:{'a' * 64}",
-        "toolCallId": "scoped-error-call",
+        "remedyId": approval.remedy_id,
+        "remedyDigest": approval.remedy_digest,
+        "toolCallId": approval.tool_call_id,
     }
 
     with caplog.at_level(logging.INFO, logger="server.public"):
         with TestClient(app, raise_server_exceptions=False) as client:
+            client.cookies.set("backchannel_demo_session", signed_cookie)
             invalid_body = client.post(
                 f"/api/recoveries/{recovery_id}/decisions",
                 json={"decision": "decline"},
@@ -221,23 +256,23 @@ def test_recovery_scoped_validation_and_internal_errors_keep_safe_correlation(
                 json=valid_decision,
             )
 
-            original_get_recovery = store.get_recovery
+            original_get_recovery = store.get_recovery_for_session
 
-            def failing_get_recovery(_recovery_id: str):
+            def failing_get_recovery(_recovery_id: str, _session_hash: str):
                 raise RuntimeError("get-recovery-state-canary")
 
-            store.get_recovery = failing_get_recovery  # type: ignore[method-assign]
+            store.get_recovery_for_session = failing_get_recovery  # type: ignore[method-assign]
             get_failure = client.get(f"/api/recoveries/{recovery_id}")
-            store.get_recovery = original_get_recovery  # type: ignore[method-assign]
+            store.get_recovery_for_session = original_get_recovery  # type: ignore[method-assign]
 
-            original_get_receipt = store.get_receipt
+            original_get_receipt = store.get_receipt_for_session
 
-            def failing_get_receipt(_recovery_id: str):
+            def failing_get_receipt(_recovery_id: str, _session_hash: str):
                 raise RuntimeError("get-receipt-state-canary")
 
-            store.get_receipt = failing_get_receipt  # type: ignore[method-assign]
+            store.get_receipt_for_session = failing_get_receipt  # type: ignore[method-assign]
             receipt_failure = client.get(f"/api/recoveries/{recovery_id}/receipt")
-            store.get_receipt = original_get_receipt  # type: ignore[method-assign]
+            store.get_receipt_for_session = original_get_receipt  # type: ignore[method-assign]
 
     for response, status, code in (
         (invalid_body, 422, "invalid_request"),

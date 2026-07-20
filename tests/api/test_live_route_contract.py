@@ -26,7 +26,9 @@ class _RouteContractOrchestrator:
         scenario_id: str | ScenarioId,
         *,
         execution_mode: ExecutionMode,
+        session_hash: str | None = None,
     ) -> SimpleNamespace:
+        assert session_hash is not None
         if ScenarioId(scenario_id) is not ScenarioId.HOTEL:
             raise UnsupportedOrchestrationError(
                 "OpenAI live supports the hotel scenario only"

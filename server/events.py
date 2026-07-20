@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
+from datetime import UTC, datetime
 from time import monotonic
 
 from server.models import RecoveryEvent, RecoveryStatus
-from server.store import SQLiteStore
+from server.store import RecoveryNotFoundError, SQLiteStore
 
 HEARTBEAT_SECONDS = 15.0
 POLL_INTERVAL_SECONDS = 0.25
@@ -38,15 +39,32 @@ async def stream_recovery_events(
     is_disconnected: Callable[[], Awaitable[bool]],
     heartbeat_seconds: float = HEARTBEAT_SECONDS,
     poll_interval_seconds: float = POLL_INTERVAL_SECONDS,
+    session_hash: str | None = None,
+    session_expires_at: datetime | None = None,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> AsyncIterator[str]:
     """Replay durable events first, then poll for newly committed events."""
 
     cursor = after_seq
     last_emission = monotonic()
     while True:
-        persisted, recovery_status = store.read_event_batch(
-            recovery_id, after_seq=cursor
-        )
+        if session_expires_at is not None and now() >= session_expires_at:
+            return
+        try:
+            if session_hash is None:
+                persisted, recovery_status = store.read_event_batch(
+                    recovery_id, after_seq=cursor
+                )
+            else:
+                persisted, recovery_status = store.read_event_batch_for_session(
+                    recovery_id,
+                    session_hash=session_hash,
+                    after_seq=cursor,
+                )
+        except RecoveryNotFoundError:
+            if session_hash is not None:
+                return
+            raise
         for event in persisted:
             yield encode_sse_event(event)
             cursor = event.seq

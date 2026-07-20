@@ -11,6 +11,7 @@ from typing import cast
 from fastapi.testclient import TestClient
 
 from server.config import RuntimeSettings
+from server.controls import DEMO_SESSION_COOKIE
 from server.main import create_app
 from server.models import ExecutionMode
 from server.providers.hotel_simulator import HotelSimulator
@@ -220,6 +221,8 @@ def main() -> None:
                 "remedyDigest": cast(str, decline_approval["remedyDigest"]),
                 "toolCallId": cast(str, decline_approval["toolCallId"]),
             }
+            signed_session_cookie = client.cookies.get(DEMO_SESSION_COOKIE)
+            assert signed_session_cookie is not None
 
         store.close()
         del hotel_provider, quota_provider, store
@@ -233,6 +236,10 @@ def main() -> None:
                 hotel_provider=restarted_provider,
             )
         ) as restarted_client:
+            restarted_client.cookies.set(
+                DEMO_SESSION_COOKIE,
+                signed_session_cookie,
+            )
             completed = restarted_client.post(
                 f"/api/recoveries/{sdk_recovery_id}/decisions",
                 json=decision_payload,

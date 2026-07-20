@@ -29,6 +29,7 @@ from server.controls import (
     PublicIdentityHasher,
     PublicLiveAdmissionError,
     identity_from_scope,
+    optional_identity_from_scope,
     public_error_detail,
     recovery_id_from_scope,
     request_id_from_scope,
@@ -210,7 +211,6 @@ def create_app(
         PublicBoundaryMiddleware,
         max_body_bytes=runtime_settings.max_request_body_bytes,
         identity_hasher=PublicIdentityHasher(runtime_settings.identity_hmac_secret),
-        session_store=recovery_store,
         session_ttl_seconds=int(runtime_settings.demo_session_ttl.total_seconds()),
         trusted_proxy_cidrs=runtime_settings.trusted_proxy_cidrs,
         deployed=runtime_settings.deployed,
@@ -284,6 +284,11 @@ def create_app(
 
     @application.get("/readyz", response_model=ReadinessResponse)
     def ready() -> ReadinessResponse:
+        if not recovery_store.is_ready():
+            _raise_public(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                code="internal_error",
+            )
         return ReadinessResponse(status="ready")
 
     @application.get("/api/scenarios", response_model=list[ScenarioResponse])
@@ -307,11 +312,13 @@ def create_app(
         request: Request,
         payload: CreateRecoveryRequest,
     ) -> RecoverySnapshot:
+        identity = identity_from_scope(request.scope)
         if payload.execution_mode is ExecutionMode.REPLAY_FIXTURE:
             try:
                 return replay_engine.start(
                     payload.scenario_id,
                     execution_mode=payload.execution_mode,
+                    session_hash=identity.session_hash,
                 )
             except (ScenarioNotFoundError, UnsupportedExecutionModeError):
                 _raise_public(
@@ -330,7 +337,9 @@ def create_app(
             payload.scenario_id is ScenarioId.API_QUOTA
             and payload.execution_mode is ExecutionMode.SDK_STUB
         ):
-            return await recovery_orchestrator.run_quota_stub()
+            return await recovery_orchestrator.run_quota_stub(
+                session_hash=identity.session_hash,
+            )
         if payload.execution_mode is ExecutionMode.OPENAI_LIVE:
             if payload.scenario_id is not ScenarioId.HOTEL:
                 _raise_public(
@@ -345,17 +354,17 @@ def create_app(
                 )
             try:
                 async with live_gate.slot():
-                    identity = identity_from_scope(request.scope)
                     recovery_store.claim_public_live_admission(
                         session_hash=identity.session_hash,
                         ip_hash=identity.ip_hash,
                         cooldown=runtime_settings.live_cooldown,
                         daily_budget=runtime_settings.live_daily_budget,
-                        session_ttl=runtime_settings.demo_session_ttl,
+                        session_expires_at=identity.session_expires_at,
                     )
                     pending = await recovery_orchestrator.start(
                         payload.scenario_id,
                         execution_mode=payload.execution_mode,
+                        session_hash=identity.session_hash,
                     )
                     return pending.recovery
             except LiveConcurrencyLimitError:
@@ -382,6 +391,7 @@ def create_app(
             pending = await recovery_orchestrator.start(
                 payload.scenario_id,
                 execution_mode=payload.execution_mode,
+                session_hash=identity.session_hash,
             )
             return pending.recovery
         except UnsupportedOrchestrationError:
@@ -402,22 +412,58 @@ def create_app(
     )
     async def decide_recovery(
         recovery_id: UUID,
+        request: Request,
         payload: ApprovalDecisionRequest,
     ) -> DecisionResponse:
         recovery_key = str(recovery_id)
-        try:
-            snapshot = recovery_store.get_recovery(recovery_key)
-        except RecoveryNotFoundError:
+        identity = optional_identity_from_scope(request.scope)
+        if identity is None:
             _raise_public(
                 status_code=status.HTTP_404_NOT_FOUND,
                 code="not_found",
                 recovery_id=recovery_key,
             )
         try:
+            claim = recovery_store.claim_decision_for_session(
+                recovery_key,
+                payload,
+                session_hash=identity.session_hash,
+            )
+        except RecoveryNotFoundError:
+            _raise_public(
+                status_code=status.HTTP_404_NOT_FOUND,
+                code="not_found",
+                recovery_id=recovery_key,
+            )
+        except ApprovalDecisionError as error:
+            _raise_public(
+                status_code=error.status_code,
+                code=_decision_error_code(error.code),
+                recovery_id=recovery_key,
+            )
+        try:
+            if claim.response is not None:
+                return await recovery_orchestrator.decide(
+                    recovery_key,
+                    payload,
+                    session_hash=identity.session_hash,
+                    claimed_decision=claim,
+                )
+            snapshot = recovery_store.get_recovery(recovery_key)
             if snapshot.execution_mode is ExecutionMode.OPENAI_LIVE:
                 async with live_gate.slot():
-                    return await recovery_orchestrator.decide(recovery_key, payload)
-            return await recovery_orchestrator.decide(recovery_key, payload)
+                    return await recovery_orchestrator.decide(
+                        recovery_key,
+                        payload,
+                        session_hash=identity.session_hash,
+                        claimed_decision=claim,
+                    )
+            return await recovery_orchestrator.decide(
+                recovery_key,
+                payload,
+                session_hash=identity.session_hash,
+                claimed_decision=claim,
+            )
         except LiveConcurrencyLimitError:
             _raise_public(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -429,6 +475,12 @@ def create_app(
             _raise_public(
                 status_code=error.status_code,
                 code=_decision_error_code(error.code),
+                recovery_id=recovery_key,
+            )
+        except RecoveryNotFoundError:
+            _raise_public(
+                status_code=status.HTTP_404_NOT_FOUND,
+                code="not_found",
                 recovery_id=recovery_key,
             )
         except ResumeIncompatibleError:
@@ -447,10 +499,20 @@ def create_app(
     @application.get(
         "/api/recoveries/{recovery_id}", response_model=RecoverySnapshot
     )
-    def get_recovery(recovery_id: UUID) -> RecoverySnapshot:
+    def get_recovery(recovery_id: UUID, request: Request) -> RecoverySnapshot:
         recovery_key = str(recovery_id)
+        identity = optional_identity_from_scope(request.scope)
+        if identity is None:
+            _raise_public(
+                status_code=status.HTTP_404_NOT_FOUND,
+                code="not_found",
+                recovery_id=recovery_key,
+            )
         try:
-            return recovery_store.get_recovery(recovery_key)
+            return recovery_store.get_recovery_for_session(
+                recovery_key,
+                identity.session_hash,
+            )
         except RecoveryNotFoundError:
             _raise_public(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -464,6 +526,25 @@ def create_app(
         request: Request,
         last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
     ) -> Response:
+        recovery_key = str(recovery_id)
+        identity = optional_identity_from_scope(request.scope)
+        if identity is None:
+            _raise_public(
+                status_code=status.HTTP_404_NOT_FOUND,
+                code="not_found",
+                recovery_id=recovery_key,
+            )
+        try:
+            recovery_store.get_recovery_for_session(
+                recovery_key,
+                identity.session_hash,
+            )
+        except RecoveryNotFoundError:
+            _raise_public(
+                status_code=status.HTTP_404_NOT_FOUND,
+                code="not_found",
+                recovery_id=recovery_key,
+            )
         cursor = 0
         if last_event_id is not None:
             if len(last_event_id) > 20:
@@ -474,22 +555,14 @@ def create_app(
                 _raise_public(status_code=400, code="invalid_request")
             if cursor < 0:
                 _raise_public(status_code=400, code="invalid_request")
-        recovery_key = str(recovery_id)
-        try:
-            recovery_store.get_recovery(recovery_key)
-        except RecoveryNotFoundError:
-            _raise_public(
-                status_code=status.HTTP_404_NOT_FOUND,
-                code="not_found",
-                recovery_id=recovery_key,
-            )
-
         return StreamingResponse(
             stream_recovery_events(
                 recovery_store,
                 recovery_key,
                 after_seq=cursor,
                 is_disconnected=request.is_disconnected,
+                session_hash=identity.session_hash,
+                session_expires_at=identity.session_expires_at,
             ),
             media_type="text/event-stream",
             headers={
@@ -501,10 +574,20 @@ def create_app(
     @application.get(
         "/api/recoveries/{recovery_id}/receipt", response_model=RecoveryReceipt
     )
-    def get_receipt(recovery_id: UUID) -> RecoveryReceipt:
+    def get_receipt(recovery_id: UUID, request: Request) -> RecoveryReceipt:
         recovery_key = str(recovery_id)
+        identity = optional_identity_from_scope(request.scope)
+        if identity is None:
+            _raise_public(
+                status_code=status.HTTP_404_NOT_FOUND,
+                code="not_found",
+                recovery_id=recovery_key,
+            )
         try:
-            return recovery_store.get_receipt(recovery_key)
+            return recovery_store.get_receipt_for_session(
+                recovery_key,
+                identity.session_hash,
+            )
         except RecoveryNotFoundError:
             _raise_public(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -513,13 +596,15 @@ def create_app(
             )
 
     @application.post("/api/demo/reset", response_model=DemoResetResponse)
-    def reset_demo() -> DemoResetResponse:
+    def reset_demo(request: Request) -> DemoResetResponse:
         if not runtime_settings.demo_reset_enabled:
             _raise_public(
                 status_code=status.HTTP_403_FORBIDDEN,
                 code="invalid_request",
             )
-        recovery_store.reset()
+        identity = optional_identity_from_scope(request.scope)
+        if identity is not None:
+            recovery_store.reset_for_session(identity.session_hash)
         return DemoResetResponse(reset=True)
 
     return application

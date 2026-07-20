@@ -267,6 +267,15 @@ CREATE TABLE IF NOT EXISTS demo_sessions (
     last_seen_at TEXT NOT NULL,
     expires_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS recovery_access (
+    recovery_id TEXT NOT NULL REFERENCES recoveries(id) ON DELETE CASCADE,
+    session_hash TEXT NOT NULL,
+    PRIMARY KEY (recovery_id, session_hash)
+);
+
+CREATE INDEX IF NOT EXISTS recovery_access_session_idx
+ON recovery_access(session_hash);
 """
 
 
@@ -418,6 +427,7 @@ class SQLiteStore:
             self._migrate_task6_approval_decisions(connection)
             self._migrate_task6_permission_scopes(connection)
             self._migrate_task8_public_controls(connection)
+            self._migrate_recovery_access(connection)
             event_columns = {
                 cast(str, row["name"])
                 for row in connection.execute("PRAGMA table_info(events)").fetchall()
@@ -446,6 +456,66 @@ class SQLiteStore:
             self._migrate_task6_receipts(connection)
             self._migrate_task7_receipt_provenance(connection)
             self._migrate_task8_inert_replay_fixtures(connection)
+
+    @staticmethod
+    def _recovery_access_schema_is_exact(connection: sqlite3.Connection) -> bool:
+        columns = [
+            (
+                cast(str, row["name"]),
+                cast(str, row["type"]).upper(),
+                cast(int, row["notnull"]),
+                cast(int, row["pk"]),
+            )
+            for row in connection.execute(
+                "PRAGMA table_info(recovery_access)"
+            ).fetchall()
+        ]
+        if columns != [
+            ("recovery_id", "TEXT", 1, 1),
+            ("session_hash", "TEXT", 1, 2),
+        ]:
+            return False
+        foreign_keys = connection.execute(
+            "PRAGMA foreign_key_list(recovery_access)"
+        ).fetchall()
+        if len(foreign_keys) != 1:
+            return False
+        foreign_key = foreign_keys[0]
+        if (
+            cast(str, foreign_key["table"]),
+            cast(str, foreign_key["from"]),
+            cast(str, foreign_key["to"]),
+            cast(str, foreign_key["on_delete"]).upper(),
+        ) != ("recoveries", "recovery_id", "id", "CASCADE"):
+            return False
+        indexes = {
+            cast(str, row["name"]): (
+                cast(int, row["unique"]),
+                cast(str, row["origin"]),
+                cast(int, row["partial"]),
+            )
+            for row in connection.execute(
+                "PRAGMA index_list(recovery_access)"
+            ).fetchall()
+        }
+        if indexes != {
+            "recovery_access_session_idx": (0, "c", 0),
+            "sqlite_autoindex_recovery_access_1": (1, "pk", 0),
+        }:
+            return False
+        index = connection.execute(
+            "PRAGMA index_info(recovery_access_session_idx)"
+        ).fetchall()
+        return [cast(str, row["name"]) for row in index] == ["session_hash"]
+
+    @classmethod
+    def _migrate_recovery_access(cls, connection: sqlite3.Connection) -> None:
+        """Validate the exact fail-closed public recovery ownership schema."""
+
+        if not cls._recovery_access_schema_is_exact(connection):
+            raise RuntimeError("Unsupported recovery access session index")
+        if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+            raise RuntimeError("Recovery access migration violated foreign keys")
 
     @staticmethod
     def _migrate_task8_inert_replay_fixtures(
@@ -2427,6 +2497,25 @@ class SQLiteStore:
             result_json=result_json,
         )
 
+    @classmethod
+    def _bind_recovery_access(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        recovery_id: str,
+        session_hash: str | None,
+    ) -> None:
+        if session_hash is None:
+            return
+        cls._require_public_identity_hash(session_hash)
+        connection.execute(
+            """
+            INSERT INTO recovery_access (recovery_id, session_hash)
+            VALUES (?, ?)
+            """,
+            (recovery_id, session_hash),
+        )
+
     def create_recovery(
         self,
         *,
@@ -2435,6 +2524,7 @@ class SQLiteStore:
         execution_mode: ExecutionMode,
         current_step: int,
         current_step_summary: str,
+        session_hash: str | None = None,
     ) -> RecoverySnapshot:
         now = self._now()
         created_data = json.dumps(
@@ -2466,6 +2556,11 @@ class SQLiteStore:
                     now.isoformat(),
                 ),
             )
+            self._bind_recovery_access(
+                connection,
+                recovery_id=recovery_id,
+                session_hash=session_hash,
+            )
             connection.execute(
                 """
                 INSERT INTO events (
@@ -2481,6 +2576,7 @@ class SQLiteStore:
         *,
         recovery_id: str,
         scenario: ReplayScenarioDefinition,
+        session_hash: str | None = None,
     ) -> RecoverySnapshot:
         """Persist one complete replay graph atomically or leave no trace."""
 
@@ -2530,6 +2626,11 @@ class SQLiteStore:
                     now.isoformat(),
                     now.isoformat(),
                 ),
+            )
+            self._bind_recovery_access(
+                connection,
+                recovery_id=recovery_id,
+                session_hash=session_hash,
             )
             connection.execute(
                 """
@@ -2599,6 +2700,7 @@ class SQLiteStore:
         recovery_id: str,
         execution: DurableExecution,
         receipt: RecoveryReceipt,
+        session_hash: str | None = None,
     ) -> RecoverySnapshot:
         """Persist the complete runtime quota trace and receipt atomically."""
 
@@ -2727,6 +2829,11 @@ class SQLiteStore:
                     now.isoformat(),
                 ),
             )
+            self._bind_recovery_access(
+                connection,
+                recovery_id=recovery_id,
+                session_hash=session_hash,
+            )
             connection.execute(
                 """
                 INSERT INTO events (
@@ -2832,6 +2939,7 @@ class SQLiteStore:
         event_data: dict[str, JsonValue],
         pending_approval: PendingApprovalEnvelope,
         remedy_consent: RemedyConsentRecord,
+        session_hash: str | None = None,
     ) -> RecoverySnapshot:
         """Insert the full first durable approval boundary in one transaction."""
 
@@ -2886,6 +2994,11 @@ class SQLiteStore:
                     now.isoformat(),
                     now.isoformat(),
                 ),
+            )
+            self._bind_recovery_access(
+                connection,
+                recovery_id=recovery_id,
+                session_hash=session_hash,
             )
             connection.execute(
                 """
@@ -3248,6 +3361,66 @@ class SQLiteStore:
             envelope=envelope,
         )
 
+    def recovery_is_accessible(self, recovery_id: str, session_hash: str) -> bool:
+        """Return whether one exact signed-session identity owns the recovery."""
+
+        self._require_public_identity_hash(session_hash)
+        with self._lock, self._connect() as connection:
+            return (
+                connection.execute(
+                    """
+                    SELECT 1 FROM recovery_access
+                    WHERE recovery_id = ? AND session_hash = ?
+                    """,
+                    (recovery_id, session_hash),
+                ).fetchone()
+                is not None
+            )
+
+    def get_recovery_for_session(
+        self,
+        recovery_id: str,
+        session_hash: str,
+    ) -> RecoverySnapshot:
+        self._require_public_identity_hash(session_hash)
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT recoveries.* FROM recoveries
+                JOIN recovery_access
+                  ON recovery_access.recovery_id = recoveries.id
+                WHERE recoveries.id = ? AND recovery_access.session_hash = ?
+                """,
+                (recovery_id, session_hash),
+            ).fetchone()
+            if row is None:
+                raise RecoveryNotFoundError("Recovery not found")
+            pending_view = (
+                self._public_pending_view(connection, recovery_id)
+                if cast(str, row["status"])
+                == RecoveryStatus.PENDING_APPROVAL.value
+                else None
+            )
+            envelope_row = connection.execute(
+                """
+                SELECT * FROM pending_approvals
+                WHERE recovery_id = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (recovery_id,),
+            ).fetchone()
+            envelope = (
+                self._pending_approval_from_row(envelope_row)
+                if envelope_row is not None
+                else None
+            )
+        return self._recovery_from_row(
+            row,
+            pending_approval=pending_view,
+            envelope=envelope,
+        )
+
     def get_remedy_consent(self, recovery_id: str) -> RemedyConsentRecord:
         """Load authoritative consent and evidence without serializing it publicly."""
 
@@ -3277,9 +3450,47 @@ class SQLiteStore:
     ) -> ApprovalDecisionClaim:
         """Claim one approve-or-decline winner and update its exact scope."""
 
+        return self._claim_decision(
+            recovery_id,
+            request,
+            session_hash=None,
+        )
+
+    def claim_decision_for_session(
+        self,
+        recovery_id: str,
+        request: ApprovalDecisionRequest,
+        *,
+        session_hash: str,
+    ) -> ApprovalDecisionClaim:
+        """Claim a public decision only while ownership holds in this transaction."""
+
+        self._require_public_identity_hash(session_hash)
+        return self._claim_decision(
+            recovery_id,
+            request,
+            session_hash=session_hash,
+        )
+
+    def _claim_decision(
+        self,
+        recovery_id: str,
+        request: ApprovalDecisionRequest,
+        *,
+        session_hash: str | None,
+    ) -> ApprovalDecisionClaim:
+
         fingerprint = self._decision_fingerprint(recovery_id, request)
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            if session_hash is not None and connection.execute(
+                """
+                SELECT 1 FROM recovery_access
+                WHERE recovery_id = ? AND session_hash = ?
+                """,
+                (recovery_id, session_hash),
+            ).fetchone() is None:
+                raise RecoveryNotFoundError("Recovery not found")
             now = self._now()
             reused_id = connection.execute(
                 "SELECT * FROM approval_decisions WHERE client_decision_id = ?",
@@ -4151,6 +4362,20 @@ class SQLiteStore:
                 int,
                 connection.execute("SELECT COUNT(*) FROM recoveries").fetchone()[0],
             )
+
+    def is_ready(self) -> bool:
+        """Check SQLite integrity and the exact public-ownership schema without repair."""
+
+        try:
+            with self._lock, self._connect() as connection:
+                quick_check = connection.execute("PRAGMA quick_check(1)").fetchone()
+                if quick_check is None or cast(str, quick_check[0]) != "ok":
+                    return False
+                if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                    return False
+                return self._recovery_access_schema_is_exact(connection)
+        except (RuntimeError, sqlite3.DatabaseError):
+            return False
 
     @staticmethod
     def _require_public_identity_hash(value: str) -> None:
@@ -5086,6 +5311,45 @@ class SQLiteStore:
             connection.commit()
         return [self._event_from_row(row) for row in rows], recovery_status
 
+    def read_event_batch_for_session(
+        self,
+        recovery_id: str,
+        *,
+        session_hash: str,
+        after_seq: int = 0,
+    ) -> tuple[list[RecoveryEvent], RecoveryStatus]:
+        """Read an owner-authorized event batch from one SQLite snapshot."""
+
+        self._require_public_identity_hash(session_hash)
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN")
+            access = connection.execute(
+                """
+                SELECT 1 FROM recovery_access
+                WHERE recovery_id = ? AND session_hash = ?
+                """,
+                (recovery_id, session_hash),
+            ).fetchone()
+            if access is None:
+                raise RecoveryNotFoundError("Recovery not found")
+            rows = connection.execute(
+                """
+                SELECT recovery_id, seq, type, terminal, data_json, created_at
+                FROM events
+                WHERE recovery_id = ? AND seq > ?
+                ORDER BY seq ASC
+                """,
+                (recovery_id, after_seq),
+            ).fetchall()
+            recovery = connection.execute(
+                "SELECT status FROM recoveries WHERE id = ?", (recovery_id,)
+            ).fetchone()
+            if recovery is None:
+                raise RecoveryNotFoundError("Recovery not found")
+            recovery_status = RecoveryStatus(cast(str, recovery["status"]))
+            connection.commit()
+        return [self._event_from_row(row) for row in rows], recovery_status
+
     def get_receipt(self, recovery_id: str) -> RecoveryReceipt:
         with self._lock, self._connect() as connection:
             row = connection.execute(
@@ -5095,10 +5359,57 @@ class SQLiteStore:
             raise RecoveryNotFoundError("Receipt not found")
         return RecoveryReceipt.model_validate_json(cast(str, row["receipt_json"]))
 
+    def get_receipt_for_session(
+        self,
+        recovery_id: str,
+        session_hash: str,
+    ) -> RecoveryReceipt:
+        self._require_public_identity_hash(session_hash)
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT receipts.receipt_json FROM receipts
+                JOIN recovery_access
+                  ON recovery_access.recovery_id = receipts.recovery_id
+                WHERE receipts.recovery_id = ? AND recovery_access.session_hash = ?
+                """,
+                (recovery_id, session_hash),
+            ).fetchone()
+        if row is None:
+            raise RecoveryNotFoundError("Receipt not found")
+        return RecoveryReceipt.model_validate_json(cast(str, row["receipt_json"]))
+
     def reset(self) -> None:
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute("DELETE FROM recoveries")
+
+    def reset_for_session(self, session_hash: str) -> None:
+        """Delete only singly-owned detail and detach this session from shared rows."""
+
+        self._require_public_identity_hash(session_hash)
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                DELETE FROM recoveries
+                WHERE EXISTS (
+                    SELECT 1 FROM recovery_access AS caller_access
+                    WHERE caller_access.recovery_id = recoveries.id
+                      AND caller_access.session_hash = ?
+                )
+                  AND NOT EXISTS (
+                    SELECT 1 FROM recovery_access AS other_access
+                    WHERE other_access.recovery_id = recoveries.id
+                      AND other_access.session_hash <> ?
+                )
+                """,
+                (session_hash, session_hash),
+            )
+            connection.execute(
+                "DELETE FROM recovery_access WHERE session_hash = ?",
+                (session_hash,),
+            )
 
     def close(self) -> None:
         with self._lock:

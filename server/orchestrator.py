@@ -501,7 +501,11 @@ class RecoveryOrchestrator:
         )
         raise ResumeIncompatibleError(recovery_id)
 
-    async def run_quota_stub(self) -> RecoverySnapshot:
+    async def run_quota_stub(
+        self,
+        *,
+        session_hash: str | None = None,
+    ) -> RecoverySnapshot:
         """Run and atomically seal the deterministic zero-interruption quota graph."""
 
         recovery_id = str(uuid4())
@@ -601,6 +605,7 @@ class RecoveryOrchestrator:
             recovery_id=recovery_id,
             execution=execution,
             receipt=receipt,
+            session_hash=session_hash,
         )
 
     async def start(
@@ -608,6 +613,7 @@ class RecoveryOrchestrator:
         scenario_id: str | ScenarioId,
         *,
         execution_mode: ExecutionMode,
+        session_hash: str | None = None,
     ) -> PendingSdkApproval:
         try:
             approved_scenario = ScenarioId(scenario_id)
@@ -620,7 +626,7 @@ class RecoveryOrchestrator:
                 )
             if not self._live_ready or self._live_model_provider_factory is None:
                 raise LiveUnavailableError
-            return await self._start_live_hotel()
+            return await self._start_live_hotel(session_hash=session_hash)
         if (
             approved_scenario is not ScenarioId.HOTEL
             or execution_mode is not ExecutionMode.SDK_STUB
@@ -636,6 +642,7 @@ class RecoveryOrchestrator:
             execution_mode=execution_mode,
             current_step=0,
             current_step_summary="Deterministic Agents SDK recovery started.",
+            session_hash=session_hash,
         )
         arguments = deterministic_hotel_arguments()
         action_digest = remedy_action_digest(arguments)
@@ -737,7 +744,11 @@ class RecoveryOrchestrator:
             original_root_agent=original_root_agent,
         )
 
-    async def _start_live_hotel(self) -> PendingSdkApproval:
+    async def _start_live_hotel(
+        self,
+        *,
+        session_hash: str | None = None,
+    ) -> PendingSdkApproval:
         """Run three live Agents under one persisted trace to exact approval."""
 
         if self._live_model_provider_factory is None:
@@ -894,6 +905,7 @@ class RecoveryOrchestrator:
                 },
                 pending_approval=envelope,
                 remedy_consent=remedy_consent,
+                session_hash=session_hash,
             )
         except BaseException:
             raise
@@ -969,12 +981,31 @@ class RecoveryOrchestrator:
         self,
         recovery_id: str,
         request: ApprovalDecisionRequest,
+        *,
+        session_hash: str | None = None,
+        claimed_decision: ApprovalDecisionClaim | None = None,
     ) -> ApprovalDecisionResponse:
         """Claim, resume, and durably replay one exact approval decision."""
 
         if request.decision != "approve":
             raise ValueError("approve_decision requires decision=approve")
-        claim = self._store.claim_decision(recovery_id, request)
+        if claimed_decision is not None:
+            if (
+                claimed_decision.recovery_id != recovery_id
+                or claimed_decision.request != request
+            ):
+                raise ValueError("Preclaimed decision does not match the request")
+            claim = claimed_decision
+        else:
+            claim = (
+                self._store.claim_decision(recovery_id, request)
+                if session_hash is None
+                else self._store.claim_decision_for_session(
+                    recovery_id,
+                    request,
+                    session_hash=session_hash,
+                )
+            )
         if claim.response is not None:
             if not isinstance(claim.response, ApprovalDecisionResponse):
                 raise TypeError("Approval request replayed a decline response")
@@ -1059,12 +1090,31 @@ class RecoveryOrchestrator:
         self,
         recovery_id: str,
         request: ApprovalDecisionRequest,
+        *,
+        session_hash: str | None = None,
+        claimed_decision: ApprovalDecisionClaim | None = None,
     ) -> DeclineDecisionResponse:
         """Reject the exact SDK interruption, then atomically seal closure evidence."""
 
         if request.decision != "decline":
             raise ValueError("decline_decision requires decision=decline")
-        claim = self._store.claim_decision(recovery_id, request)
+        if claimed_decision is not None:
+            if (
+                claimed_decision.recovery_id != recovery_id
+                or claimed_decision.request != request
+            ):
+                raise ValueError("Preclaimed decision does not match the request")
+            claim = claimed_decision
+        else:
+            claim = (
+                self._store.claim_decision(recovery_id, request)
+                if session_hash is None
+                else self._store.claim_decision_for_session(
+                    recovery_id,
+                    request,
+                    session_hash=session_hash,
+                )
+            )
         if claim.response is not None:
             if not isinstance(claim.response, DeclineDecisionResponse):
                 raise TypeError("Decline request replayed an approval response")
@@ -1111,12 +1161,25 @@ class RecoveryOrchestrator:
         self,
         recovery_id: str,
         request: ApprovalDecisionRequest,
+        *,
+        session_hash: str | None = None,
+        claimed_decision: ApprovalDecisionClaim | None = None,
     ) -> DecisionResponse:
         """Dispatch one required, durable approve-or-decline decision."""
 
         if request.decision == "approve":
-            return await self.approve_decision(recovery_id, request)
-        return await self.decline_decision(recovery_id, request)
+            return await self.approve_decision(
+                recovery_id,
+                request,
+                session_hash=session_hash,
+                claimed_decision=claimed_decision,
+            )
+        return await self.decline_decision(
+            recovery_id,
+            request,
+            session_hash=session_hash,
+            claimed_decision=claimed_decision,
+        )
 
     async def _resume_claimed_approval(
         self,
