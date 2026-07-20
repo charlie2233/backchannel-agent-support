@@ -10,8 +10,14 @@ export interface RecoveryEvent {
 interface EventSourceContract {
   onmessage: ((event: MessageEvent<string>) => void) | null;
   onerror: ((event: Event) => void) | null;
+  addEventListener(type: string, listener: EventListener): void;
+  removeEventListener(type: string, listener: EventListener): void;
   close(): void;
 }
+
+const streamCapacityCode = "event_stream_capacity";
+const streamCapacityMessage =
+  "Event streaming is temporarily at capacity; retry is automatic.";
 
 function hasExactKeys(value: Record<string, unknown>, keys: ReadonlyArray<string>): boolean {
   const actual = Object.keys(value).sort();
@@ -67,6 +73,32 @@ export function parseRecoveryEvent(serialized: string): RecoveryEvent {
   return parsed;
 }
 
+function parseStreamCapacityControl(serialized: unknown): string {
+  if (typeof serialized !== "string") {
+    throw new Error("Stream capacity control did not match the public contract");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(serialized) as unknown;
+  } catch {
+    throw new Error("Stream capacity control did not match the public contract");
+  }
+  if (typeof parsed !== "object" || parsed === null) {
+    throw new Error("Stream capacity control did not match the public contract");
+  }
+  const candidate = parsed as Record<string, unknown>;
+  if (
+    !hasExactKeys(candidate, ["code", "message", "requestId"]) ||
+    candidate.code !== streamCapacityCode ||
+    candidate.message !== streamCapacityMessage ||
+    typeof candidate.requestId !== "string" ||
+    !/^[0-9a-f]{32}$/.test(candidate.requestId)
+  ) {
+    throw new Error("Stream capacity control did not match the public contract");
+  }
+  return streamCapacityMessage;
+}
+
 export function connectRecoveryEvents(
   recoveryId: string,
   handlers: RecoveryEventHandlers,
@@ -76,13 +108,34 @@ export function connectRecoveryEvents(
     `/api/recoveries/${encodeURIComponent(recoveryId)}/events`,
   );
   let closed = false;
+  let capacityRetryPending = false;
   const closeOnce = () => {
     if (closed) {
       return;
     }
     closed = true;
+    source.removeEventListener("stream.capacity", onStreamCapacity);
     source.close();
   };
+  const onStreamCapacity: EventListener = (event) => {
+    if (closed) {
+      return;
+    }
+    try {
+      const message = parseStreamCapacityControl(
+        event instanceof MessageEvent ? event.data : null,
+      );
+      capacityRetryPending = true;
+      handlers.onError?.(new Error(message));
+    } catch (error) {
+      handlers.onError?.(
+        error instanceof Error
+          ? error
+          : new Error("Stream capacity control did not match the public contract"),
+      );
+    }
+  };
+  source.addEventListener("stream.capacity", onStreamCapacity);
   source.onmessage = (message) => {
     if (closed) {
       return;
@@ -92,6 +145,7 @@ export function connectRecoveryEvents(
       if (event.recoveryId !== recoveryId) {
         throw new Error("Recovery event did not belong to the active recovery");
       }
+      capacityRetryPending = false;
       handlers.onEvent(event);
       if (event.terminal) {
         closeOnce();
@@ -104,6 +158,10 @@ export function connectRecoveryEvents(
   };
   source.onerror = () => {
     if (closed) {
+      return;
+    }
+    if (capacityRetryPending) {
+      capacityRetryPending = false;
       return;
     }
     handlers.onError?.(new Error("Recovery event stream disconnected"));

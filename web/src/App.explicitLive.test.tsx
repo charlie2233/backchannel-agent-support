@@ -174,6 +174,8 @@ describe("explicit, reload-safe live recovery", () => {
       onmessage: ((event: MessageEvent<string>) => void) | null = null;
       onerror: ((event: Event) => void) | null = null;
       close = vi.fn();
+      addEventListener = vi.fn();
+      removeEventListener = vi.fn();
 
       constructor(url: string) {
         ControlledEventSource.urls.push(url);

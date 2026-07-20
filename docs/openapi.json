@@ -844,7 +844,7 @@
     },
     "/api/recoveries/{recovery_id}/events": {
       "get": {
-        "description": "Requires the signed opaque demo session issued when the recovery was created. Missing, expired, tampered, unrelated, and unknown sessions receive the same generic not-found response.",
+        "description": "Requires the signed opaque demo session issued when the recovery was created. Missing, expired, tampered, unrelated, and unknown sessions receive the same generic not-found response. Streams are admitted by bounded, process-local capacity. At capacity, the endpoint returns a finite stream.capacity control event with a native EventSource retry interval.",
         "operationId": "recovery_events_api_recoveries__recovery_id__events_get",
         "parameters": [
           {
@@ -877,8 +877,10 @@
         "responses": {
           "200": {
             "content": {
-              "application/json": {
-                "schema": {}
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
               }
             },
             "description": "Successful Response"

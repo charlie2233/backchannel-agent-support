@@ -45,6 +45,8 @@ describe("Backchannel console", () => {
       onmessage: ((event: MessageEvent<string>) => void) | null = null;
       onerror: ((event: Event) => void) | null = null;
       close = vi.fn();
+      addEventListener = vi.fn();
+      removeEventListener = vi.fn();
 
       constructor(readonly url: string) {
         ControlledEventSource.instances.push(this);

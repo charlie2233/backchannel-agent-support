@@ -64,6 +64,11 @@ model call nor a provider dispatch.
   at the displayed deadline and refreshes server evidence instead of inventing the outcome.
 - Compatible pending approvals survive a process restart; version or definition drift fails
   closed with `resume_incompatible`.
+- SSE polling is fail-fast bounded to 16 streams per server process and four per recovery by
+  default. At capacity, the server returns a finite `stream.capacity` control event with a
+  five-second native retry interval; authorized streams retain durable replay, heartbeat, and
+  terminal semantics. These counters are process-local, not a cross-worker or cross-container
+  concurrency claim, and the packaged launcher deliberately runs one worker.
 - API quota recovery is the complementary zero-approval case: deterministic delegated
   authority, simulated execution verification, permission revocation, and a sealed receipt.
 

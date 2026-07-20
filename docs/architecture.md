@@ -24,6 +24,16 @@ ordered event stream; native `EventSource` reconnects with `Last-Event-ID`, and 
 replays later rows before waiting for new commits. Terminal events close the stream, after
 which the UI fetches the authoritative snapshot and receipt.
 
+Event delivery uses a lock-protected, fail-fast admission controller. The defaults admit at
+most 16 polling loops in this application process and at most four for one recovery. Session
+authorization, targeted consent expiry, `Last-Event-ID` validation, and recovery existence are
+checked before admission, so saturation changes neither the generic foreign/unknown 404 nor an
+authorized invalid-cursor 400. A rejected connection receives one finite `stream.capacity`
+control event with a five-second native retry field and then closes; it never enters the polling
+loop. The browser validates that exact control envelope, presents its message as transient, and
+leaves native `EventSource` reconnection active. A later durable recovery event clears the
+message, while a terminal event still closes the source.
+
 A live-ready page load is deliberately idle. **Start live recovery** is the only UI action that
 creates an `openai_live` hotel run, and an in-flight guard coalesces rapid activation before
 React can re-render the disabled control. After any validated hotel snapshot, the browser may
@@ -86,12 +96,22 @@ persistent `/data` volume. It is intentionally not converted to short-lived serv
 functions. One worker avoids presenting the in-process demo adapters as a distributed
 production provider system.
 
+SSE admission is deliberately process-local. Its lock makes global and per-recovery acquisition
+atomic only inside this application process; separate Uvicorn workers or separate containers
+would each own independent counters and could exceed the configured aggregate. The checked-in
+launcher therefore remains `workers=1`. A future horizontally scaled deployment would need an
+explicit shared admission design before claiming a fleet-wide limit.
+
 ## Public-demo controls
 
 The server applies request-size limits, exact CORS configuration, generic public errors,
 redacted server logging, per-IP and per-session live cooldowns, a live concurrency cap, a
 configurable daily admission budget, terminal-record TTL cleanup, and an HttpOnly demo-session
-cookie. Deployed mode additionally requires an exact HTTPS origin allowlist and an explicit
+cookie. Long-lived event streams add configurable process and per-recovery caps plus a bounded
+retry interval. Admission leases are released idempotently after terminal completion, client
+disconnect, cancellation, iterator/store/encoding failure, ASGI send failure, or response
+construction failure; zero-count recovery entries are removed. Deployed mode additionally
+requires an exact HTTPS origin allowlist and an explicit
 32-byte-or-longer identity-hash secret. Proxy headers are ignored unless the direct peer is in
 an explicit trusted CIDR allowlist.
 

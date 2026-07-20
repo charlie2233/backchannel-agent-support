@@ -68,6 +68,9 @@ class RuntimeSettings:
     terminal_recovery_ttl_seconds: int = 86_400
     terminal_cleanup_interval_seconds: int = 300
     request_body_size_limit_bytes: int = 16_384
+    max_concurrent_event_streams: int = 16
+    max_event_streams_per_recovery: int = 4
+    event_stream_retry_seconds: int = 5
     deployed_mode: bool = False
     deployed_cors_origins: tuple[str, ...] = ()
     trusted_proxy_enabled: bool = False
@@ -114,6 +117,21 @@ class RuntimeSettings:
                 1,
                 1_048_576,
             ),
+            "max_concurrent_event_streams": (
+                self.max_concurrent_event_streams,
+                1,
+                1_024,
+            ),
+            "max_event_streams_per_recovery": (
+                self.max_event_streams_per_recovery,
+                1,
+                1_024,
+            ),
+            "event_stream_retry_seconds": (
+                self.event_stream_retry_seconds,
+                1,
+                300,
+            ),
             "demo_session_lifetime_seconds": (
                 self.demo_session_lifetime_seconds,
                 1,
@@ -127,6 +145,12 @@ class RuntimeSettings:
                 or not minimum <= value <= maximum
             ):
                 raise ValueError(f"{name} must be between {minimum} and {maximum}")
+
+        if self.max_event_streams_per_recovery > self.max_concurrent_event_streams:
+            raise ValueError(
+                "max_event_streams_per_recovery cannot exceed "
+                "max_concurrent_event_streams"
+            )
 
         if not self.demo_session_cookie_name or any(
             character in self.demo_session_cookie_name for character in " ;,\r\n\t"
@@ -215,6 +239,18 @@ class RuntimeSettings:
             request_body_size_limit_bytes=_environment_int(
                 "BACKCHANNEL_REQUEST_BODY_SIZE_LIMIT_BYTES",
                 default=16_384,
+            ),
+            max_concurrent_event_streams=_environment_int(
+                "BACKCHANNEL_MAX_CONCURRENT_EVENT_STREAMS",
+                default=16,
+            ),
+            max_event_streams_per_recovery=_environment_int(
+                "BACKCHANNEL_MAX_EVENT_STREAMS_PER_RECOVERY",
+                default=4,
+            ),
+            event_stream_retry_seconds=_environment_int(
+                "BACKCHANNEL_EVENT_STREAM_RETRY_SECONDS",
+                default=5,
             ),
             deployed_mode=_environment_bool("BACKCHANNEL_DEPLOYED_MODE"),
             deployed_cors_origins=_environment_origins("BACKCHANNEL_CORS_ORIGINS"),

@@ -2,7 +2,7 @@
 
 import asyncio
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from pathlib import Path
@@ -15,6 +15,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.types import Receive, Scope, Send
 
 from server.cleanup import cleanup_terminal_recoveries, expire_pending_approvals
 from server.config import RuntimeSettings
@@ -28,7 +29,13 @@ from server.controls import (
     RequestBodyTooLarge,
     SanitizedApplicationError,
 )
-from server.events import stream_recovery_events
+from server.events import (
+    EventStreamAdmissionController,
+    EventStreamLease,
+    encode_stream_capacity_event,
+    lease_event_stream,
+    stream_recovery_events,
+)
 from server.logging import get_safe_logger, install_server_log_safety, log_safe_exception
 from server.models import (
     ApprovalDecisionRequest,
@@ -178,6 +185,54 @@ _PRIVATE_RECOVERY_DESCRIPTION = (
 _PRIVATE_NOT_FOUND_RESPONSE: dict[int | str, dict[str, Any]] = {
     status.HTTP_404_NOT_FOUND: {"description": "Recovery not found."}
 }
+_EVENT_STREAM_DESCRIPTION = (
+    f"{_PRIVATE_RECOVERY_DESCRIPTION} Streams are admitted by bounded, "
+    "process-local capacity. At capacity, the endpoint returns a finite "
+    "stream.capacity control event with a native EventSource retry interval."
+)
+_EVENT_STREAM_HEADERS = {
+    "Cache-Control": "no-cache",
+    "X-Accel-Buffering": "no",
+}
+
+
+class _LeaseReleasingStreamingResponse(StreamingResponse):
+    """Release an admitted stream even when the ASGI send path fails."""
+
+    media_type = "text/event-stream"
+
+    def __init__(
+        self,
+        content: AsyncIterator[str],
+        *,
+        lease: EventStreamLease,
+        headers: Mapping[str, str],
+    ) -> None:
+        self._event_stream_lease = lease
+        super().__init__(content, media_type=self.media_type, headers=headers)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._event_stream_lease.release()
+
+
+def _build_admitted_event_stream_response(
+    content: AsyncIterator[str],
+    lease: EventStreamLease,
+) -> StreamingResponse:
+    """Construct a leased response without leaking admission on failure."""
+
+    try:
+        return _LeaseReleasingStreamingResponse(
+            content,
+            lease=lease,
+            headers=_EVENT_STREAM_HEADERS,
+        )
+    except BaseException:
+        lease.release()
+        raise
 
 
 def _store_schema_is_ready(store: SQLiteStore) -> bool:
@@ -335,6 +390,11 @@ def create_app(
             model_provider=model_provider,
         )
     public_controls = PublicDemoControls(recovery_store, runtime_settings)
+    event_stream_admission = EventStreamAdmissionController(
+        max_active=runtime_settings.max_concurrent_event_streams,
+        max_per_recovery=runtime_settings.max_event_streams_per_recovery,
+        retry_seconds=runtime_settings.event_stream_retry_seconds,
+    )
     configured_static_dir = static_dir.resolve() if static_dir is not None else None
     static_index = (
         configured_static_dir / "index.html"
@@ -400,6 +460,7 @@ def create_app(
     application.state.recovery_store = recovery_store
     application.state.recovery_orchestrator = recovery_orchestrator
     application.state.public_demo_controls = public_controls
+    application.state.event_stream_admission = event_stream_admission
     application.state.runtime_settings = runtime_settings
     application.state.static_dir = configured_static_dir
     application.add_middleware(
@@ -710,7 +771,9 @@ def create_app(
 
     @application.get(
         "/api/recoveries/{recovery_id}/events",
-        description=_PRIVATE_RECOVERY_DESCRIPTION,
+        status_code=status.HTTP_200_OK,
+        response_class=_LeaseReleasingStreamingResponse,
+        description=_EVENT_STREAM_DESCRIPTION,
         responses=_PRIVATE_NOT_FOUND_RESPONSE,
     )
     async def recovery_events(
@@ -746,18 +809,28 @@ def create_app(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Not found"
             ) from error
 
-        return StreamingResponse(
-            stream_recovery_events(
-                recovery_store,
-                recovery_key,
-                after_seq=cursor,
-                is_disconnected=request.is_disconnected,
+        lease = event_stream_admission.try_acquire(recovery_key)
+        if lease is None:
+            return Response(
+                content=encode_stream_capacity_event(
+                    request_id=_request_id(request),
+                    retry_seconds=event_stream_admission.retry_seconds,
+                ),
+                media_type="text/event-stream",
+                headers=_EVENT_STREAM_HEADERS,
+            )
+
+        return _build_admitted_event_stream_response(
+            lease_event_stream(
+                stream_recovery_events(
+                    recovery_store,
+                    recovery_key,
+                    after_seq=cursor,
+                    is_disconnected=request.is_disconnected,
+                ),
+                lease,
             ),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "X-Accel-Buffering": "no",
-            },
+            lease,
         )
 
     @application.get(

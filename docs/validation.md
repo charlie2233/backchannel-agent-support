@@ -29,7 +29,9 @@ The focused security regression is:
 ```bash
 uv run pytest -q tests/security/test_session_isolation.py
 uv run pytest -q tests/domain/test_pending_expiry.py tests/api/test_expiry_lifecycle.py
+uv run pytest -q tests/domain/test_event_stream_admission.py tests/api/test_event_stream_admission.py
 npm --workspace web exec -- vitest run src/components/EvidenceInspector.test.tsx
+npm --workspace web exec -- vitest run src/api/events.test.ts src/hooks/useRecovery.test.tsx
 npm --workspace web exec -- vitest run src/App.explicitLive.test.tsx src/recoverySession.test.ts
 ```
 
@@ -42,6 +44,15 @@ usage preservation, restart idempotence, decision-versus-expiry writer serializa
 access-check ordering, synchronous snapshot/SSE/receipt/decision truth, bounded UTC maintenance,
 stable `remedy_expired` retries, and fake-timer controls that refresh once without posting a
 stale decision or continuing after unmount.
+The event-stream admission suites prove atomic global/per-recovery caps under threaded stress,
+idempotent cleanup, finite exact capacity framing without a polling loop, privacy and cursor
+ordering while saturated, expiry-before-admission, replay preservation, and reacquisition after
+normal completion, cancellation, iterator failure, ASGI send failure, and response construction
+failure. Browser coverage proves exact named-control validation, native retry remaining open,
+one-shot preservation of the capacity status at stream EOF, transient error clearing, and
+unchanged terminal closure. These tests prove at most the configured polling loops in this
+application process. They do not prove a shared limit across workers or containers;
+`scripts/start.py` is separately asserted to launch one worker.
 The explicit-live suites prove zero live POSTs on initial mount and authorized restore,
 synchronous one-POST activation coalescing under StrictMode, UUID-only storage with exception
 safety, valid consent/receipt restoration, invalid-hint clearing, truthful snapshotless UI, and

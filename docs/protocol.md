@@ -27,6 +27,36 @@ missing, or tampered session produce the same generic 404, without disclosing wh
 state exists. A valid cookie and unchanged identity secret preserve access across process
 restart; rotating the secret intentionally fails closed.
 
+## Bounded event-stream admission
+
+After the session-access check, targeted expiry sweep, cursor validation, and existence check,
+the SSE route atomically attempts a process-local admission. Defaults are 16 active streams in
+the application process, four for one recovery, and a five-second retry. Acquisition never
+waits on a semaphore and rejected requests never begin durable-ledger polling.
+
+At capacity the HTTP response remains `200 text/event-stream`, preserves `no-cache` and
+`X-Accel-Buffering: no`, emits no event ID, recovery/session value, count, or limit, and closes
+after this control frame (the `requestId` is a fresh 32-character lowercase hexadecimal value):
+
+```text
+retry: 5000
+event: stream.capacity
+data: {"code":"event_stream_capacity","message":"Event streaming is temporarily at capacity; retry is automatic.","requestId":"<request-id>"}
+
+```
+
+The named browser listener accepts only those three exact JSON keys and exact public code and
+message. It reports the condition without closing `EventSource`, so native retry continues; the
+immediate EOF error does not replace that specific status. A later valid recovery event clears
+the transient error and restores ordinary disconnect reporting. Admitted connections keep the
+existing durable replay, polling, heartbeat, disconnect, and terminal rules. Their idempotent
+lease is also released on cancellation, iterator/store/encoding errors, response construction
+failure, and ASGI send failure.
+
+This is not a fleet-wide limit. Every worker or container would have independent counters. The
+production launcher uses one Uvicorn worker, so the configured defaults cap polling loops only
+in that one process; horizontal scaling requires a separate shared-admission design.
+
 The UI stores no cookie, session correlation, serialized run state, approval payload, or
 provenance claim in browser storage. It may retain one syntactically validated hotel recovery
 UUID in same-tab `sessionStorage` as a non-authoritative reload hint. The server-authorized GET

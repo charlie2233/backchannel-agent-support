@@ -50,6 +50,17 @@ def test_private_recovery_operations_document_one_generic_not_found_boundary() -
         assert "generic not-found" in description
 
 
+def test_event_stream_success_response_is_documented_as_sse() -> None:
+    schema = json.loads(_exporter().render_openapi())
+
+    content = schema["paths"]["/api/recoveries/{recovery_id}/events"]["get"][
+        "responses"
+    ]["200"]["content"]
+
+    assert "text/event-stream" in content
+    assert "application/json" not in content
+
+
 def test_export_never_imports_global_app_or_mutates_caller_database(
     tmp_path: Path,
     monkeypatch,

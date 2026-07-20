@@ -4,6 +4,8 @@ if (typeof globalThis.EventSource === "undefined") {
   class QuietEventSource {
     onmessage: ((event: MessageEvent<string>) => void) | null = null;
     onerror: ((event: Event) => void) | null = null;
+    addEventListener() {}
+    removeEventListener() {}
     close() {}
   }
 

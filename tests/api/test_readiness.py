@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from scripts.start import bind_host
+from scripts.start import main as start_main
 from server.config import RuntimeSettings
 from server.main import create_app
 from server.store import SQLiteStore
@@ -148,3 +149,22 @@ def test_start_bind_is_loopback_locally_and_all_interfaces_only_when_deployed() 
     assert bind_host({}) == "127.0.0.1"
     assert bind_host({"BACKCHANNEL_DEPLOYED_MODE": "false"}) == "127.0.0.1"
     assert bind_host({"BACKCHANNEL_DEPLOYED_MODE": "true"}) == "0.0.0.0"
+
+
+def test_production_launcher_uses_one_process_for_process_local_stream_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(app: str, **kwargs: object) -> None:
+        captured["app"] = app
+        captured.update(kwargs)
+
+    monkeypatch.setattr("scripts.start.uvicorn.run", fake_run)
+    monkeypatch.delenv("BACKCHANNEL_DEPLOYED_MODE", raising=False)
+    monkeypatch.delenv("PORT", raising=False)
+
+    start_main()
+
+    assert captured["app"] == "server.main:app"
+    assert captured["workers"] == 1

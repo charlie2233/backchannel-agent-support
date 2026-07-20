@@ -230,6 +230,12 @@ def test_live_admission_messages_match_the_public_client_allowlist(
         ("terminal_cleanup_interval_seconds", 86_401),
         ("request_body_size_limit_bytes", 0),
         ("request_body_size_limit_bytes", 1_048_577),
+        ("max_concurrent_event_streams", 0),
+        ("max_concurrent_event_streams", 1_025),
+        ("max_event_streams_per_recovery", 0),
+        ("max_event_streams_per_recovery", 1_025),
+        ("event_stream_retry_seconds", 0),
+        ("event_stream_retry_seconds", 301),
         ("demo_session_lifetime_seconds", 0),
         ("demo_session_lifetime_seconds", 604_801),
     ],
@@ -247,6 +253,32 @@ def test_invalid_integer_environment_limit_fails_closed(monkeypatch: pytest.Monk
 
     with pytest.raises(ValueError, match="BACKCHANNEL_MAX_CONCURRENT_LIVE_RECOVERIES"):
         RuntimeSettings.from_environment()
+
+
+def test_event_stream_limits_have_bounded_defaults_and_environment_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    defaults = RuntimeSettings(live_ready=False)
+    assert defaults.max_concurrent_event_streams == 16
+    assert defaults.max_event_streams_per_recovery == 4
+    assert defaults.event_stream_retry_seconds == 5
+
+    monkeypatch.setenv("BACKCHANNEL_MAX_CONCURRENT_EVENT_STREAMS", "12")
+    monkeypatch.setenv("BACKCHANNEL_MAX_EVENT_STREAMS_PER_RECOVERY", "3")
+    monkeypatch.setenv("BACKCHANNEL_EVENT_STREAM_RETRY_SECONDS", "7")
+    configured = RuntimeSettings.from_environment()
+    assert configured.max_concurrent_event_streams == 12
+    assert configured.max_event_streams_per_recovery == 3
+    assert configured.event_stream_retry_seconds == 7
+
+
+def test_per_recovery_event_stream_limit_cannot_exceed_process_limit() -> None:
+    with pytest.raises(ValueError, match="max_event_streams_per_recovery"):
+        RuntimeSettings(
+            live_ready=False,
+            max_concurrent_event_streams=4,
+            max_event_streams_per_recovery=5,
+        )
 
 
 def test_deployed_mode_requires_explicit_https_origin_and_identity_secret() -> None:
