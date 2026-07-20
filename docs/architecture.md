@@ -31,6 +31,15 @@ SDK, protocol, agent-graph, and definition versions that must still match on res
 reconciliation can seal a receipt from an already committed demo-adapter result without
 dispatching it again.
 
+Untouched SDK/live hotel consent is also durable lifecycle state. A bounded SQLite
+`BEGIN IMMEDIATE` sweep runs at startup, on the existing maintenance cadence, and before new
+recovery cleanup. Authorized snapshot, initial SSE, receipt, and decision requests first sweep
+their exact target after the session-access check. Expiry and decision claims therefore
+serialize as competing writers: a committed claim is never expired, while an expiration that
+commits first prevents a later claim. Expiration seals one `recovery.expired` event and receipt,
+marks the pending envelope and remedy expired, and releases the matching live admission with
+`COALESCE` so cooldown and aggregate usage evidence remain intact.
+
 ## Runtime provenance and trust boundary
 
 | Mode | Runtime work | Trace evidence | Provider boundary |

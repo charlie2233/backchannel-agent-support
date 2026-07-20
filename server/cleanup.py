@@ -31,3 +31,26 @@ def cleanup_terminal_recoveries(
         updated_before=current - terminal_ttl,
         batch_size=batch_size,
     )
+
+
+def expire_pending_approvals(
+    store: SQLiteStore,
+    *,
+    now: datetime | None = None,
+    batch_size: int = 100,
+    recovery_id: str | None = None,
+) -> int:
+    """Seal a bounded batch of untouched, expired hotel consent windows."""
+
+    if not 1 <= batch_size <= MAX_CLEANUP_BATCH_SIZE:
+        raise ValueError(
+            f"batch_size must be between 1 and {MAX_CLEANUP_BATCH_SIZE}"
+        )
+    current = now or datetime.now(UTC)
+    if current.tzinfo is None or current.utcoffset() != timedelta(0):
+        raise ValueError("now must be timezone-aware UTC")
+    return store.expire_pending_approvals(
+        now=current,
+        batch_size=batch_size,
+        recovery_id=recovery_id,
+    )

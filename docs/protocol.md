@@ -73,6 +73,16 @@ at-most-one dispatch property for this demo adapter, not a universal exactly-onc
 An unrelated session cannot participate in that race: it receives 404 before a decision claim
 and cannot win, renew a live lease, or trigger provider dispatch.
 
+If the authoritative UTC expiry is reached with the recovery and envelope still pending and no
+decision, execution, receipt, or terminal event exists, a bounded `BEGIN IMMEDIATE` lifecycle
+sweep closes the recovery instead. A decision claim that commits first wins and is left for the
+normal resume path; an expiration that commits first makes later claims unavailable. The
+browser's local timer only disables both controls and asks for fresh server evidence. It does
+not infer whether another tab already committed a claim or synthesize a terminal outcome.
+Once exact durable expiration evidence exists, every later authorized decision attempt returns
+the stable `422 remedy_expired` code without changing the receipt or event ledger; unrelated
+sessions still receive the generic 404 before that evidence is inspected.
+
 Pending state also records `sdkVersion`, `protocolVersion`, `agentGraphVersion`, and a
 `definitionDigest` over prompts, model selections, structured-output schemas, and tool schema.
 Any mismatch is rejected as `409 resume_incompatible` before dispatch.
@@ -89,6 +99,14 @@ A declined interruption is `closed_without_action` only when the server can prov
 `executionCount = 0`. The receipt proves human consent was requested, the remedy and exact
 interruption were rejected, no replacement was selected, provider dispatch did not begin,
 temporary permission was revoked, and a cancellation receipt was sealed.
+
+An untouched expired interruption is also `closed_without_action`, but uses the distinct
+terminal event `recovery.expired`. Its receipt preserves SDK/live provenance and proves consent
+was requested, the window expired without a decision claim, decision and execution counts are
+zero, provider dispatch did not begin, temporary permission was revoked, and expiration
+evidence was sealed. A repeated sweep or process restart does not rewrite that evidence. Any
+claimed-but-incomplete decision is deliberately excluded because provider dispatch may be in
+flight.
 
 If dispatch might have begun, the terminal state is `outcome_unknown`. It deliberately carries
 `providerExecution=null`, no approved digest, and no zero-execution or cancellation claim.

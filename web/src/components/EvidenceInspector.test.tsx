@@ -50,6 +50,7 @@ function pendingSnapshot(): RecoverySnapshot {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -674,4 +675,222 @@ describe("EvidenceInspector exact consent", () => {
     expect(screen.queryByRole("button", { name: "Decline" })).not.toBeInTheDocument();
     expect(screen.queryByText("Execution has not begun.")).not.toBeInTheDocument();
   });
+
+  it("disables both decisions at the server deadline and refreshes exactly once", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T18:45:29.000Z"));
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const onServerSuccess = vi.fn().mockResolvedValue(undefined);
+    render(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={pendingSnapshot()}
+        onServerSuccess={onServerSuccess}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Approve remedy" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Decline" })).toBeEnabled();
+
+    await act(async () => {
+      vi.advanceTimersByTime(1_000);
+      await Promise.resolve();
+    });
+
+    expect(
+      screen.getByText("Consent deadline reached — checking the authoritative outcome"),
+    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "Approve remedy" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Decline" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Approve remedy" }));
+    fireEvent.click(screen.getByRole("button", { name: "Decline" }));
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(onServerSuccess).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      vi.advanceTimersByTime(60_000);
+      await Promise.resolve();
+    });
+    expect(onServerSuccess).toHaveBeenCalledTimes(1);
+  });
+
+  it("shares one authoritative refresh with a decision already in flight at the deadline", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T18:45:29.000Z"));
+    let resolveDecision: ((response: Response) => void) | undefined;
+    const fetchMock = vi.fn().mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveDecision = resolve;
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const onServerSuccess = vi.fn().mockResolvedValue(undefined);
+    render(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={pendingSnapshot()}
+        clientDecisionIdFactory={() => "decision-at-deadline"}
+        onServerSuccess={onServerSuccess}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Approve remedy" }));
+    await act(async () => {
+      vi.advanceTimersByTime(1_000);
+      await Promise.resolve();
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(onServerSuccess).toHaveBeenCalledTimes(1);
+
+    resolveDecision?.(
+      new Response(
+        JSON.stringify({
+          action: "approve",
+          clientDecisionId: "decision-at-deadline",
+          recoveryId: "11111111-2222-4333-8444-555555555555",
+          status: "completed",
+          approvedRemedyDigest: fullDigest,
+          executionStarted: true,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(onServerSuccess).toHaveBeenCalledTimes(1);
+    expect(
+      screen.getByText("Approval accepted by the server. Refreshing recovery evidence."),
+    ).toBeVisible();
+  });
+
+  it("cancels an old deadline across context changes and refreshes only the active recovery", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T18:45:29.000Z"));
+    const onServerSuccess = vi.fn().mockResolvedValue(undefined);
+    const snapshotB: RecoverySnapshot = {
+      ...pendingSnapshot(),
+      recoveryId: "bbbbbbbb-2222-4333-8444-555555555555",
+      pendingApproval: {
+        ...pendingSnapshot().pendingApproval!,
+        remedyId: "remedy-server-b",
+        toolCallId: "call-server-b",
+        expiry: "2026-09-01T18:45:40Z",
+      },
+    };
+    const { rerender } = render(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={pendingSnapshot()}
+        onServerSuccess={onServerSuccess}
+      />,
+    );
+
+    await act(async () => {
+      vi.advanceTimersByTime(500);
+    });
+    rerender(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={snapshotB}
+        onServerSuccess={onServerSuccess}
+      />,
+    );
+    await act(async () => {
+      vi.advanceTimersByTime(1_000);
+      await Promise.resolve();
+    });
+
+    expect(onServerSuccess).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Approve remedy" })).toBeEnabled();
+    expect(
+      screen.queryByText("Consent deadline reached — checking the authoritative outcome"),
+    ).not.toBeInTheDocument();
+
+    await act(async () => {
+      vi.advanceTimersByTime(9_500);
+      await Promise.resolve();
+    });
+    expect(onServerSuccess).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Approve remedy" })).toBeDisabled();
+  });
+
+  it("does not refresh after the consent surface unmounts", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T18:45:29.000Z"));
+    const onServerSuccess = vi.fn().mockResolvedValue(undefined);
+    const { unmount } = render(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={pendingSnapshot()}
+        onServerSuccess={onServerSuccess}
+      />,
+    );
+
+    unmount();
+    await act(async () => {
+      vi.advanceTimersByTime(2_000);
+      await Promise.resolve();
+    });
+
+    expect(onServerSuccess).not.toHaveBeenCalled();
+  });
+
+  it.each(["resolve", "reject"] as const)(
+    "ignores an in-flight decision that %s after unmount",
+    async (outcome) => {
+      let resolveFetch: ((response: Response) => void) | undefined;
+      let rejectFetch: ((reason: Error) => void) | undefined;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockImplementation(
+          () =>
+            new Promise<Response>((resolve, reject) => {
+              resolveFetch = resolve;
+              rejectFetch = reject;
+            }),
+        ),
+      );
+      const onServerSuccess = vi.fn().mockResolvedValue(undefined);
+      const { unmount } = render(
+        <EvidenceInspector
+          scenario={recoveryScenarios[0]}
+          snapshot={pendingSnapshot()}
+          clientDecisionIdFactory={() => "decision-unmounted"}
+          onServerSuccess={onServerSuccess}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Approve remedy" }));
+
+      unmount();
+      await act(async () => {
+        if (outcome === "resolve") {
+          resolveFetch?.(
+            new Response(
+              JSON.stringify({
+                action: "approve",
+                clientDecisionId: "decision-unmounted",
+                recoveryId: "11111111-2222-4333-8444-555555555555",
+                status: "completed",
+                approvedRemedyDigest: fullDigest,
+                executionStarted: true,
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        } else {
+          rejectFetch?.(new Error("request ended after unmount"));
+        }
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(onServerSuccess).not.toHaveBeenCalled();
+    },
+  );
 });

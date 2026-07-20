@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from server.cleanup import cleanup_terminal_recoveries
+from server.cleanup import cleanup_terminal_recoveries, expire_pending_approvals
 from server.config import RuntimeSettings
 from server.controls import (
     ClientIdentity,
@@ -347,6 +347,10 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_application: FastAPI) -> AsyncIterator[None]:
+        expire_pending_approvals(
+            recovery_store,
+            batch_size=100,
+        )
         cleanup_terminal_recoveries(
             recovery_store,
             terminal_ttl=terminal_ttl,
@@ -363,6 +367,10 @@ def create_app(
                     )
                 except TimeoutError:
                     try:
+                        expire_pending_approvals(
+                            recovery_store,
+                            batch_size=100,
+                        )
                         cleanup_terminal_recoveries(
                             recovery_store,
                             terminal_ttl=terminal_ttl,
@@ -517,6 +525,10 @@ def create_app(
         request: Request,
     ) -> RecoverySnapshot:
         identity = cast(ClientIdentity, request.state.demo_identity)
+        expire_pending_approvals(
+            recovery_store,
+            batch_size=25,
+        )
         cleanup_terminal_recoveries(
             recovery_store,
             terminal_ttl=timedelta(
@@ -621,6 +633,17 @@ def create_app(
         _require_recovery_access(request, recovery_store, recovery_key)
         request.state.recovery_id = recovery_key
         try:
+            expire_pending_approvals(
+                recovery_store,
+                batch_size=1,
+                recovery_id=recovery_key,
+            )
+            if recovery_store.recovery_has_expiration_evidence(recovery_key):
+                raise ApprovalDecisionError(
+                    "remedy_expired",
+                    recovery_key,
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                )
             try:
                 recovery_before = recovery_store.get_recovery(recovery_key)
             except RecoveryNotFoundError:
@@ -673,6 +696,11 @@ def create_app(
     def get_recovery(recovery_id: UUID, request: Request) -> RecoverySnapshot:
         recovery_key = str(recovery_id)
         _require_recovery_access(request, recovery_store, recovery_key)
+        expire_pending_approvals(
+            recovery_store,
+            batch_size=1,
+            recovery_id=recovery_key,
+        )
         try:
             return recovery_store.get_recovery(recovery_key)
         except RecoveryNotFoundError as error:
@@ -692,6 +720,11 @@ def create_app(
     ) -> Response:
         recovery_key = str(recovery_id)
         _require_recovery_access(request, recovery_store, recovery_key)
+        expire_pending_approvals(
+            recovery_store,
+            batch_size=1,
+            recovery_id=recovery_key,
+        )
         cursor = 0
         if last_event_id is not None:
             try:
@@ -736,6 +769,11 @@ def create_app(
     def get_receipt(recovery_id: UUID, request: Request) -> RecoveryReceipt:
         recovery_key = str(recovery_id)
         _require_recovery_access(request, recovery_store, recovery_key)
+        expire_pending_approvals(
+            recovery_store,
+            batch_size=1,
+            recovery_id=recovery_key,
+        )
         try:
             return recovery_store.get_receipt(recovery_key)
         except RecoveryNotFoundError as error:

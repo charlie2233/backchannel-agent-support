@@ -28,12 +28,19 @@ The focused security regression is:
 
 ```bash
 uv run pytest -q tests/security/test_session_isolation.py
+uv run pytest -q tests/domain/test_pending_expiry.py tests/api/test_expiry_lifecycle.py
+npm --workspace web exec -- vitest run src/components/EvidenceInspector.test.tsx
 ```
 
 It proves foreign snapshot/SSE/receipt/approve/decline all match an absent recovery's generic
 404, owner approval remains at-most-once under a foreign race, the signed cookie survives a
 same-secret restart, tampered cookies fail closed, shared replay access detaches per session,
 reset preserves cooldown/budget history, and retention cleanup cascades access rows.
+The expiry suites prove SDK/live zero-dispatch receipts, live-admission release with cooldown and
+usage preservation, restart idempotence, decision-versus-expiry writer serialization,
+access-check ordering, synchronous snapshot/SSE/receipt/decision truth, bounded UTC maintenance,
+stable `remedy_expired` retries, and fake-timer controls that refresh once without posting a
+stale decision or continuing after unmount.
 
 When a Docker-compatible engine is available, run:
 

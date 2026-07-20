@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 import time
 from datetime import UTC, datetime, timedelta
@@ -11,9 +12,29 @@ from server.cleanup import cleanup_terminal_recoveries
 from server.config import RuntimeSettings
 from server.main import create_app
 from server.models import ExecutionMode, RecoveryStatus, ScenarioId
+from server.orchestrator import RecoveryOrchestrator
+from server.providers.hotel_simulator import HotelSimulator
 from server.replay.engine import ReplayEngine
 from server.replay.loader import ScenarioLoader
 from server.store import RecoveryNotFoundError, SQLiteStore
+
+
+def _start_pending_hotel(store: SQLiteStore) -> str:
+    pending = asyncio.run(
+        RecoveryOrchestrator(
+            store=store,
+            hotel_provider=HotelSimulator(store=store),
+        ).start("hotel", execution_mode=ExecutionMode.SDK_STUB)
+    )
+    return pending.recovery.recovery_id
+
+
+def _expire_pending_hotel(database_path, recovery_id: str) -> None:
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "UPDATE remedies SET expiry = ? WHERE recovery_id = ?",
+            ((datetime.now(UTC) - timedelta(seconds=1)).isoformat(), recovery_id),
+        )
 
 
 def _create_recovery(
@@ -240,3 +261,81 @@ def test_lifespan_periodically_removes_idle_expired_terminal_detail(tmp_path) ->
             "SELECT category, amount FROM usage_ledger WHERE recovery_id = ?",
             ("idle-terminal",),
         ).fetchall() == [("live_demo_budget_unit", 1)]
+
+
+def test_lifespan_expires_untouched_consent_at_startup_and_on_cleanup_cadence(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "periodic-consent-expiry.sqlite3"
+    store = SQLiteStore(database_path)
+    startup_recovery_id = _start_pending_hotel(store)
+    _expire_pending_hotel(database_path, startup_recovery_id)
+    settings = RuntimeSettings(
+        live_ready=False,
+        terminal_recovery_ttl_seconds=3_600,
+        terminal_cleanup_interval_seconds=1,
+    )
+
+    with TestClient(create_app(settings, store=store)) as client:
+        assert (
+            store.get_recovery(startup_recovery_id).status
+            is RecoveryStatus.CLOSED_WITHOUT_ACTION
+        )
+        assert store.get_receipt(startup_recovery_id).status == "closed_without_action"
+
+        response = client.post(
+            "/api/recoveries",
+            json={"scenarioId": "hotel", "executionMode": "sdk_stub"},
+        )
+        assert response.status_code == 201
+        periodic_recovery_id = str(response.json()["recoveryId"])
+        _expire_pending_hotel(database_path, periodic_recovery_id)
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            if (
+                store.get_recovery(periodic_recovery_id).status
+                is RecoveryStatus.CLOSED_WITHOUT_ACTION
+            ):
+                break
+            time.sleep(0.05)
+
+        assert (
+            store.get_recovery(periodic_recovery_id).status
+            is RecoveryStatus.CLOSED_WITHOUT_ACTION
+        )
+        assert store.get_receipt(periodic_recovery_id).status == "closed_without_action"
+
+
+def test_create_runs_expiry_before_retention_without_deleting_new_terminal_evidence(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "create-consent-expiry.sqlite3"
+    store = SQLiteStore(database_path)
+    settings = RuntimeSettings(
+        live_ready=False,
+        terminal_recovery_ttl_seconds=3_600,
+        terminal_cleanup_interval_seconds=300,
+    )
+
+    with TestClient(create_app(settings, store=store)) as client:
+        first = client.post(
+            "/api/recoveries",
+            json={"scenarioId": "hotel", "executionMode": "sdk_stub"},
+        )
+        assert first.status_code == 201
+        expired_recovery_id = str(first.json()["recoveryId"])
+        _expire_pending_hotel(database_path, expired_recovery_id)
+
+        second = client.post(
+            "/api/recoveries",
+            json={"scenarioId": "hotel", "executionMode": "sdk_stub"},
+        )
+
+        assert second.status_code == 201
+        assert (
+            store.get_recovery(expired_recovery_id).status
+            is RecoveryStatus.CLOSED_WITHOUT_ACTION
+        )
+        assert store.get_receipt(expired_recovery_id).status == "closed_without_action"
+        assert store.count_decisions(expired_recovery_id) == 0
+        assert store.count_executions(expired_recovery_id) == 0

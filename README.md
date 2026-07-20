@@ -54,6 +54,10 @@ model call nor a provider dispatch.
   exact terms, a UTC expiry, and a canonical `sha256:` digest.
 - Approval rechecks the digest, interruption, expiry, hard constraints, and delegated
   authority immediately before the demo adapter dispatch. Decline closes with zero dispatch.
+- If an SDK/live hotel consent window ends before any decision claim, the server atomically
+  closes it without action, releases any live lease without erasing cooldown or usage, and
+  seals a zero-decision, zero-execution expiration receipt. The browser disables stale controls
+  at the displayed deadline and refreshes server evidence instead of inventing the outcome.
 - Compatible pending approvals survive a process restart; version or definition drift fails
   closed with `resume_incompatible`.
 - API quota recovery is the complementary zero-approval case: deterministic delegated

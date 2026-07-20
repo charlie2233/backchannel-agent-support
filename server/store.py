@@ -40,6 +40,20 @@ from server.policy import (
 )
 from server.trace_ids import is_valid_live_trace_id, is_valid_qa_trace_id
 
+MAX_STORE_EXPIRY_BATCH_SIZE = 1_000
+EXPIRATION_SUMMARY = (
+    "Consent expired without a decision; no provider dispatch was authorized."
+)
+EXPIRATION_VERIFICATION_RESULTS = (
+    "Human consent requested.",
+    "Consent window expired without an approval decision.",
+    "No approval decision claim was recorded.",
+    "Execution count is zero.",
+    "Provider dispatch did not begin.",
+    "Temporary permission revoked.",
+    "Expiration receipt sealed.",
+)
+
 SCHEMA = """
 PRAGMA foreign_keys = ON;
 
@@ -2473,6 +2487,96 @@ class SQLiteStore:
             ).fetchone()
         return row is not None
 
+    def recovery_has_expiration_evidence(self, recovery_id: str) -> bool:
+        """Recognize only the exact durable terminal evidence authored by expiry."""
+
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    recoveries.status AS recovery_status,
+                    recoveries.execution_mode AS execution_mode,
+                    pending_approvals.status AS pending_status,
+                    remedies.status AS remedy_status,
+                    receipts.receipt_json AS receipt_json,
+                    events.type AS event_type,
+                    events.data_json AS event_data_json,
+                    (
+                        SELECT COUNT(*) FROM events AS terminal_events
+                        WHERE terminal_events.recovery_id = recoveries.id
+                          AND terminal_events.terminal = 1
+                    ) AS terminal_count,
+                    (
+                        SELECT COUNT(*) FROM approval_decisions
+                        WHERE approval_decisions.recovery_id = recoveries.id
+                    ) AS decision_count,
+                    (
+                        SELECT COUNT(*) FROM executions
+                        WHERE executions.recovery_id = recoveries.id
+                    ) AS execution_count
+                FROM recoveries
+                JOIN pending_approvals
+                  ON pending_approvals.recovery_id = recoveries.id
+                JOIN remedies
+                  ON remedies.recovery_id = recoveries.id
+                 AND remedies.id = pending_approvals.remedy_id
+                JOIN receipts
+                  ON receipts.recovery_id = recoveries.id
+                JOIN events
+                  ON events.recovery_id = recoveries.id
+                 AND events.terminal = 1
+                WHERE recoveries.id = ?
+                """,
+                (recovery_id,),
+            ).fetchall()
+        if len(rows) != 1:
+            return False
+        row = rows[0]
+        if (
+            cast(str, row["recovery_status"])
+            != RecoveryStatus.CLOSED_WITHOUT_ACTION.value
+            or cast(str, row["execution_mode"])
+            not in {ExecutionMode.SDK_STUB.value, ExecutionMode.OPENAI_LIVE.value}
+            or cast(str, row["pending_status"]) != "expired"
+            or cast(str, row["remedy_status"]) != "expired"
+            or cast(str, row["event_type"]) != "recovery.expired"
+            or cast(int, row["terminal_count"]) != 1
+            or cast(int, row["decision_count"]) != 0
+            or cast(int, row["execution_count"]) != 0
+        ):
+            return False
+        try:
+            receipt = RecoveryReceipt.model_validate_json(
+                cast(str, row["receipt_json"])
+            )
+            event_data = json.loads(cast(str, row["event_data_json"]))
+        except (TypeError, ValueError):
+            return False
+        expected_event_data: dict[str, JsonValue] = {
+            "recoveryId": recovery_id,
+            "executionMode": receipt.execution_mode.value,
+            "providerExecution": False,
+            "approvalDecisionCount": 0,
+            "executionCount": 0,
+            "phase": "Verify & seal",
+            "summary": EXPIRATION_SUMMARY,
+        }
+        return (
+            receipt.recovery_id == recovery_id
+            and receipt.execution_mode.value == cast(str, row["execution_mode"])
+            and receipt.status == "closed_without_action"
+            and receipt.simulated is True
+            and receipt.provider_execution is False
+            and receipt.approval_count == 0
+            and receipt.approved_remedy_digest is None
+            and receipt.provider_result == "Provider dispatch did not begin."
+            and receipt.authorization_source
+            == "Consent window expired before an approval decision."
+            and tuple(receipt.verification_results)
+            == EXPIRATION_VERIFICATION_RESULTS
+            and event_data == expected_event_data
+        )
+
     def create_demo_session(
         self,
         session_key: str,
@@ -2773,6 +2877,192 @@ class SQLiteStore:
                 """,
                 (now.isoformat(), recovery_id),
             )
+
+    def expire_pending_approvals(
+        self,
+        *,
+        now: datetime,
+        batch_size: int,
+        recovery_id: str | None = None,
+    ) -> int:
+        """Atomically seal bounded, untouched consent windows that have expired."""
+
+        if now.tzinfo is None or now.utcoffset() != timedelta(0):
+            raise ValueError("now must be timezone-aware UTC")
+        if not 1 <= batch_size <= MAX_STORE_EXPIRY_BATCH_SIZE:
+            raise ValueError(
+                "batch_size must be between 1 and "
+                f"{MAX_STORE_EXPIRY_BATCH_SIZE}"
+            )
+        target_clause = "AND recoveries.id = ?" if recovery_id is not None else ""
+        parameters: list[str | int] = []
+        if recovery_id is not None:
+            parameters.append(recovery_id)
+        parameters.append(batch_size)
+        now_text = now.isoformat()
+        expired_count = 0
+
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                f"""
+                SELECT recoveries.*, remedies.expiry AS remedy_expiry
+                FROM recoveries
+                JOIN pending_approvals
+                  ON pending_approvals.recovery_id = recoveries.id
+                JOIN remedies
+                  ON remedies.recovery_id = recoveries.id
+                 AND remedies.id = pending_approvals.remedy_id
+                WHERE recoveries.status = 'pending_approval'
+                  AND recoveries.scenario_id = 'hotel'
+                  AND recoveries.execution_mode IN ('sdk_stub', 'openai_live')
+                  AND pending_approvals.status = 'pending'
+                  AND remedies.status = 'pending'
+                  AND remedies.expiry IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM approval_decisions
+                      WHERE approval_decisions.recovery_id = recoveries.id
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM executions
+                      WHERE executions.recovery_id = recoveries.id
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM receipts
+                      WHERE receipts.recovery_id = recoveries.id
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM events
+                      WHERE events.recovery_id = recoveries.id
+                        AND events.terminal = 1
+                  )
+                  {target_clause}
+                ORDER BY remedies.expiry ASC, recoveries.id ASC
+                LIMIT ?
+                """,
+                parameters,
+            ).fetchall()
+
+            for row in rows:
+                raw_expiry = cast(str, row["remedy_expiry"])
+                try:
+                    expiry = datetime.fromisoformat(raw_expiry.replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+                if (
+                    expiry.tzinfo is None
+                    or expiry.utcoffset() != timedelta(0)
+                    or expiry > now
+                ):
+                    continue
+
+                target_id = cast(str, row["id"])
+                provenance = self._provenance_from_row(row)
+                receipt = RecoveryReceipt(
+                    recoveryId=target_id,
+                    executionMode=provenance.execution_mode,
+                    status="closed_without_action",
+                    simulated=True,
+                    providerExecution=False,
+                    modelCall=provenance.model_call,
+                    modelIds=list(provenance.model_ids),
+                    rootTraceId=provenance.root_trace_id,
+                    sdkVersion=provenance.sdk_version,
+                    protocolVersion=provenance.protocol_version,
+                    agentGraphVersion=provenance.agent_graph_version,
+                    definitionDigest=provenance.definition_digest,
+                    boundary=(
+                        OPENAI_LIVE_BOUNDARY
+                        if provenance.execution_mode is ExecutionMode.OPENAI_LIVE
+                        else SDK_STUB_BOUNDARY
+                    ),
+                    providerResult="Provider dispatch did not begin.",
+                    authorizationSource=(
+                        "Consent window expired before an approval decision."
+                    ),
+                    verificationResults=list(EXPIRATION_VERIFICATION_RESULTS),
+                    approvalCount=0,
+                    approvedRemedyDigest=None,
+                )
+                terminal_data: dict[str, JsonValue] = {
+                    "recoveryId": target_id,
+                    "executionMode": provenance.execution_mode.value,
+                    "providerExecution": False,
+                    "approvalDecisionCount": 0,
+                    "executionCount": 0,
+                    "phase": "Verify & seal",
+                    "summary": EXPIRATION_SUMMARY,
+                }
+                next_sequence = cast(
+                    int,
+                    connection.execute(
+                        """
+                        SELECT COALESCE(MAX(seq), 0) + 1
+                        FROM events WHERE recovery_id = ?
+                        """,
+                        (target_id,),
+                    ).fetchone()[0],
+                )
+                connection.execute(
+                    """
+                    INSERT INTO receipts (recovery_id, receipt_json, created_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    (
+                        target_id,
+                        receipt.model_dump_json(by_alias=True),
+                        now_text,
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO events (
+                        recovery_id, seq, type, terminal, data_json, created_at
+                    ) VALUES (?, ?, 'recovery.expired', 1, ?, ?)
+                    """,
+                    (
+                        target_id,
+                        next_sequence,
+                        json.dumps(
+                            terminal_data,
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        ),
+                        now_text,
+                    ),
+                )
+                connection.execute(
+                    """
+                    UPDATE recoveries
+                    SET status = 'closed_without_action', current_step = 5,
+                        current_step_summary = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (EXPIRATION_SUMMARY, now_text, target_id),
+                )
+                connection.execute(
+                    """
+                    UPDATE pending_approvals
+                    SET status = 'expired', updated_at = ?
+                    WHERE recovery_id = ?
+                    """,
+                    (now_text, target_id),
+                )
+                connection.execute(
+                    "UPDATE remedies SET status = 'expired' WHERE recovery_id = ?",
+                    (target_id,),
+                )
+                connection.execute(
+                    """
+                    UPDATE live_admissions
+                    SET released_at = COALESCE(released_at, ?)
+                    WHERE recovery_id = ?
+                    """,
+                    (now_text, target_id),
+                )
+                expired_count += 1
+
+        return expired_count
 
     def delete_terminal_recoveries(
         self,
