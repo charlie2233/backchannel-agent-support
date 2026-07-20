@@ -88,6 +88,17 @@ The image smoke requires a disposable container, writable `/data`, explicit depl
 identity configuration, and no build-time API key. A local production smoke is useful evidence
 for the packaged application contract, but it is not container-runtime proof.
 
+The GitHub-hosted `container-smoke` job in
+[CI run 29787371831](https://github.com/charlie2233/backchannel-agent-support/actions/runs/29787371831)
+is verified packaged container evidence. It completed the Docker build, started the image and
+waited for readiness. The packaged app then served and validated its built frontend assets,
+including the HTML title, CSP headers, and emitted asset files; API calls separately exercised
+approval, decline, authoritative receipts, and SSE resume. The smoke also kept a masked secret
+canary out of responses and assets and verified the signed session boundary, secure cookie, and
+cross-session isolation. This is evidence for the packaged image in an ephemeral GitHub Actions
+runtime, not a browser UI interaction. It is not evidence of a local workstation container run,
+target-host persistence, public deployment, live OpenAI access, or public reachability.
+
 ## Browser and release artifacts
 
 ```bash
@@ -131,7 +142,8 @@ substituted for this gate.
 
 ## External proof boundary
 
-In the current environment Docker, Podman, Colima, and OrbStack are absent, so neither a Docker
-build nor a running-container smoke has been verified. There is also no deployed public demo URL.
-The repository and deterministic local tests can be verified independently, but those results do
-not prove live OpenAI access, a container runtime, a deployment, or public reachability.
+The local container runtime remains unavailable: Docker, Podman, Colima, and OrbStack are absent
+from this workstation, so reproducing the image build and smoke locally is unverified. The
+GitHub-hosted packaged container result above does not erase that local boundary. There is also
+no deployed public demo URL, so deployment and public reachability remain unverified. Repository,
+local-process, and GitHub Actions results do not prove live OpenAI access or a target-host release.

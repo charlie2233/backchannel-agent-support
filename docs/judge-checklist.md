@@ -8,11 +8,14 @@
 | Public demo URL | **UNVERIFIED / BLOCKED** | No deployment or public URL is available in this environment. |
 | Live OpenAI run | **UNVERIFIED / BLOCKED** | `OPENAI_API_KEY` was absent; `npm run smoke:live` made no real OpenAI request. |
 | Three-run live evidence | **UNVERIFIED / BLOCKED** | All three independent children stopped at `MissingOpenAIAPIKey`; no live trace IDs were produced. |
-| Container proof | **UNVERIFIED / BLOCKED** | Docker, Podman, Colima, and OrbStack were absent; no image build or container smoke is claimed. |
+| Packaged container | **VERIFIED IN GITHUB CI** | GitHub-hosted [run 29787371831](https://github.com/charlie2233/backchannel-agent-support/actions/runs/29787371831) completed the Docker build and container start/readiness. The packaged app served and validated built frontend assets (title/CSP/assets); API calls separately exercised approval, decline, receipts, and SSE resume, plus the secret canary and session boundary checks. This was not a browser UI interaction. |
+| Local container runtime | **UNVERIFIED / BLOCKED LOCALLY** | Docker, Podman, Colima, and OrbStack remain absent from this workstation; no local image run is claimed. |
 | Release tag | **Not created** | `v0.3.0-build-week` must wait for applicable checks, external proof, and release authorization. |
 
 The app remains fully judgeable through the deterministic SDK QA path and replay fallback, but
-neither is presented as live-provider, container, deployment, or public-reachability evidence.
+neither is presented as live-provider, deployment, or public-reachability evidence. Packaged
+container proof is limited to the separate GitHub-hosted CI run; the local container runtime and
+target deployment remain independent gates.
 
 ## Exact three-minute demo sequence
 
@@ -64,7 +67,9 @@ showing that it explicitly says no model call or provider execution.
 | Hotel booking/payment change | **Simulated** | The hotel demo adapter records a demo result only. |
 | API quota grant, verification, and revocation | **Simulated** | SDK stub may execute the quota demo adapter; replay only replays recorded evidence. |
 | Live OpenAI success | **Unverified external gate** | Missing `OPENAI_API_KEY`; deterministic evidence is not substituted. |
-| Container, deployment, and public reachability | **Unverified external gates** | No compatible container runtime and no public demo URL were available. |
+| Packaged container build/start/smoke | **Measured in GitHub-hosted CI** | [Run 29787371831](https://github.com/charlie2233/backchannel-agent-support/actions/runs/29787371831) built and started the image and waited for readiness. The packaged app served and validated built frontend assets (title/CSP/assets); API calls separately exercised approval, decline, receipts, and SSE resume, plus a masked secret canary and the signed session boundary. This was not a browser UI interaction. |
+| Local container reproduction | **Unverified local gate** | The local container runtime is unavailable; no workstation Docker-compatible run is claimed. |
+| Deployment and public reachability | **Unverified external gates** | No public demo deployment or target-host reachability proof is available. |
 
 ## Fidelity ledger
 
@@ -93,7 +98,8 @@ wrong dimensions, clipped controls, or unsupported claims fails this ledger.
 - Run the final locked local gates in `docs/validation.md` and preserve their exact output.
 - Re-run `npm run smoke:live:3` only with authorized model access; require three distinct valid
   live root trace IDs before changing the live status above.
-- Build and smoke the image on an available Docker-compatible runtime.
+- Repeat the image build/start/smoke on the intended target's Docker-compatible runtime; the
+  GitHub-hosted packaged container result does not validate target-host persistence or networking.
 - Deploy to a long-lived SSE-capable host with persistent `/data`, then verify the public URL.
 - Re-run secret and OpenAPI checks on the release tree. Do not create the tag until these gates
   are satisfied; no tag is claimed now.

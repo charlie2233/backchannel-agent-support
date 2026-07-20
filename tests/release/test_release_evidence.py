@@ -175,3 +175,49 @@ def test_ci_is_keyless_lockfile_based_and_declares_external_gates() -> None:
     assert "BACKCHANNEL_SMOKE_CANARY=%s" in workflow
     assert '-e OPENAI_API_KEY="$BACKCHANNEL_SMOKE_CANARY"' in workflow
     assert re.search(r"sk-[A-Za-z0-9_-]{20,}", workflow) is None
+
+
+def test_release_docs_separate_hosted_container_proof_from_external_gates() -> None:
+    run_url = (
+        "https://github.com/charlie2233/backchannel-agent-support/"
+        "actions/runs/29787371831"
+    )
+    documents = {
+        "validation": _read("docs/validation.md"),
+        "judge checklist": _read("docs/judge-checklist.md"),
+    }
+
+    for name, document in documents.items():
+        normalized = document.lower()
+        assert run_url in document, name
+        assert "github-hosted" in normalized, name
+        assert "packaged container" in normalized, name
+        assert "built frontend assets" in normalized, name
+        assert "title" in normalized and "csp" in normalized, name
+        assert "api calls" in normalized, name
+        assert "sse resume" in normalized, name
+        assert "not a browser ui interaction" in normalized, name
+        assert "local container runtime" in normalized, name
+        assert "public" in normalized and "unverified" in normalized, name
+
+    combined = "\n".join(documents.values()).lower()
+    for verified_step in (
+        "docker build",
+        "readiness",
+        "approval",
+        "decline",
+        "receipt",
+        "secret canary",
+        "session boundary",
+    ):
+        assert verified_step in combined
+
+    for stale_denial in (
+        "neither a docker build nor a running-container smoke has been verified",
+        "no image build or container smoke is claimed",
+        "container, deployment, and public reachability | **unverified external gates**",
+        "frontend/api/sse approval",
+        "exercised the built frontend",
+        "covered frontend/api/sse approval",
+    ):
+        assert stale_denial not in combined
