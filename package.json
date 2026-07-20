@@ -7,10 +7,17 @@
   ],
   "scripts": {
     "build": "npm --workspace web run build",
-    "check": "npm --workspace web run check && uv run ruff check server tests && uv run mypy server && uv run pytest -q",
+    "check": "npm --workspace web run check && uv run ruff check server scripts tests && uv run mypy server scripts/start.py scripts/docker_smoke.py && uv run pytest -q",
+    "presmoke:deployed-defaults": "npm run build",
+    "presmoke:production": "npm run build",
+    "smoke:container": "uv run python scripts/docker_smoke.py",
+    "smoke:deployed-defaults": "uv run python scripts/docker_smoke.py --launch --profile deployed-readonly",
+    "smoke:docker": "uv run python scripts/docker_smoke.py",
     "smoke:stub": "node scripts/smoke-stub.mjs",
     "smoke:live": "uv run python -m scripts.smoke_live",
     "smoke:live:3": "uv run python -m scripts.smoke_live_three",
+    "smoke:production": "uv run python scripts/docker_smoke.py --launch",
+    "start": "uv run python scripts/start.py",
     "test": "npm --workspace web test -- --run"
   },
   "engines": {

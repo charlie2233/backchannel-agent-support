@@ -29,6 +29,7 @@ class RuntimeSettings:
 
     live_ready: bool
     database_path: Path = Path("backchannel.sqlite3")
+    frontend_dist_path: Path | None = None
     demo_reset_enabled: bool = False
     deployed: bool = False
     cors_origins: tuple[str, ...] = DEVELOPMENT_CORS_ORIGINS
@@ -106,6 +107,13 @@ class RuntimeSettings:
         # Collapse configuration to a boolean immediately. The value is not retained.
         live_ready = bool(os.environ.get("OPENAI_API_KEY", "").strip())
         database_path = Path(os.environ.get("BACKCHANNEL_DB_PATH", "backchannel.sqlite3"))
+        configured_frontend_path = os.environ.get(
+            "BACKCHANNEL_FRONTEND_DIST_PATH",
+            "",
+        ).strip()
+        frontend_dist_path = (
+            Path(configured_frontend_path) if configured_frontend_path else None
+        )
         demo_reset_enabled = (
             os.environ.get("BACKCHANNEL_DEMO_RESET_ENABLED", "").strip().lower()
             == "true"
@@ -141,6 +149,7 @@ class RuntimeSettings:
         return cls(
             live_ready=live_ready,
             database_path=database_path,
+            frontend_dist_path=frontend_dist_path,
             demo_reset_enabled=demo_reset_enabled,
             deployed=deployed,
             cors_origins=cors_origins,

@@ -10,7 +10,7 @@ from uuid import UUID
 from fastapi import FastAPI, Header, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from openai import AsyncOpenAI
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -61,6 +61,7 @@ from server.providers.hotel_simulator import HotelSimulator
 from server.providers.quota_simulator import QuotaSimulator
 from server.replay.engine import ReplayEngine, UnsupportedExecutionModeError
 from server.replay.loader import ScenarioLoader, ScenarioNotFoundError
+from server.static import FrontendBundle
 from server.store import ApprovalDecisionError, RecoveryNotFoundError, SQLiteStore
 
 
@@ -136,6 +137,11 @@ def create_app(
 ) -> FastAPI:
     runtime_settings = settings or RuntimeSettings.from_environment()
     recovery_store = store or SQLiteStore(runtime_settings.database_path)
+    frontend_bundle = (
+        FrontendBundle(runtime_settings.frontend_dist_path)
+        if runtime_settings.frontend_dist_path is not None
+        else None
+    )
     scenario_loader = ScenarioLoader()
     replay_engine = ReplayEngine(recovery_store, scenario_loader)
     live_gate = LiveConcurrencyGate(
@@ -200,6 +206,7 @@ def create_app(
     application.state.recovery_store = recovery_store
     application.state.recovery_orchestrator = recovery_orchestrator
     application.state.live_gate = live_gate
+    application.state.frontend_bundle = frontend_bundle
     application.add_middleware(
         CORSMiddleware,
         allow_origins=list(runtime_settings.cors_origins),
@@ -284,7 +291,10 @@ def create_app(
 
     @application.get("/readyz", response_model=ReadinessResponse)
     def ready() -> ReadinessResponse:
-        if not recovery_store.is_ready():
+        if not recovery_store.is_ready() or (
+            (runtime_settings.deployed or frontend_bundle is not None)
+            and (frontend_bundle is None or not frontend_bundle.is_ready())
+        ):
             _raise_public(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 code="internal_error",
@@ -606,6 +616,33 @@ def create_app(
         if identity is not None:
             recovery_store.reset_for_session(identity.session_hash)
         return DemoResetResponse(reset=True)
+
+    if frontend_bundle is not None:
+
+        @application.api_route(
+            "/{frontend_path:path}",
+            methods=["GET", "HEAD"],
+            include_in_schema=False,
+            response_class=FileResponse,
+        )
+        def frontend(
+            request: Request,
+            frontend_path: str,
+        ) -> Response:
+            raw_path = request.scope.get("raw_path", b"")
+            if not isinstance(raw_path, bytes):
+                raw_path = b""
+            response = frontend_bundle.response_for(
+                path=frontend_path,
+                raw_path=raw_path,
+                accept=request.headers.get("accept", "*/*"),
+            )
+            if response is None:
+                _raise_public(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    code="not_found",
+                )
+            return response
 
     return application
 
