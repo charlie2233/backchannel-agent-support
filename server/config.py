@@ -19,6 +19,8 @@ LOCAL_IDENTITY_HMAC_SECRET = "backchannel-local-identity-secret-v0.3-only"
 APPROVAL_PROTOCOL_VERSION = "backchannel.approval.v1"
 HOTEL_AGENT_GRAPH_VERSION = "backchannel.hotel-agent.v1"
 HOTEL_LIVE_AGENT_GRAPH_VERSION = "backchannel.hotel-live-agent.v1"
+QUOTA_PROTOCOL_VERSION = "backchannel.quota.v1"
+QUOTA_AGENT_GRAPH_VERSION = "backchannel.quota-agent.v1"
 
 
 @dataclass(frozen=True, slots=True)

@@ -11,6 +11,8 @@ import type { RecoveryReceipt, RecoverySnapshot } from "../domain/recovery";
 import { initialRecoveryState, recoveryReducer, useRecovery } from "./useRecovery";
 
 const recoveryId = "c9f6b65a-0ccf-4ef3-9d12-072e2660b852";
+const sdkRootTraceId = "qa_trace_11111111111111111111111111111111";
+const sdkDefinitionDigest = "b".repeat(64);
 
 function event(seq: number, type = `event.${seq}`): RecoveryEvent {
   return {
@@ -37,6 +39,12 @@ function snapshot(
     createdAt: "2026-07-18T12:00:00Z",
     updatedAt: "2026-07-18T12:00:01Z",
     pendingApproval: null,
+    rootTraceId: sdkRootTraceId,
+    modelIds: [],
+    sdkVersion: "0.18.3",
+    protocolVersion: "backchannel.approval.v1",
+    agentGraphVersion: "backchannel.hotel-agent.v1",
+    promptToolSchemaHash: sdkDefinitionDigest,
   };
 }
 
@@ -48,6 +56,11 @@ function declinedReceipt(): RecoveryReceipt {
     simulated: true,
     providerExecution: false,
     modelIds: [],
+    rootTraceId: sdkRootTraceId,
+    sdkVersion: "0.18.3",
+    protocolVersion: "backchannel.approval.v1",
+    agentGraphVersion: "backchannel.hotel-agent.v1",
+    promptToolSchemaHash: sdkDefinitionDigest,
     boundary: "Demo adapter boundary.",
     providerResult: "Exact interruption rejected before provider dispatch.",
     authorizationSource: "Explicit operator decline.",
@@ -60,6 +73,93 @@ function declinedReceipt(): RecoveryReceipt {
     permissionRevoked: true,
     scopeClosed: true,
     approvedRemedyDigest: null,
+    quotaEvidence: null,
+  };
+}
+
+function quotaTerminalSnapshot(
+  executionMode: "sdk_stub" | "replay_fixture" = "sdk_stub",
+): RecoverySnapshot {
+  return {
+    recoveryId,
+    scenarioId: "api-quota",
+    executionMode,
+    status: "completed",
+    currentStep: 5,
+    currentStepSummary: "Quota receipt sealed.",
+    createdAt: "2026-07-19T12:00:00Z",
+    updatedAt: "2026-07-19T12:00:01Z",
+    pendingApproval: null,
+    rootTraceId: null,
+    modelIds: [],
+    sdkVersion: executionMode === "sdk_stub" ? "0.18.3" : null,
+    protocolVersion: executionMode === "sdk_stub" ? "backchannel.quota.v1" : null,
+    agentGraphVersion:
+      executionMode === "sdk_stub" ? "backchannel.quota-agent.v1" : null,
+    promptToolSchemaHash: executionMode === "sdk_stub" ? "c".repeat(64) : null,
+  };
+}
+
+function quotaTerminalReceipt(
+  executionMode: "sdk_stub" | "replay_fixture" = "sdk_stub",
+): RecoveryReceipt {
+  const runtime = executionMode === "sdk_stub";
+  return {
+    recoveryId,
+    executionMode,
+    status: "completed",
+    simulated: true,
+    providerExecution: runtime,
+    modelIds: [],
+    rootTraceId: null,
+    sdkVersion: runtime ? "0.18.3" : null,
+    protocolVersion: runtime ? "backchannel.quota.v1" : null,
+    agentGraphVersion: runtime ? "backchannel.quota-agent.v1" : null,
+    promptToolSchemaHash: runtime ? "c".repeat(64) : null,
+    boundary: "Quota boundary.",
+    providerResult: "Quota result.",
+    authorizationSource: "Quota authority.",
+    verificationResults: ["Quota verification."],
+    decision: null,
+    decisionRemedyDigest: null,
+    executionCount: runtime ? 1 : 0,
+    providerDispatchStarted: runtime,
+    exactInterruptionRejected: false,
+    permissionRevoked: runtime,
+    scopeClosed: runtime,
+    approvedRemedyDigest: null,
+    quotaEvidence: {
+      providerCeilingRpm: 1000,
+      recordedDemandRpm: 1200,
+      temporaryBurstRpm: 1500,
+      region: "US",
+      durationSeconds: 900,
+      extraCostMinor: 250,
+      delegatedAuthorityMaxMinor: 500,
+      currency: "USD",
+      hardConstraints: {
+        regionPreserved: true,
+        burstCoversDemand: true,
+        durationWithinLimit: true,
+        baseQuotaUnchanged: true,
+      },
+      humanInterruptions: 0,
+      approvals: 0,
+      providerProofVerified: true,
+      grantVerified: true,
+      source: runtime ? "sdk_simulator" : "recorded_fixture",
+      revocationEvidenceKind: runtime
+        ? "runtime_permission_revoked"
+        : "recorded_revocation_only",
+      protocolSteps: [
+        "Detect",
+        "Prove",
+        "Negotiate",
+        "Authorize",
+        "Execute",
+        "Verify & seal",
+      ],
+    },
   };
 }
 
@@ -265,4 +365,102 @@ describe("useRecovery authoritative terminal refresh", () => {
       expect(result.current.events).toEqual([terminalEvent]);
     },
   );
+
+  it.each([
+    {
+      label: "quota snapshot without quota evidence",
+      snapshot: quotaTerminalSnapshot(),
+      receipt: { ...quotaTerminalReceipt(), quotaEvidence: null },
+    },
+    {
+      label: "hotel snapshot with quota evidence",
+      snapshot: {
+        ...quotaTerminalSnapshot(),
+        scenarioId: "hotel" as const,
+      },
+      receipt: quotaTerminalReceipt(),
+    },
+    {
+      label: "quota execution-mode mismatch",
+      snapshot: quotaTerminalSnapshot("sdk_stub"),
+      receipt: quotaTerminalReceipt("replay_fixture"),
+    },
+  ])("rejects a terminal $label", async ({ snapshot, receipt }) => {
+    const getRecovery = vi.fn().mockResolvedValue(snapshot);
+    const getReceipt = vi.fn().mockResolvedValue(receipt);
+    const connectEvents = vi.fn(() => vi.fn());
+
+    const { result, unmount } = renderHook(() =>
+      useRecovery(recoveryId, {
+        getRecovery,
+        getReceipt,
+        connectEvents,
+        terminalRetryDelayMs: 60_000,
+      }),
+    );
+
+    await waitFor(() => {
+      expect(result.current.errorPhase).toBe("terminal");
+      expect(result.current.error).toMatch(/one recovery outcome/i);
+    });
+    expect(result.current.receipt).toBeNull();
+    unmount();
+  });
+
+  it.each([
+    {
+      label: "root trace ID",
+      receipt: { ...declinedReceipt(), rootTraceId: "qa_trace_mismatch" },
+    },
+    {
+      label: "model IDs",
+      receipt: { ...declinedReceipt(), modelIds: ["unexpected-model"] },
+    },
+    {
+      label: "SDK version",
+      receipt: { ...declinedReceipt(), sdkVersion: "0.18.4" },
+    },
+    {
+      label: "protocol version",
+      receipt: {
+        ...declinedReceipt(),
+        protocolVersion: "backchannel.approval.v2",
+      },
+    },
+    {
+      label: "agent graph version",
+      receipt: {
+        ...declinedReceipt(),
+        agentGraphVersion: "backchannel.hotel-agent.v2",
+      },
+    },
+    {
+      label: "prompt/tool schema hash",
+      receipt: { ...declinedReceipt(), promptToolSchemaHash: "c".repeat(64) },
+    },
+  ])("rejects a terminal pair with mismatched $label provenance", async ({ receipt }) => {
+    const terminal = snapshot(
+      "closed_without_action",
+      "Closed without provider action.",
+    );
+    const getRecovery = vi.fn().mockResolvedValue(terminal);
+    const getReceipt = vi.fn().mockResolvedValue(receipt);
+    const connectEvents = vi.fn(() => vi.fn());
+
+    const { result, unmount } = renderHook(() =>
+      useRecovery(recoveryId, {
+        getRecovery,
+        getReceipt,
+        connectEvents,
+        terminalRetryDelayMs: 60_000,
+      }),
+    );
+
+    await waitFor(() => {
+      expect(result.current.errorPhase).toBe("terminal");
+      expect(result.current.error).toMatch(/one recovery outcome/i);
+    });
+    expect(result.current.receipt).toBeNull();
+    unmount();
+  });
 });

@@ -10,50 +10,82 @@
       "type": "recovery.detected",
       "status": "in_progress",
       "currentStep": 0,
-      "summary": "Quota pressure found in the bundled usage trace.",
-      "data": {"phase": "Detect", "summary": "Recorded quota pressure replayed."}
+      "summary": "Recorded demand reached 1200 rpm.",
+      "data": {
+        "phase": "Detect",
+        "recordedDemandRpm": 1200,
+        "summary": "Recorded demand reached 1200 rpm."
+      }
     },
     {
       "type": "evidence.recorded",
       "status": "in_progress",
       "currentStep": 1,
-      "summary": "Recorded allowance and demand compared.",
-      "data": {"phase": "Prove", "summary": "Recorded allowance evidence replayed."}
+      "summary": "Recorded provider proof established the 1000 rpm US ceiling.",
+      "data": {
+        "phase": "Prove",
+        "providerCeilingRpm": 1000,
+        "providerProofVerified": true,
+        "region": "US",
+        "summary": "Recorded provider proof established the 1000 rpm US ceiling."
+      }
     },
     {
-      "type": "remedy.recorded",
+      "type": "quota.burst_recorded",
       "status": "in_progress",
       "currentStep": 2,
-      "summary": "A simulated temporary allocation was selected in the fixture.",
-      "data": {"phase": "Negotiate", "summary": "Recorded allocation terms replayed."}
+      "summary": "The fixture records a 1500 rpm burst for 900 seconds.",
+      "data": {
+        "phase": "Negotiate",
+        "temporaryBurstRpm": 1500,
+        "durationSeconds": 900,
+        "extraCostMinor": 250,
+        "currency": "USD",
+        "summary": "The fixture records a 1500 rpm burst for 900 seconds."
+      }
     },
     {
       "type": "delegated_authority.recorded",
       "status": "in_progress",
       "currentStep": 3,
-      "summary": "Fixture records delegated authority; no human approval.",
-      "data": {"phase": "Authorize", "summary": "Recorded delegated authority replayed."}
+      "summary": "All recorded constraints fit delegated authority; no approval occurred.",
+      "data": {
+        "phase": "Authorize",
+        "delegatedAuthorityMaxMinor": 500,
+        "humanInterruptions": 0,
+        "approvals": 0,
+        "hardConstraints": {
+          "regionPreserved": true,
+          "burstCoversDemand": true,
+          "durationWithinLimit": true,
+          "baseQuotaUnchanged": true
+        },
+        "summary": "All recorded constraints fit delegated authority; no approval occurred."
+      }
     },
     {
       "type": "execution.simulation_recorded",
       "status": "in_progress",
       "currentStep": 4,
-      "summary": "A simulated outcome was replayed; provider dispatch did not begin.",
+      "summary": "The fixture records a simulated grant; no provider dispatch occurred.",
       "data": {
         "phase": "Execute",
-        "summary": "Simulated outcome recorded without provider dispatch.",
-        "providerExecution": false
+        "providerExecution": false,
+        "providerDispatchStarted": false,
+        "summary": "The fixture records a simulated grant; no provider dispatch occurred."
       }
     },
     {
-      "type": "receipt.simulation_sealed",
+      "type": "recovery.completed",
       "status": "completed",
       "currentStep": 5,
-      "summary": "Simulated verification evidence was sealed in the replay fixture.",
+      "summary": "Recorded verification and revocation evidence was sealed.",
       "data": {
         "phase": "Verify & seal",
-        "summary": "Simulated replay receipt recorded.",
-        "providerExecution": false
+        "providerExecution": false,
+        "grantVerified": true,
+        "revocationEvidenceKind": "recorded_revocation_only",
+        "summary": "Recorded verification and revocation evidence was sealed."
       }
     }
   ],
@@ -62,12 +94,45 @@
     "simulated": true,
     "providerExecution": false,
     "modelIds": [],
-    "boundary": "Simulated replay receipt — no model call or provider execution.",
-    "providerResult": "None — recorded fixture outcome only.",
-    "authorizationSource": "Recorded delegated-authority fixture",
+    "boundary": "Recorded quota fixture only — no model call, runtime provider dispatch, or real quota change.",
+    "providerResult": "Recorded verified temporary grant; no runtime provider execution occurred.",
+    "authorizationSource": "Recorded delegated-authority evidence; no runtime approval occurred.",
     "verificationResults": [
-      "Simulated quota allocation evidence recorded",
-      "No provider dispatch occurred"
-    ]
+      "Recorded provider proof established the 1000 rpm base ceiling.",
+      "Recorded 1500 rpm burst covered 1200 rpm demand in US for 900 seconds.",
+      "Recorded 250 USD-minor cost stayed within the delegated 500 USD-minor maximum.",
+      "Recorded evidence says the base quota remained unchanged.",
+      "Revocation is recorded fixture evidence, not a runtime permission claim."
+    ],
+    "quotaEvidence": {
+      "providerCeilingRpm": 1000,
+      "recordedDemandRpm": 1200,
+      "temporaryBurstRpm": 1500,
+      "region": "US",
+      "durationSeconds": 900,
+      "extraCostMinor": 250,
+      "delegatedAuthorityMaxMinor": 500,
+      "currency": "USD",
+      "hardConstraints": {
+        "regionPreserved": true,
+        "burstCoversDemand": true,
+        "durationWithinLimit": true,
+        "baseQuotaUnchanged": true
+      },
+      "humanInterruptions": 0,
+      "approvals": 0,
+      "providerProofVerified": true,
+      "grantVerified": true,
+      "source": "recorded_fixture",
+      "revocationEvidenceKind": "recorded_revocation_only",
+      "protocolSteps": [
+        "Detect",
+        "Prove",
+        "Negotiate",
+        "Authorize",
+        "Execute",
+        "Verify & seal"
+      ]
+    }
   }
 }

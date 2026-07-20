@@ -31,6 +31,13 @@ from server.agents.live_factory import (
     live_broker_prompt,
 )
 from server.agents.live_models import ResponseMetadataRecorder
+from server.agents.quota_stub import (
+    QUOTA_START_PROMPT,
+    QuotaAgentContext,
+    build_quota_agent,
+    canonical_quota_request,
+    quota_definition_digest,
+)
 from server.agents.schemas import (
     BrokerOutcome,
     CommitRemedyArguments,
@@ -41,11 +48,13 @@ from server.agents.schemas import (
 from server.agents.stub_model import CLOSED_WITHOUT_ACTION_MESSAGE, DECLINE_MESSAGE
 from server.agents.tracing import (
     configure_openai_live_tracing,
+    configure_quota_sdk_stub_tracing,
     configure_sdk_stub_tracing,
 )
 from server.agents.versioning import (
     HOTEL_START_PROMPT,
     ApprovalVersionPolicy,
+    canonical_digest,
     hotel_definition_digest,
     is_valid_openai_trace_id,
     is_valid_qa_trace_id,
@@ -53,6 +62,7 @@ from server.agents.versioning import (
     new_qa_trace_id,
     remedy_action_digest,
 )
+from server.config import QUOTA_AGENT_GRAPH_VERSION, QUOTA_PROTOCOL_VERSION
 from server.digest import remedy_consent_digest
 from server.logging import safe_recovery_log_id
 from server.models import (
@@ -61,6 +71,7 @@ from server.models import (
     DecisionResponse,
     DeclineDecisionResponse,
     ExecutionMode,
+    QuotaEvidence,
     RecoveryReceipt,
     RecoverySnapshot,
     RecoveryStatus,
@@ -72,9 +83,13 @@ from server.policy import (
     exact_hotel_terms,
 )
 from server.providers.hotel_simulator import HotelDispatchResult, HotelSimulator
+from server.providers.quota_simulator import QuotaSimulator
 from server.store import (
     APPROVED_RECEIPT_AUTHORIZATION,
     APPROVED_RECEIPT_VERIFICATIONS,
+    QUOTA_SDK_STUB_AUTHORIZATION,
+    QUOTA_SDK_STUB_RECEIPT_BOUNDARY,
+    QUOTA_SDK_STUB_VERIFICATIONS,
     ApprovalDecisionClaim,
     ApprovalDecisionError,
     DecisionResumeLease,
@@ -137,6 +152,7 @@ class RecoveryOrchestrator:
         *,
         store: SQLiteStore,
         hotel_provider: HotelSimulator,
+        quota_provider: QuotaSimulator | None = None,
         version_policy: ApprovalVersionPolicy | None = None,
         live_ready: bool = False,
         live_model_provider_factory: LiveModelProviderFactory | None = None,
@@ -149,6 +165,7 @@ class RecoveryOrchestrator:
         self._store = store
         self._hotel_provider = hotel_provider
         self._hotel_provider.bind_store(store)
+        self._quota_provider = quota_provider or QuotaSimulator()
         self._version_policy = version_policy or ApprovalVersionPolicy.current()
         self._live_version_policy = ApprovalVersionPolicy.for_mode(
             ExecutionMode.OPENAI_LIVE
@@ -483,6 +500,108 @@ class RecoveryOrchestrator:
             marker,
         )
         raise ResumeIncompatibleError(recovery_id)
+
+    async def run_quota_stub(self) -> RecoverySnapshot:
+        """Run and atomically seal the deterministic zero-interruption quota graph."""
+
+        recovery_id = str(uuid4())
+        tool_call_id = f"grant-quota-{recovery_id}"
+        context = QuotaAgentContext(
+            recovery_id=recovery_id,
+            quota_provider=self._quota_provider,
+            permission_scope_id=tool_call_id,
+        )
+        agent = build_quota_agent(context=context)
+        result = await Runner.run(
+            agent,
+            QUOTA_START_PROMPT,
+            context=context,
+            run_config=configure_quota_sdk_stub_tracing(),
+        )
+        if result.interruptions:
+            raise RuntimeError("Deterministic quota run must not interrupt for approval")
+        dispatch = context.dispatch_result
+        if dispatch is None or context.tool_call_id != tool_call_id:
+            raise RuntimeError("Deterministic quota run did not complete its one tool")
+        if not self._quota_provider.was_permission_revoked(tool_call_id):
+            raise RuntimeError("Deterministic quota permission was not revoked")
+
+        evidence = QuotaEvidence.model_validate({
+            "providerCeilingRpm": 1000,
+            "recordedDemandRpm": 1200,
+            "temporaryBurstRpm": 1500,
+            "region": "US",
+            "durationSeconds": 900,
+            "extraCostMinor": 250,
+            "delegatedAuthorityMaxMinor": 500,
+            "currency": "USD",
+            "hardConstraints": {
+                "regionPreserved": True,
+                "burstCoversDemand": True,
+                "durationWithinLimit": True,
+                "baseQuotaUnchanged": True,
+            },
+            "humanInterruptions": 0,
+            "approvals": 0,
+            "providerProofVerified": True,
+            "grantVerified": True,
+            "source": "sdk_simulator",
+            "revocationEvidenceKind": "runtime_permission_revoked",
+            "protocolSteps": [
+                "Detect",
+                "Prove",
+                "Negotiate",
+                "Authorize",
+                "Execute",
+                "Verify & seal",
+            ],
+        })
+        receipt = RecoveryReceipt(
+            recoveryId=recovery_id,
+            executionMode=ExecutionMode.SDK_STUB,
+            status=RecoveryStatus.COMPLETED.value,
+            simulated=True,
+            providerExecution=True,
+            modelIds=[],
+            rootTraceId=None,
+            sdkVersion=self._version_policy.sdk_version,
+            protocolVersion=QUOTA_PROTOCOL_VERSION,
+            agentGraphVersion=QUOTA_AGENT_GRAPH_VERSION,
+            promptToolSchemaHash=quota_definition_digest(agent),
+            boundary=QUOTA_SDK_STUB_RECEIPT_BOUNDARY,
+            providerResult=dispatch.provider_result,
+            authorizationSource=QUOTA_SDK_STUB_AUTHORIZATION,
+            verificationResults=list(QUOTA_SDK_STUB_VERIFICATIONS),
+            decision=None,
+            decisionRemedyDigest=None,
+            executionCount=1,
+            providerDispatchStarted=True,
+            exactInterruptionRejected=False,
+            permissionRevoked=True,
+            scopeClosed=True,
+            approvedRemedyDigest=None,
+            quotaEvidence=evidence,
+        )
+        request_digest = canonical_digest(
+            canonical_quota_request(recovery_id).model_dump(mode="json")
+        )
+        idempotency_key = f"{recovery_id}:{tool_call_id}"
+        execution = DurableExecution(
+            execution_id=f"quota-execution-{canonical_digest(idempotency_key)[:20]}",
+            recovery_id=recovery_id,
+            idempotency_key=idempotency_key,
+            status="completed",
+            provider_execution=True,
+            request_digest=request_digest,
+            tool_call_id=tool_call_id,
+            remedy_digest=None,
+            result_json=dispatch.model_dump(mode="json"),
+        )
+        return self._store.create_completed_quota_recovery(
+            recovery_id=recovery_id,
+            execution=execution,
+            receipt=receipt,
+        )
 
     async def start(
         self,

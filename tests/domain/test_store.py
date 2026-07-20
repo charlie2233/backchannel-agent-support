@@ -7,7 +7,7 @@ import pytest
 from server.models import ExecutionMode, RecoveryStatus, ScenarioId
 from server.replay.engine import ReplayEngine
 from server.replay.loader import ScenarioLoader
-from server.store import SQLiteStore
+from server.store import ReceiptTransitionError, SQLiteStore
 
 REQUIRED_TABLES = {
     "demo_sessions",
@@ -218,4 +218,71 @@ def test_task2_recovery_constraints_migrate_without_losing_replay_rows(
         )
         assert persisted_receipt["status"] == "completed"
         assert "simulated_completed" not in persisted_receipt.values()
+        assert connection.execute(
+            """
+            SELECT COUNT(*) FROM receipt_provenance_migrations
+            WHERE recovery_id = 'legacy-replay'
+            """
+        ).fetchone() == (1,)
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+    reopened = SQLiteStore(database_path)
+    assert reopened.get_receipt("legacy-replay").status == "completed"
+
+
+def test_modern_quota_replay_without_typed_evidence_is_not_migration_eligible(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "modern-missing-quota-evidence.sqlite3"
+    SQLiteStore(database_path)
+    timestamp = "2026-07-19T12:00:00+00:00"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(
+            """
+            INSERT INTO recoveries (
+                id, scenario_id, execution_mode, status, current_step,
+                current_step_summary, created_at, updated_at
+            ) VALUES (
+                'modern-missing-quota', 'api-quota', 'replay_fixture',
+                'completed', 5, 'Invalid modern quota replay.', ?, ?
+            )
+            """,
+            (timestamp, timestamp),
+        )
+        connection.execute(
+            """
+            INSERT INTO events (
+                recovery_id, seq, type, terminal, data_json, created_at
+            ) VALUES (
+                'modern-missing-quota', 1, 'recovery.completed', 1, ?, ?
+            )
+            """,
+            (json.dumps({"summary": "Invalid modern terminal."}), timestamp),
+        )
+        connection.execute(
+            """
+            INSERT INTO receipts (recovery_id, receipt_json, created_at)
+            VALUES ('modern-missing-quota', ?, ?)
+            """,
+            (
+                json.dumps(
+                    {
+                        "recoveryId": "modern-missing-quota",
+                        "executionMode": "replay_fixture",
+                        "status": "completed",
+                        "simulated": True,
+                        "providerExecution": False,
+                        "modelIds": [],
+                        "boundary": "Invalid modern replay.",
+                        "providerResult": "Recorded only.",
+                        "authorizationSource": "Recorded only.",
+                        "verificationResults": ["Recorded only."],
+                    }
+                ),
+                timestamp,
+            ),
+        )
+
+    with pytest.raises(ReceiptTransitionError, match="Modern quota replay"):
+        SQLiteStore(database_path)

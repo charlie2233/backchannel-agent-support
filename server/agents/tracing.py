@@ -12,6 +12,15 @@ def configure_sdk_stub_tracing() -> RunConfig:
     )
 
 
+def configure_quota_sdk_stub_tracing() -> RunConfig:
+    """Disable tracing for the deterministic delegated-quota SDK graph."""
+
+    return RunConfig(
+        tracing_disabled=True,
+        workflow_name="Backchannel deterministic API quota recovery",
+    )
+
+
 def configure_openai_live_tracing(*, model_provider: ModelProvider) -> RunConfig:
     """Use Agent-owned models and omit all model/tool payloads from spans."""
 

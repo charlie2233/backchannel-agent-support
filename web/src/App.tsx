@@ -31,6 +31,8 @@ import {
 } from "./domain/session";
 import {
   hotelReplayCompletedPresentation,
+  quotaReplayCompletedPresentation,
+  quotaSdkCompletedPresentation,
   recoveryScenarios,
 } from "./fixtures/recoveries";
 import { useRecovery } from "./hooks/useRecovery";
@@ -91,6 +93,13 @@ function safeLiveStartError(error: unknown): Error {
   return new Error("Live recovery could not be started.");
 }
 
+function safeQuotaStartError(error: unknown): Error {
+  if (error instanceof PublicApiError) {
+    return error;
+  }
+  return new Error("Quota trace could not be started.");
+}
+
 interface AutomaticDecisionRetry {
   recoveryId: string;
   request: DecisionRequest;
@@ -122,11 +131,17 @@ export default function App() {
     readActiveHotelRecovery(),
   );
   const [createdSnapshot, setCreatedSnapshot] = useState<RecoverySnapshot | null>(null);
+  const [quotaRecoveryId, setQuotaRecoveryId] = useState<string | null>(null);
+  const [quotaCreatedSnapshot, setQuotaCreatedSnapshot] =
+    useState<RecoverySnapshot | null>(null);
   const [defaultCreationPending, setDefaultCreationPending] = useState(
     hotelRecoveryId === null,
   );
   const [runAction, setRunAction] = useState<"live" | "replay" | null>(null);
+  const [quotaRunAction, setQuotaRunAction] =
+    useState<"sdk" | "replay" | null>(null);
   const [liveStartError, setLiveStartError] = useState<Error | null>(null);
+  const [quotaStartError, setQuotaStartError] = useState<Error | null>(null);
   const [automaticDecisionRetry, setAutomaticDecisionRetry] =
     useState<AutomaticDecisionRetry | null>(() =>
       storedAutomaticDecisionRetry(hotelRecoveryId),
@@ -135,15 +150,23 @@ export default function App() {
   const actionInFlight = useRef(false);
   const selectionGeneration = useRef(0);
   const actionController = useRef<AbortController | null>(null);
+  const quotaActionInFlight = useRef(false);
+  const quotaSelectionGeneration = useRef(0);
+  const quotaActionController = useRef<AbortController | null>(null);
 
   const recovery = useRecovery(hotelRecoveryId, {
     initialSnapshot:
       createdSnapshot?.recoveryId === hotelRecoveryId ? createdSnapshot : null,
   });
+  const quotaRecovery = useRecovery(quotaRecoveryId, {
+    initialSnapshot:
+      quotaCreatedSnapshot?.recoveryId === quotaRecoveryId
+        ? quotaCreatedSnapshot
+        : null,
+  });
 
-  const activeScenario =
-    recoveryScenarios.find((scenario) => scenario.id === activeId) ?? recoveryScenarios[0];
   const hotelScenario = recoveryScenarios[0];
+  const quotaScenario = recoveryScenarios[1];
 
   useEffect(() => {
     const controller = new AbortController();
@@ -221,6 +244,8 @@ export default function App() {
   useEffect(() => () => {
     selectionGeneration.current += 1;
     actionController.current?.abort();
+    quotaSelectionGeneration.current += 1;
+    quotaActionController.current?.abort();
   }, []);
 
   useEffect(() => {
@@ -338,8 +363,94 @@ export default function App() {
     }
   };
 
-  const activeSnapshot = activeId === "hotel" ? recovery.snapshot : null;
-  const activeReceipt = activeId === "hotel" ? recovery.receipt : null;
+  const runQuotaRecovery = async (
+    executionMode: "sdk_stub" | "replay_fixture",
+  ) => {
+    if (
+      quotaActionInFlight.current ||
+      quotaRecovery.loading ||
+      (quotaRecovery.error === null &&
+        quotaRecoveryId !== null &&
+        (quotaRecovery.snapshot === null ||
+          !isTerminalRecoveryStatus(quotaRecovery.snapshot.status)))
+    ) {
+      return;
+    }
+    quotaActionInFlight.current = true;
+    const generation = quotaSelectionGeneration.current + 1;
+    quotaSelectionGeneration.current = generation;
+    const controller = new AbortController();
+    quotaActionController.current?.abort();
+    quotaActionController.current = controller;
+    setQuotaRunAction(executionMode === "sdk_stub" ? "sdk" : "replay");
+    setQuotaStartError(null);
+    if (quotaRecovery.error !== null) {
+      setQuotaCreatedSnapshot(null);
+      setQuotaRecoveryId(null);
+    }
+
+    try {
+      const snapshot = await createRecovery(
+        "api-quota",
+        executionMode,
+        controller.signal,
+      );
+      if (
+        controller.signal.aborted ||
+        generation !== quotaSelectionGeneration.current
+      ) {
+        return;
+      }
+      if (
+        snapshot.status !== "completed" ||
+        snapshot.currentStep !== 5 ||
+        snapshot.pendingApproval !== null
+      ) {
+        throw new Error("Quota creation did not return a terminal recovery");
+      }
+      setQuotaCreatedSnapshot(snapshot);
+      setQuotaRecoveryId(snapshot.recoveryId);
+    } catch (error: unknown) {
+      if (
+        controller.signal.aborted ||
+        generation !== quotaSelectionGeneration.current ||
+        (error instanceof DOMException && error.name === "AbortError")
+      ) {
+        return;
+      }
+      setQuotaStartError(safeQuotaStartError(error));
+    } finally {
+      if (generation === quotaSelectionGeneration.current) {
+        quotaActionInFlight.current = false;
+        quotaActionController.current = null;
+        setQuotaRunAction(null);
+      }
+    }
+  };
+
+  const selectScenario = (scenarioId: ScenarioId) => {
+    if (scenarioId !== "api-quota") {
+      quotaSelectionGeneration.current += 1;
+      quotaActionController.current?.abort();
+      quotaActionController.current = null;
+      quotaActionInFlight.current = false;
+      setQuotaRunAction(null);
+    }
+    setActiveId(scenarioId);
+  };
+
+  const authoritativeQuotaSnapshot =
+    quotaRecovery.snapshot?.recoveryId === quotaRecoveryId
+      ? quotaRecovery.snapshot
+      : null;
+  const authoritativeQuotaReceipt =
+    quotaRecovery.receipt?.recoveryId === quotaRecoveryId
+      ? quotaRecovery.receipt
+      : null;
+  const activeSnapshot =
+    activeId === "hotel" ? recovery.snapshot : authoritativeQuotaSnapshot;
+  const activeReceipt =
+    activeId === "hotel" ? recovery.receipt : authoritativeQuotaReceipt;
   const automaticSubmittingAction =
     automaticDecisionRetry !== null &&
     activeSnapshot?.status === "pending_approval" &&
@@ -368,19 +479,52 @@ export default function App() {
           },
     [hotelScenario, recovery.snapshot],
   );
+  const quotaScenarioView = useMemo<RecoveryScenario>(
+    () =>
+      authoritativeQuotaSnapshot === null
+        ? {
+            ...quotaScenario,
+            status: "in_progress",
+            currentStep: 0,
+            currentStepSummary:
+              "Choose an explicit SDK stub or recorded replay trace.",
+            lifecycleDetails: {
+              Detect: "Not run.",
+              Prove: "Not run.",
+              Negotiate: "Not run.",
+              Authorize: "Not run.",
+              Execute: "Not run.",
+              "Verify & seal": "Not run.",
+            },
+            evidence: [],
+          }
+        : {
+            ...quotaScenario,
+            executionMode: authoritativeQuotaSnapshot.executionMode,
+            status: authoritativeQuotaSnapshot.status,
+            currentStep: authoritativeQuotaSnapshot.currentStep,
+            currentStepSummary: authoritativeQuotaSnapshot.currentStepSummary,
+            ...(authoritativeQuotaSnapshot.executionMode === "sdk_stub"
+              ? quotaSdkCompletedPresentation
+              : quotaReplayCompletedPresentation),
+          },
+    [authoritativeQuotaSnapshot, quotaScenario],
+  );
   const activeScenarioView =
-    activeId === "hotel" ? hotelScenarioView : activeScenario;
+    activeId === "hotel" ? hotelScenarioView : quotaScenarioView;
   const scenarioRailScenarios = useMemo<ReadonlyArray<RecoveryScenario>>(
     () =>
-      recoveryScenarios.map((scenario) =>
-        scenario.id === "hotel" ? hotelScenarioView : scenario,
-      ),
-    [hotelScenarioView],
+      recoveryScenarios.map((scenario) => {
+        if (scenario.id === "hotel") {
+          return hotelScenarioView;
+        }
+        return quotaScenarioView;
+      }),
+    [hotelScenarioView, quotaScenarioView],
   );
 
   const activeExecutionMode: ExecutionMode | null =
-    activeSnapshot?.executionMode ??
-    (activeId === "hotel" ? null : "replay_fixture");
+    activeSnapshot?.executionMode ?? null;
 
   const presentation = useMemo(
     () =>
@@ -408,6 +552,21 @@ export default function App() {
     (defaultCreationPending || recovery.loading || runAction !== null);
   const hotelContentUnavailable =
     activeId === "hotel" && activeSnapshot === null && !hotelContentPending;
+  const quotaContentPending =
+    activeId === "api-quota" &&
+    (quotaRunAction !== null ||
+      quotaRecovery.loading ||
+      (quotaRecovery.error === null &&
+        quotaRecoveryId !== null &&
+        (authoritativeQuotaSnapshot === null ||
+          (isTerminalRecoveryStatus(authoritativeQuotaSnapshot.status) &&
+            authoritativeQuotaReceipt === null))));
+  const quotaContentUnavailable =
+    activeId === "api-quota" &&
+    authoritativeQuotaSnapshot === null &&
+    !quotaContentPending;
+  const contentPending = hotelContentPending || quotaContentPending;
+  const contentUnavailable = hotelContentUnavailable || quotaContentUnavailable;
 
   return (
     <div className="app-frame">
@@ -431,7 +590,7 @@ export default function App() {
         <ScenarioRail
           scenarios={scenarioRailScenarios}
           activeId={activeId}
-          onSelect={setActiveId}
+          onSelect={selectScenario}
         />
 
         <main className="workspace">
@@ -477,6 +636,33 @@ export default function App() {
               ) : null}
             </section>
           ) : null}
+          {activeId === "api-quota" ? (
+            <section className="live-run-controls" aria-label="Quota execution controls">
+              {health?.sdkStubReady === true ? (
+                <button
+                  type="button"
+                  disabled={quotaRunAction !== null || quotaContentPending}
+                  onClick={() => void runQuotaRecovery("sdk_stub")}
+                >
+                  {quotaRunAction === "sdk"
+                    ? "Running SDK stub trace…"
+                    : "Run SDK stub trace"}
+                </button>
+              ) : null}
+              <button
+                type="button"
+                disabled={quotaRunAction !== null || quotaContentPending}
+                onClick={() => void runQuotaRecovery("replay_fixture")}
+              >
+                {quotaRunAction === "replay"
+                  ? "Replaying recorded trace…"
+                  : "Replay recorded trace"}
+              </button>
+              {quotaStartError !== null ? (
+                <p role="alert">{quotaStartError.message}</p>
+              ) : null}
+            </section>
+          ) : null}
           <section className="recovery-heading" aria-labelledby="recovery-title">
             <div>
               <p className="eyebrow">Active recovery</p>
@@ -486,24 +672,25 @@ export default function App() {
               {recoveryStateLabel(activeSnapshot, activeScenarioView)}
             </span>
           </section>
-          {hotelContentPending ? (
+          {contentPending ? (
             <section className="recovery-loading" aria-live="polite" aria-busy="true">
               Loading authoritative recovery…
             </section>
-          ) : hotelContentUnavailable ? (
+          ) : contentUnavailable ? (
             <section className="recovery-loading" role="status">
-              {recovery.error ?? "Choose an available execution mode to start this recovery."}
+              {(activeId === "hotel" ? recovery.error : quotaRecovery.error) ??
+                "Choose an available execution mode to start this recovery."}
             </section>
           ) : (
             <Lifecycle scenario={activeScenarioView} />
           )}
         </main>
 
-        {hotelContentPending ? (
+        {contentPending ? (
           <aside className="evidence-inspector" aria-live="polite" aria-busy="true">
             Loading authoritative evidence…
           </aside>
-        ) : hotelContentUnavailable ? (
+        ) : contentUnavailable ? (
           <aside className="evidence-inspector" aria-live="polite">
             No authoritative recovery evidence is available.
           </aside>

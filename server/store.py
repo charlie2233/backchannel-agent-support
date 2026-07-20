@@ -39,10 +39,37 @@ from server.policy import (
     evaluate_hotel_policy,
     exact_hotel_terms,
 )
+from server.providers.quota_simulator import QuotaGrantResult
 
 SDK_STUB_RECEIPT_BOUNDARY = (
     "Deterministic Agents SDK model and demo hotel adapter only; "
     "no OpenAI model call, real booking, or payment change."
+)
+QUOTA_SDK_STUB_RECEIPT_BOUNDARY = (
+    "Deterministic Agents SDK quota model and demo quota adapter only; "
+    "no OpenAI model call or real provider quota change."
+)
+QUOTA_SDK_STUB_AUTHORIZATION = (
+    "Delegated quota authority covered the temporary grant; "
+    "no human approval was requested."
+)
+QUOTA_SDK_STUB_VERIFICATIONS = (
+    "Provider proof established the 1000 rpm base ceiling.",
+    "The 1500 rpm temporary burst covered 1200 rpm demand in US for 900 seconds.",
+    "The 250 USD-minor cost stayed within the delegated 500 USD-minor maximum.",
+    "The base quota remained unchanged.",
+    "Runtime permission was revoked after grant verification.",
+)
+QUOTA_PROTOCOL_PHASES = (
+    "Detect",
+    "Prove",
+    "Negotiate",
+    "Authorize",
+    "Execute",
+    "Verify & seal",
+)
+QUOTA_TERMINAL_SUMMARY = (
+    "The grant was verified, runtime permission revoked, and receipt sealed."
 )
 OPENAI_LIVE_RECEIPT_BOUNDARY = (
     "Live OpenAI model orchestration and demo hotel adapter only; "
@@ -1166,6 +1193,10 @@ class SQLiteStore:
             raw = json.loads(cast(str, row["receipt_json"]))
             if not isinstance(raw, dict):
                 raise RuntimeError("Legacy receipt is not a JSON object")
+            if raw.get("quotaEvidence") is not None:
+                # Quota receipts intentionally have no human-decision envelope.
+                # Task 7 validates their complete typed provenance graph.
+                continue
             if raw.get("decision") in {"approved", "declined"}:
                 continue
             if row["migration_marker"] is not None:
@@ -1286,6 +1317,59 @@ class SQLiteStore:
         model_ids = list(dict.fromkeys(item.returned_model for item in metadata))
         return expected, model_ids
 
+    @staticmethod
+    def _validate_quota_event_graph(
+        connection: sqlite3.Connection,
+        recovery_id: str,
+        *,
+        runtime: bool,
+    ) -> None:
+        rows = connection.execute(
+            """
+            SELECT seq, type, terminal, data_json FROM events
+            WHERE recovery_id = ? ORDER BY seq ASC
+            """,
+            (recovery_id,),
+        ).fetchall()
+        if len(rows) != 7 or [cast(int, row["seq"]) for row in rows] != list(
+            range(1, 8)
+        ):
+            raise ReceiptTransitionError("Stored quota event evidence is incomplete")
+        try:
+            data = [json.loads(cast(str, row["data_json"])) for row in rows]
+        except (TypeError, ValueError):
+            raise ReceiptTransitionError("Stored quota event evidence is invalid") from None
+        if not all(isinstance(item, dict) for item in data):
+            raise ReceiptTransitionError("Stored quota event evidence is invalid")
+        if [item.get("phase") for item in data[1:]] != list(QUOTA_PROTOCOL_PHASES):
+            raise ReceiptTransitionError("Stored quota protocol phase evidence mismatch")
+        if [bool(cast(int, row["terminal"])) for row in rows] != [
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+            True,
+        ]:
+            raise ReceiptTransitionError("Stored quota terminal evidence mismatch")
+        terminal = data[-1]
+        expected_terminal = {
+            "providerExecution": runtime,
+            "grantVerified": True,
+        }
+        if runtime:
+            expected_terminal.update(
+                {
+                    "permissionRevoked": True,
+                    "scopeClosed": True,
+                }
+            )
+        if cast(str, rows[-1]["type"]) != "recovery.completed" or any(
+            terminal.get(key) != value for key, value in expected_terminal.items()
+        ):
+            raise ReceiptTransitionError("Stored quota terminal evidence mismatch")
+
     @classmethod
     def _validate_durable_receipt_evidence(
         cls,
@@ -1305,10 +1389,17 @@ class SQLiteStore:
         recovery = recovery_rows[0]
         try:
             recovery_mode = ExecutionMode(cast(str, recovery["execution_mode"]))
+            scenario_id = ScenarioId(cast(str, recovery["scenario_id"]))
         except ValueError:
             raise ReceiptTransitionError("Stored receipt evidence is invalid") from None
         if receipt.execution_mode is not recovery_mode:
             raise ReceiptTransitionError("Stored receipt provenance mismatch")
+        is_quota_scenario = scenario_id is ScenarioId.API_QUOTA
+        has_quota_evidence = receipt.quota_evidence is not None
+        if is_quota_scenario != has_quota_evidence:
+            raise ReceiptTransitionError(
+                "Stored receipt scenario and quota evidence mismatch"
+            )
         if recovery_mode is ExecutionMode.REPLAY_FIXTURE:
             if phase != "sealed":
                 raise ReceiptTransitionError("Replay receipts cannot enter SDK finalization")
@@ -1328,6 +1419,120 @@ class SQLiteStore:
                 or terminal_count != 1
             ):
                 raise ReceiptTransitionError("Stored replay receipt is not terminal")
+            if has_quota_evidence:
+                quota_evidence = receipt.quota_evidence
+                assert quota_evidence is not None
+                if quota_evidence.source != "recorded_fixture":
+                    raise ReceiptTransitionError(
+                        "Stored replay quota provenance mismatch"
+                    )
+                for table in (
+                    "executions",
+                    "permission_scopes",
+                    "pending_approvals",
+                    "approval_decisions",
+                    "remedies",
+                ):
+                    count = cast(
+                        int,
+                        connection.execute(
+                            f"SELECT COUNT(*) FROM {table} WHERE recovery_id = ?",
+                            (receipt.recovery_id,),
+                        ).fetchone()[0],
+                    )
+                    if count != 0:
+                        raise ReceiptTransitionError(
+                            "Stored replay quota contains runtime evidence"
+                        )
+                cls._validate_quota_event_graph(
+                    connection,
+                    receipt.recovery_id,
+                    runtime=False,
+                )
+            return
+
+        if has_quota_evidence:
+            quota_evidence = receipt.quota_evidence
+            assert quota_evidence is not None
+            if phase != "sealed" or recovery_mode is not ExecutionMode.SDK_STUB:
+                raise ReceiptTransitionError(
+                    "Quota SDK receipts require sealed local provenance"
+                )
+            if (
+                quota_evidence.source != "sdk_simulator"
+                or cast(str, recovery["status"]) != RecoveryStatus.COMPLETED.value
+                or cast(int, recovery["current_step"]) != 5
+                or cast(str, recovery["current_step_summary"])
+                != QUOTA_TERMINAL_SUMMARY
+                or receipt.boundary != QUOTA_SDK_STUB_RECEIPT_BOUNDARY
+                or receipt.authorization_source != QUOTA_SDK_STUB_AUTHORIZATION
+                or tuple(receipt.verification_results)
+                != QUOTA_SDK_STUB_VERIFICATIONS
+                or receipt.protocol_version != "backchannel.quota.v1"
+                or receipt.agent_graph_version != "backchannel.quota-agent.v1"
+            ):
+                raise ReceiptTransitionError(
+                    "Stored quota receipt narrative or provenance mismatch"
+                )
+            for table in ("pending_approvals", "approval_decisions", "remedies"):
+                count = cast(
+                    int,
+                    connection.execute(
+                        f"SELECT COUNT(*) FROM {table} WHERE recovery_id = ?",
+                        (receipt.recovery_id,),
+                    ).fetchone()[0],
+                )
+                if count != 0:
+                    raise ReceiptTransitionError(
+                        "Stored quota receipt contains human-decision evidence"
+                    )
+            executions = connection.execute(
+                "SELECT * FROM executions WHERE recovery_id = ?",
+                (receipt.recovery_id,),
+            ).fetchall()
+            scopes = connection.execute(
+                "SELECT * FROM permission_scopes WHERE recovery_id = ?",
+                (receipt.recovery_id,),
+            ).fetchall()
+            if len(executions) != 1 or len(scopes) != 1:
+                raise ReceiptTransitionError(
+                    "Stored quota execution or permission evidence is missing"
+                )
+            execution = executions[0]
+            scope = scopes[0]
+            try:
+                result = QuotaGrantResult.model_validate_json(
+                    cast(str, execution["result_json"])
+                )
+            except (TypeError, ValueError):
+                raise ReceiptTransitionError(
+                    "Stored quota provider result is invalid"
+                ) from None
+            request_digest = cast(str | None, execution["request_digest"])
+            tool_call_id = cast(str | None, execution["tool_call_id"])
+            if (
+                cast(str, execution["status"]) != "completed"
+                or not bool(cast(int, execution["provider_execution"]))
+                or request_digest is None
+                or re.fullmatch(r"[0-9a-f]{64}", request_digest) is None
+                or tool_call_id is None
+                or not tool_call_id.strip()
+                or execution["remedy_digest"] is not None
+                or result.provider_result != receipt.provider_result
+                or cast(str, scope["tool_call_id"]) != tool_call_id
+                or cast(str, scope["remedy_digest"]) != request_digest
+                or cast(str, scope["action_digest"]) != request_digest
+                or cast(str, scope["status"]) != "revoked"
+                or scope["revoked_at"] is None
+            ):
+                raise ReceiptTransitionError(
+                    "Stored quota execution or permission evidence mismatch"
+                )
+            cls._validate_quota_event_graph(
+                connection,
+                receipt.recovery_id,
+                runtime=True,
+            )
             return
 
         pending_rows = connection.execute(
@@ -1578,6 +1783,7 @@ class SQLiteStore:
             SELECT receipts.recovery_id AS receipt_recovery_id,
                    receipts.receipt_json,
                    recoveries.execution_mode AS recovery_execution_mode,
+                   recoveries.scenario_id AS recovery_scenario_id,
                    receipt_provenance_migrations.recovery_id AS migration_marker
             FROM receipts
             LEFT JOIN recoveries
@@ -1609,11 +1815,61 @@ class SQLiteStore:
                     ) from None
                 if receipt.recovery_id != recovery_id:
                     raise ReceiptTransitionError("Stored receipt evidence mismatch")
-                cls._validate_durable_receipt_evidence(
-                    connection,
-                    receipt,
-                    phase="sealed",
+                legacy_quota_without_evidence = (
+                    cast(str, row["recovery_scenario_id"])
+                    == ScenarioId.API_QUOTA.value
+                    and receipt.quota_evidence is None
                 )
+                if legacy_quota_without_evidence:
+                    marked_legacy = row["migration_marker"] is not None
+                    if not legacy_status and not marked_legacy:
+                        raise ReceiptTransitionError(
+                            "Modern quota replay is missing typed evidence"
+                        )
+                    terminal_count = cast(
+                        int,
+                        connection.execute(
+                            """
+                            SELECT COUNT(*) FROM events
+                            WHERE recovery_id = ? AND terminal = 1
+                            """,
+                            (recovery_id,),
+                        ).fetchone()[0],
+                    )
+                    runtime_count = 0
+                    for table in (
+                        "executions",
+                        "permission_scopes",
+                        "pending_approvals",
+                        "approval_decisions",
+                        "remedies",
+                    ):
+                        runtime_count += cast(
+                            int,
+                            connection.execute(
+                                f"SELECT COUNT(*) FROM {table} WHERE recovery_id = ?",
+                                (recovery_id,),
+                            ).fetchone()[0],
+                        )
+                    if terminal_count != 1 or runtime_count != 0:
+                        raise ReceiptTransitionError(
+                            "Legacy quota replay evidence is invalid"
+                        )
+                    if not marked_legacy:
+                        connection.execute(
+                            """
+                            INSERT INTO receipt_provenance_migrations (
+                                recovery_id, migrated_at
+                            ) VALUES (?, ?)
+                            """,
+                            (recovery_id, datetime.now(UTC).isoformat()),
+                        )
+                else:
+                    cls._validate_durable_receipt_evidence(
+                        connection,
+                        receipt,
+                        phase="sealed",
+                    )
                 if legacy_status:
                     connection.execute(
                         "UPDATE receipts SET receipt_json = ? WHERE recovery_id = ?",
@@ -1621,6 +1877,31 @@ class SQLiteStore:
                             receipt.model_dump_json(by_alias=True),
                             recovery_id,
                         ),
+                    )
+                continue
+
+            if raw.get("quotaEvidence") is not None:
+                try:
+                    receipt = RecoveryReceipt.model_validate(raw)
+                except (TypeError, ValueError):
+                    raise ReceiptTransitionError(
+                        "Stored quota receipt provenance is invalid"
+                    ) from None
+                if receipt.recovery_id != recovery_id:
+                    raise ReceiptTransitionError("Stored receipt evidence mismatch")
+                cls._validate_durable_receipt_evidence(
+                    connection,
+                    receipt,
+                    phase="sealed",
+                )
+                if row["migration_marker"] is None:
+                    connection.execute(
+                        """
+                        INSERT INTO receipt_provenance_migrations (
+                            recovery_id, migrated_at
+                        ) VALUES (?, ?)
+                        """,
+                        (recovery_id, datetime.now(UTC).isoformat()),
                     )
                 continue
 
@@ -2312,6 +2593,235 @@ class SQLiteStore:
             )
         return self.get_recovery(recovery_id)
 
+    def create_completed_quota_recovery(
+        self,
+        *,
+        recovery_id: str,
+        execution: DurableExecution,
+        receipt: RecoveryReceipt,
+    ) -> RecoverySnapshot:
+        """Persist the complete runtime quota trace and receipt atomically."""
+
+        if execution.recovery_id != recovery_id or receipt.recovery_id != recovery_id:
+            raise ReceiptTransitionError("Quota recovery ID evidence mismatch")
+        if (
+            receipt.execution_mode is not ExecutionMode.SDK_STUB
+            or receipt.quota_evidence is None
+            or receipt.quota_evidence.source != "sdk_simulator"
+            or execution.status != "completed"
+            or not execution.provider_execution
+            or execution.request_digest is None
+            or re.fullmatch(r"[0-9a-f]{64}", execution.request_digest) is None
+            or execution.tool_call_id is None
+            or not execution.tool_call_id.strip()
+            or execution.remedy_digest is not None
+            or execution.result_json is None
+        ):
+            raise ReceiptTransitionError("Quota terminal execution evidence is invalid")
+        try:
+            provider_result = QuotaGrantResult.model_validate(execution.result_json)
+        except (TypeError, ValueError):
+            raise ReceiptTransitionError(
+                "Quota terminal provider result is invalid"
+            ) from None
+        if provider_result.provider_result != receipt.provider_result:
+            raise ReceiptTransitionError("Quota terminal provider result mismatch")
+
+        evidence = receipt.quota_evidence
+        hard_constraints = evidence.hard_constraints.model_dump(
+            mode="json",
+            by_alias=True,
+        )
+        events: list[tuple[str, dict[str, JsonValue]]] = [
+            (
+                "recovery.detected",
+                {
+                    "phase": "Detect",
+                    "recordedDemandRpm": evidence.recorded_demand_rpm,
+                    "summary": "Recorded demand reached 1200 rpm.",
+                },
+            ),
+            (
+                "evidence.proved",
+                {
+                    "phase": "Prove",
+                    "providerCeilingRpm": evidence.provider_ceiling_rpm,
+                    "providerProofVerified": evidence.provider_proof_verified,
+                    "region": evidence.region,
+                    "summary": "Provider proof verified the 1000 rpm US ceiling.",
+                },
+            ),
+            (
+                "quota.burst_selected",
+                {
+                    "phase": "Negotiate",
+                    "temporaryBurstRpm": evidence.temporary_burst_rpm,
+                    "durationSeconds": evidence.duration_seconds,
+                    "extraCostMinor": evidence.extra_cost_minor,
+                    "currency": evidence.currency,
+                    "summary": (
+                        "A temporary 1500 rpm US burst was selected for 900 seconds."
+                    ),
+                },
+            ),
+            (
+                "delegated_authority.authorized",
+                {
+                    "phase": "Authorize",
+                    "delegatedAuthorityMaxMinor": (
+                        evidence.delegated_authority_max_minor
+                    ),
+                    "humanInterruptions": evidence.human_interruptions,
+                    "approvals": evidence.approvals,
+                    "hardConstraints": hard_constraints,
+                    "summary": (
+                        "All constraints passed inside delegated authority; "
+                        "no human approval was needed."
+                    ),
+                },
+            ),
+            (
+                "execution.completed",
+                {
+                    "phase": "Execute",
+                    "providerExecution": True,
+                    "providerDispatchStarted": True,
+                    "dispatchId": provider_result.dispatch_id,
+                    "grantId": provider_result.grant_id,
+                    "summary": (
+                        "The demo quota adapter dispatched one temporary grant."
+                    ),
+                },
+            ),
+            (
+                "recovery.completed",
+                {
+                    "phase": "Verify & seal",
+                    "providerExecution": True,
+                    "grantVerified": evidence.grant_verified,
+                    "permissionRevoked": True,
+                    "scopeClosed": True,
+                    "summary": QUOTA_TERMINAL_SUMMARY,
+                },
+            ),
+        ]
+        now = self._now()
+        created_data = {
+            "scenarioId": ScenarioId.API_QUOTA.value,
+            "executionMode": ExecutionMode.SDK_STUB.value,
+            "summary": "Recovery created for the selected execution mode.",
+        }
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                INSERT INTO recoveries (
+                    id, scenario_id, execution_mode, status, current_step,
+                    current_step_summary, created_at, updated_at
+                ) VALUES (?, 'api-quota', 'sdk_stub', 'completed', 5, ?, ?, ?)
+                """,
+                (
+                    recovery_id,
+                    QUOTA_TERMINAL_SUMMARY,
+                    now.isoformat(),
+                    now.isoformat(),
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO events (
+                    recovery_id, seq, type, terminal, data_json, created_at
+                ) VALUES (?, 1, 'recovery.created', 0, ?, ?)
+                """,
+                (
+                    recovery_id,
+                    json.dumps(created_data, separators=(",", ":"), sort_keys=True),
+                    now.isoformat(),
+                ),
+            )
+            for sequence, (event_type, event_data) in enumerate(events, start=2):
+                connection.execute(
+                    """
+                    INSERT INTO events (
+                        recovery_id, seq, type, terminal, data_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        recovery_id,
+                        sequence,
+                        event_type,
+                        int(sequence == 7),
+                        json.dumps(event_data, separators=(",", ":"), sort_keys=True),
+                        now.isoformat(),
+                    ),
+                )
+            connection.execute(
+                """
+                INSERT INTO executions (
+                    id, recovery_id, idempotency_key, status,
+                    provider_execution, request_digest, tool_call_id,
+                    remedy_digest, result_json, created_at, updated_at
+                ) VALUES (?, ?, ?, 'completed', 1, ?, ?, NULL, ?, ?, ?)
+                """,
+                (
+                    execution.execution_id,
+                    recovery_id,
+                    execution.idempotency_key,
+                    execution.request_digest,
+                    execution.tool_call_id,
+                    json.dumps(
+                        execution.result_json,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                    now.isoformat(),
+                    now.isoformat(),
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO permission_scopes (
+                    recovery_id, tool_call_id, remedy_digest, action_digest,
+                    status, created_at, activated_at, revoked_at, updated_at
+                ) VALUES (?, ?, ?, ?, 'revoked', ?, ?, ?, ?)
+                """,
+                (
+                    recovery_id,
+                    execution.tool_call_id,
+                    execution.request_digest,
+                    execution.request_digest,
+                    now.isoformat(),
+                    now.isoformat(),
+                    now.isoformat(),
+                    now.isoformat(),
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO receipts (recovery_id, receipt_json, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (
+                    recovery_id,
+                    receipt.model_dump_json(by_alias=True, exclude_none=True),
+                    now.isoformat(),
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO receipt_provenance_migrations (recovery_id, migrated_at)
+                VALUES (?, ?)
+                """,
+                (recovery_id, now.isoformat()),
+            )
+            self._validate_durable_receipt_evidence(
+                connection,
+                receipt,
+                phase="sealed",
+            )
+        return self.get_recovery(recovery_id)
+
     def create_pending_recovery(
         self,
         *,
@@ -2518,7 +3028,8 @@ class SQLiteStore:
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
-                "SELECT id, execution_mode FROM recoveries WHERE id = ?", (recovery_id,)
+                "SELECT id, scenario_id, execution_mode FROM recoveries WHERE id = ?",
+                (recovery_id,),
             ).fetchone()
             if existing is None:
                 raise RecoveryNotFoundError("Recovery not found")
@@ -2535,6 +3046,13 @@ class SQLiteStore:
                 if receipt.execution_mode is not existing_mode:
                     raise ReceiptTransitionError(
                         "Receipt execution mode does not match the recovery"
+                    )
+                is_quota_scenario = (
+                    cast(str, existing["scenario_id"]) == ScenarioId.API_QUOTA.value
+                )
+                if is_quota_scenario != (receipt.quota_evidence is not None):
+                    raise ReceiptTransitionError(
+                        "Receipt scenario and quota evidence do not match"
                     )
             if pending_approval is not None:
                 if pending_approval.recovery_id != recovery_id:

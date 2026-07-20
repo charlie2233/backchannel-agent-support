@@ -60,6 +60,89 @@ class ReadinessResponse(ApiModel):
     status: str
 
 
+class QuotaHardConstraints(ApiModel):
+    """Exact complementary-policy checks shared by runtime and replay evidence."""
+
+    model_config = ConfigDict(
+        populate_by_name=True,
+        extra="forbid",
+        frozen=True,
+        strict=True,
+    )
+
+    region_preserved: Literal[True] = Field(alias="regionPreserved")
+    burst_covers_demand: Literal[True] = Field(alias="burstCoversDemand")
+    duration_within_limit: Literal[True] = Field(alias="durationWithinLimit")
+    base_quota_unchanged: Literal[True] = Field(alias="baseQuotaUnchanged")
+
+
+class QuotaEvidence(ApiModel):
+    """Canonical quota facts with an explicit runtime-versus-recording source."""
+
+    model_config = ConfigDict(
+        populate_by_name=True,
+        extra="forbid",
+        frozen=True,
+        strict=True,
+    )
+
+    provider_ceiling_rpm: Literal[1000] = Field(alias="providerCeilingRpm")
+    recorded_demand_rpm: Literal[1200] = Field(alias="recordedDemandRpm")
+    temporary_burst_rpm: Literal[1500] = Field(alias="temporaryBurstRpm")
+    region: Literal["US"]
+    duration_seconds: Literal[900] = Field(alias="durationSeconds")
+    extra_cost_minor: Literal[250] = Field(alias="extraCostMinor")
+    delegated_authority_max_minor: Literal[500] = Field(
+        alias="delegatedAuthorityMaxMinor"
+    )
+    currency: Literal["USD"]
+    hard_constraints: QuotaHardConstraints = Field(alias="hardConstraints")
+    human_interruptions: Literal[0] = Field(alias="humanInterruptions")
+    approvals: Literal[0]
+    provider_proof_verified: Literal[True] = Field(alias="providerProofVerified")
+    grant_verified: Literal[True] = Field(alias="grantVerified")
+    source: Literal["sdk_simulator", "recorded_fixture"]
+    revocation_evidence_kind: Literal[
+        "runtime_permission_revoked",
+        "recorded_revocation_only",
+    ] = Field(alias="revocationEvidenceKind")
+    protocol_steps: list[
+        Literal[
+            "Detect",
+            "Prove",
+            "Negotiate",
+            "Authorize",
+            "Execute",
+            "Verify & seal",
+        ]
+    ] = Field(alias="protocolSteps", min_length=6, max_length=6)
+
+    @field_validator("protocol_steps")
+    @classmethod
+    def require_ordered_protocol_steps(cls, value: list[str]) -> list[str]:
+        if value != [
+            "Detect",
+            "Prove",
+            "Negotiate",
+            "Authorize",
+            "Execute",
+            "Verify & seal",
+        ]:
+            raise ValueError("Quota protocol steps must remain exact and ordered")
+        return value
+
+    @model_validator(mode="after")
+    def bind_revocation_kind_to_source(self) -> Self:
+        expected_kind = (
+            "runtime_permission_revoked"
+            if self.source == "sdk_simulator"
+            else "recorded_revocation_only"
+        )
+        if self.revocation_evidence_kind != expected_kind:
+            raise ValueError("Quota revocation evidence does not match its source")
+        return self
+
+
 class ReplayEventTemplate(ApiModel):
     type: str
     status: RecoveryStatus
@@ -77,6 +160,7 @@ class ReplayReceiptTemplate(ApiModel):
     provider_result: str = Field(alias="providerResult")
     authorization_source: str = Field(alias="authorizationSource")
     verification_results: list[str] = Field(alias="verificationResults")
+    quota_evidence: QuotaEvidence | None = Field(default=None, alias="quotaEvidence")
 
 
 class ReplayScenarioDefinition(ApiModel):
@@ -324,6 +408,7 @@ class RecoveryReceipt(ApiModel):
         alias="approvedRemedyDigest",
         pattern=r"^sha256:[0-9a-f]{64}$",
     )
+    quota_evidence: QuotaEvidence | None = Field(default=None, alias="quotaEvidence")
 
     @model_validator(mode="after")
     def enforce_execution_mode_provenance(self) -> Self:
@@ -345,6 +430,10 @@ class RecoveryReceipt(ApiModel):
             or self.permission_revoked
             or self.scope_closed
             or self.approved_remedy_digest is not None
+            or (
+                self.quota_evidence is not None
+                and self.quota_evidence.source != "recorded_fixture"
+            )
         ):
             raise ValueError(
                 "Replay receipts require completed simulated evidence with no model, "
@@ -364,6 +453,7 @@ class RecoveryReceipt(ApiModel):
                 or self.decision_remedy_digest is None
                 or not self.permission_revoked
                 or not self.scope_closed
+                or self.quota_evidence is not None
             ):
                 raise ValueError(
                     "OpenAI live terminal receipts require model and closed-scope provenance"
@@ -408,6 +498,30 @@ class RecoveryReceipt(ApiModel):
                 raise ValueError(
                     "SDK stub receipts require simulated evidence and no model IDs"
                 )
+            if self.quota_evidence is not None:
+                if (
+                    self.quota_evidence.source != "sdk_simulator"
+                    or self.status != RecoveryStatus.COMPLETED.value
+                    or not self.provider_execution
+                    or self.root_trace_id is not None
+                    or self.sdk_version is None
+                    or self.protocol_version is None
+                    or self.agent_graph_version is None
+                    or self.prompt_tool_schema_hash is None
+                    or self.decision is not None
+                    or self.decision_remedy_digest is not None
+                    or self.execution_count != 1
+                    or not self.provider_dispatch_started
+                    or self.exact_interruption_rejected
+                    or not self.permission_revoked
+                    or not self.scope_closed
+                    or self.approved_remedy_digest is not None
+                ):
+                    raise ValueError(
+                        "Delegated quota SDK receipts require one deterministic simulator "
+                        "execution, zero human decision, and a revoked scope"
+                    )
+                return self
             if (
                 self.decision is None
                 or self.decision_remedy_digest is None

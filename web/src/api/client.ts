@@ -7,6 +7,7 @@ import type {
   DeclineDecisionResponse,
   HotelRemedyTerms,
   PendingApproval,
+  QuotaEvidence,
   RecoveryReceipt,
   RecoverySnapshot,
   ScenarioId,
@@ -574,34 +575,103 @@ function nullableDigest(value: unknown): value is `sha256:${string}` | null {
   return value === null || isSha256Digest(value);
 }
 
-function isRecoveryReceipt(value: unknown): value is RecoveryReceipt {
+function isQuotaEvidence(value: unknown): value is QuotaEvidence {
   if (
     !isRecord(value) ||
     !hasExactKeys(value, [
-      "recoveryId",
-      "executionMode",
-      "status",
-      "simulated",
-      "providerExecution",
-      "modelIds",
-      "rootTraceId",
-      "sdkVersion",
-      "protocolVersion",
-      "agentGraphVersion",
-      "promptToolSchemaHash",
-      "boundary",
-      "providerResult",
-      "authorizationSource",
-      "verificationResults",
-      "decision",
-      "decisionRemedyDigest",
-      "executionCount",
-      "providerDispatchStarted",
-      "exactInterruptionRejected",
-      "permissionRevoked",
-      "scopeClosed",
-      "approvedRemedyDigest",
+      "providerCeilingRpm",
+      "recordedDemandRpm",
+      "temporaryBurstRpm",
+      "region",
+      "durationSeconds",
+      "extraCostMinor",
+      "delegatedAuthorityMaxMinor",
+      "currency",
+      "hardConstraints",
+      "humanInterruptions",
+      "approvals",
+      "providerProofVerified",
+      "grantVerified",
+      "source",
+      "revocationEvidenceKind",
+      "protocolSteps",
+    ]) ||
+    !isRecord(value.hardConstraints) ||
+    !hasExactKeys(value.hardConstraints, [
+      "regionPreserved",
+      "burstCoversDemand",
+      "durationWithinLimit",
+      "baseQuotaUnchanged",
     ])
+  ) {
+    return false;
+  }
+  const sourceIsValid =
+    value.source === "sdk_simulator" || value.source === "recorded_fixture";
+  const revocationMatchesSource =
+    (value.source === "sdk_simulator" &&
+      value.revocationEvidenceKind === "runtime_permission_revoked") ||
+    (value.source === "recorded_fixture" &&
+      value.revocationEvidenceKind === "recorded_revocation_only");
+  return (
+    value.providerCeilingRpm === 1000 &&
+    value.recordedDemandRpm === 1200 &&
+    value.temporaryBurstRpm === 1500 &&
+    value.region === "US" &&
+    value.durationSeconds === 900 &&
+    value.extraCostMinor === 250 &&
+    value.delegatedAuthorityMaxMinor === 500 &&
+    value.currency === "USD" &&
+    value.hardConstraints.regionPreserved === true &&
+    value.hardConstraints.burstCoversDemand === true &&
+    value.hardConstraints.durationWithinLimit === true &&
+    value.hardConstraints.baseQuotaUnchanged === true &&
+    value.humanInterruptions === 0 &&
+    value.approvals === 0 &&
+    value.providerProofVerified === true &&
+    value.grantVerified === true &&
+    sourceIsValid &&
+    revocationMatchesSource &&
+    Array.isArray(value.protocolSteps) &&
+    value.protocolSteps.length === 6 &&
+    value.protocolSteps[0] === "Detect" &&
+    value.protocolSteps[1] === "Prove" &&
+    value.protocolSteps[2] === "Negotiate" &&
+    value.protocolSteps[3] === "Authorize" &&
+    value.protocolSteps[4] === "Execute" &&
+    value.protocolSteps[5] === "Verify & seal"
+  );
+}
+
+function isRecoveryReceipt(value: unknown): value is RecoveryReceipt {
+  const baseKeys = [
+    "recoveryId",
+    "executionMode",
+    "status",
+    "simulated",
+    "providerExecution",
+    "modelIds",
+    "rootTraceId",
+    "sdkVersion",
+    "protocolVersion",
+    "agentGraphVersion",
+    "promptToolSchemaHash",
+    "boundary",
+    "providerResult",
+    "authorizationSource",
+    "verificationResults",
+    "decision",
+    "decisionRemedyDigest",
+    "executionCount",
+    "providerDispatchStarted",
+    "exactInterruptionRejected",
+    "permissionRevoked",
+    "scopeClosed",
+    "approvedRemedyDigest",
+  ];
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, [...baseKeys, "quotaEvidence"])
   ) {
     return false;
   }
@@ -612,7 +682,8 @@ function isRecoveryReceipt(value: unknown): value is RecoveryReceipt {
   const executionModeIsValid =
     value.executionMode === "openai_live" ||
     value.executionMode === "sdk_stub" ||
-    value.executionMode === "replay_fixture";
+      value.executionMode === "replay_fixture";
+  const quotaEvidence = value.quotaEvidence;
   const statusIsTerminal =
     value.status === "completed" ||
     value.status === "closed_without_action" ||
@@ -645,7 +716,9 @@ function isRecoveryReceipt(value: unknown): value is RecoveryReceipt {
     typeof value.permissionRevoked === "boolean" &&
     typeof value.scopeClosed === "boolean" &&
     nullableDigest(value.approvedRemedyDigest);
-  if (!commonFieldsAreValid) {
+  const quotaEvidenceIsValid =
+    quotaEvidence === null || isQuotaEvidence(quotaEvidence);
+  if (!commonFieldsAreValid || !quotaEvidenceIsValid) {
     return false;
   }
 
@@ -660,7 +733,8 @@ function isRecoveryReceipt(value: unknown): value is RecoveryReceipt {
       typeof value.promptToolSchemaHash !== "string" ||
       !value.permissionRevoked ||
       !value.scopeClosed ||
-      value.decisionRemedyDigest === null
+      value.decisionRemedyDigest === null ||
+      quotaEvidence !== null
     ) {
       return false;
     }
@@ -686,6 +760,29 @@ function isRecoveryReceipt(value: unknown): value is RecoveryReceipt {
       value.exactInterruptionRejected === false &&
       value.permissionRevoked === false &&
       value.scopeClosed === false &&
+      value.approvedRemedyDigest === null &&
+      (quotaEvidence === null || quotaEvidence.source === "recorded_fixture")
+    );
+  }
+  if (quotaEvidence !== null) {
+    return (
+      quotaEvidence.source === "sdk_simulator" &&
+      value.status === "completed" &&
+      value.simulated === true &&
+      value.providerExecution === true &&
+      value.rootTraceId === null &&
+      typeof value.sdkVersion === "string" &&
+      value.sdkVersion.length > 0 &&
+      value.protocolVersion === "backchannel.quota.v1" &&
+      value.agentGraphVersion === "backchannel.quota-agent.v1" &&
+      typeof value.promptToolSchemaHash === "string" &&
+      value.decision === null &&
+      value.decisionRemedyDigest === null &&
+      value.executionCount === 1 &&
+      value.providerDispatchStarted === true &&
+      value.exactInterruptionRejected === false &&
+      value.permissionRevoked === true &&
+      value.scopeClosed === true &&
       value.approvedRemedyDigest === null
     );
   }

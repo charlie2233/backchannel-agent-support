@@ -36,7 +36,7 @@ def test_scenarios_are_exactly_the_two_replay_definitions(client: TestClient) ->
     [
         ({"scenarioId": "unknown", "executionMode": "replay_fixture"}, 422),
         ({"scenarioId": "hotel", "executionMode": "openai_live"}, 503),
-        ({"scenarioId": "api-quota", "executionMode": "sdk_stub"}, 422),
+        ({"scenarioId": "api-quota", "executionMode": "sdk_stub"}, 201),
         ({"scenarioId": "hotel", "executionMode": "unknown"}, 422),
     ],
 )
@@ -85,7 +85,11 @@ def test_replay_recovery_snapshot_and_receipt_are_terminal_and_durable(
     ]
     assert events[0].type == "recovery.created"
     assert len(events[1:]) == 6
-    assert events[-1].type == "receipt.simulation_sealed"
+    assert events[-1].type == (
+        "recovery.completed"
+        if scenario_id == "api-quota"
+        else "receipt.simulation_sealed"
+    )
 
     receipt_response = client.get(f"/api/recoveries/{recovery_id}/receipt")
     assert receipt_response.status_code == 200
@@ -110,7 +114,12 @@ def test_replay_recovery_snapshot_and_receipt_are_terminal_and_durable(
     assert receipt["scopeClosed"] is False
     assert receipt["approvedRemedyDigest"] is None
     assert "simulated" in json.dumps(receipt).lower()
-    assert "no model call or provider execution" in receipt["boundary"].lower()
+    expected_boundary = (
+        "no model call, runtime provider dispatch"
+        if scenario_id == "api-quota"
+        else "no model call or provider execution"
+    )
+    assert expected_boundary in receipt["boundary"].lower()
 
     assert client.get(f"/api/recoveries/{uuid4()}/receipt").status_code == 404
 

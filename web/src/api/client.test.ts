@@ -75,6 +75,7 @@ function cancellationReceipt(executionCount = 0) {
     permissionRevoked: true,
     scopeClosed: true,
     approvedRemedyDigest: null,
+    quotaEvidence: null,
   };
 }
 
@@ -123,6 +124,7 @@ function replayRecoveryReceipt() {
     permissionRevoked: false,
     scopeClosed: false,
     approvedRemedyDigest: null,
+    quotaEvidence: null,
   };
 }
 
@@ -154,6 +156,7 @@ function liveApprovedReceipt() {
     permissionRevoked: true,
     scopeClosed: true,
     approvedRemedyDigest: digest,
+    quotaEvidence: null,
   };
 }
 

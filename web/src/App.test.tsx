@@ -169,6 +169,7 @@ function replayReceipt(activeRecoveryId = "77777777-2222-4333-8444-555555555555"
     permissionRevoked: false,
     scopeClosed: false,
     approvedRemedyDigest: null,
+    quotaEvidence: null,
   };
 }
 
@@ -219,6 +220,7 @@ function declinedReceipt(status: "closed_without_action" | "outcome_unknown") {
     permissionRevoked: true,
     scopeClosed: true,
     approvedRemedyDigest: null,
+    quotaEvidence: null,
   };
 }
 
@@ -877,7 +879,7 @@ describe("Backchannel console", () => {
     });
   });
 
-  it("renders exactly two approved scenarios and the ordered replay lifecycle", async () => {
+  it("renders exactly two approved scenarios without inventing a quota run", async () => {
     stubHealthWithUnavailableRecovery();
 
     render(<App />);
@@ -895,29 +897,32 @@ describe("Backchannel console", () => {
       within(scenarioList).getByRole("button", { name: /API quota recovery/i }),
     );
 
-    const lifecycle = screen.getByRole("list", { name: "Recovery lifecycle" });
-    expect(within(lifecycle).getAllByRole("listitem")).toHaveLength(6);
-    expect(within(lifecycle).getAllByRole("listitem").map((item) => item.textContent)).toEqual([
-      expect.stringContaining("Detect"),
-      expect.stringContaining("Prove"),
-      expect.stringContaining("Negotiate"),
-      expect.stringContaining("Authorize"),
-      expect.stringContaining("Execute"),
-      expect.stringContaining("Verify & seal"),
-    ]);
-
-    expect(await screen.findByText("Replay fixture")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("list", { name: "Recovery lifecycle" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryAllByText("Recorded")).toHaveLength(0);
+    expect(
+      screen.getByText("No authoritative recovery evidence is available."),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Replay recorded trace" }),
+    ).toBeVisible();
     expect(screen.queryByText(/GPT-5\.6 agents/i)).not.toBeInTheDocument();
   });
 
-  it("marks every lifecycle step recorded for a completed scenario", () => {
+  it("does not mark quota lifecycle steps recorded before an explicit run", () => {
     stubHealthWithUnavailableRecovery();
     render(<App />);
 
     fireEvent.click(screen.getByRole("button", { name: /API quota recovery/i }));
 
-    const lifecycle = screen.getByRole("list", { name: "Recovery lifecycle" });
-    expect(within(lifecycle).getAllByText("Recorded")).toHaveLength(6);
+    expect(
+      screen.queryByRole("list", { name: "Recovery lifecycle" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryAllByText("Recorded")).toHaveLength(0);
+    expect(
+      screen.getByText("No authoritative recovery evidence is available."),
+    ).toBeVisible();
   });
 
   it.each([

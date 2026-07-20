@@ -93,6 +93,110 @@ function matchingStoredClaim(
 }
 
 function ReceiptInspector({ receipt }: { receipt: RecoveryReceipt }) {
+  if (receipt.quotaEvidence !== undefined && receipt.quotaEvidence !== null) {
+    const evidence = receipt.quotaEvidence;
+    const runtime = evidence.source === "sdk_simulator";
+    const heading = runtime ? "Verified quota recovery" : "Recorded quota recovery";
+    return (
+      <aside
+        className="evidence-inspector receipt-inspector"
+        aria-labelledby="quota-receipt-heading"
+      >
+        <div className="inspector-heading">
+          <p className="eyebrow">
+            {runtime ? "Authoritative simulator receipt" : "Recorded fixture receipt"}
+          </p>
+          <h2 id="quota-receipt-heading">{heading}</h2>
+          <p>{receipt.providerResult}</p>
+        </div>
+        <div className="receipt-verdict">
+          <strong>
+            {runtime ? "Runtime permission revoked" : "Recorded revocation evidence only"}
+          </strong>
+          <p>
+            {runtime
+              ? "One deterministic demo-provider dispatch completed with no human approval."
+              : "No runtime model call, provider dispatch, or permission revocation occurred."}
+          </p>
+        </div>
+        <dl className="evidence-list">
+          <div>
+            <dt>Recovery ID</dt>
+            <dd className="mono">{receipt.recoveryId}</dd>
+          </div>
+          <div>
+            <dt>Provider ceiling</dt>
+            <dd>{evidence.providerCeilingRpm} rpm</dd>
+          </div>
+          <div>
+            <dt>Recorded demand</dt>
+            <dd>{evidence.recordedDemandRpm} rpm</dd>
+          </div>
+          <div>
+            <dt>Temporary burst</dt>
+            <dd>{evidence.temporaryBurstRpm} rpm</dd>
+          </div>
+          <div>
+            <dt>Region</dt>
+            <dd>{evidence.region}</dd>
+          </div>
+          <div>
+            <dt>Duration</dt>
+            <dd>{evidence.durationSeconds} seconds</dd>
+          </div>
+          <div>
+            <dt>Extra cost</dt>
+            <dd>{evidence.extraCostMinor} USD minor units</dd>
+          </div>
+          <div>
+            <dt>Delegated maximum</dt>
+            <dd>{evidence.delegatedAuthorityMaxMinor} USD minor units</dd>
+          </div>
+          <div>
+            <dt>Human interruptions</dt>
+            <dd>{evidence.humanInterruptions} human interruptions</dd>
+          </div>
+          <div>
+            <dt>Approvals</dt>
+            <dd>{evidence.approvals} approvals</dd>
+          </div>
+          <div>
+            <dt>Protocol</dt>
+            <dd>{evidence.protocolSteps.join(" → ")}</dd>
+          </div>
+          <div>
+            <dt>Evidence source</dt>
+            <dd className="mono">{evidence.source}</dd>
+          </div>
+          <div>
+            <dt>Provider proof</dt>
+            <dd>{evidence.providerProofVerified ? "Verified" : "Not verified"}</dd>
+          </div>
+          <div>
+            <dt>Grant verification</dt>
+            <dd>{evidence.grantVerified ? "Verified" : "Not verified"}</dd>
+          </div>
+          <div>
+            <dt>Provider dispatch</dt>
+            <dd>{runtime ? "Yes — one local demo dispatch" : "No — recorded outcome only"}</dd>
+          </div>
+          <div>
+            <dt>Hard constraints</dt>
+            <dd>
+              Region preserved; burst covers demand; duration within limit; base quota unchanged
+            </dd>
+          </div>
+          <div>
+            <dt>Boundary</dt>
+            <dd>{receipt.boundary}</dd>
+          </div>
+        </dl>
+        <ul className="receipt-checks" aria-label="Quota verification evidence">
+          {receipt.verificationResults.map((result) => <li key={result}>{result}</li>)}
+        </ul>
+      </aside>
+    );
+  }
   if (receipt.executionMode === "replay_fixture") {
     return (
       <aside className="evidence-inspector receipt-inspector" aria-labelledby="replay-heading">

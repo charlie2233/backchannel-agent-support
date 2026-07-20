@@ -124,6 +124,35 @@ export interface RecoveryReceipt {
   permissionRevoked: boolean;
   scopeClosed: boolean;
   approvedRemedyDigest: `sha256:${string}` | null;
+  quotaEvidence: QuotaEvidence | null;
+}
+
+export interface QuotaHardConstraints {
+  regionPreserved: true;
+  burstCoversDemand: true;
+  durationWithinLimit: true;
+  baseQuotaUnchanged: true;
+}
+
+export interface QuotaEvidence {
+  providerCeilingRpm: 1000;
+  recordedDemandRpm: 1200;
+  temporaryBurstRpm: 1500;
+  region: "US";
+  durationSeconds: 900;
+  extraCostMinor: 250;
+  delegatedAuthorityMaxMinor: 500;
+  currency: "USD";
+  hardConstraints: QuotaHardConstraints;
+  humanInterruptions: 0;
+  approvals: 0;
+  providerProofVerified: true;
+  grantVerified: true;
+  source: "sdk_simulator" | "recorded_fixture";
+  revocationEvidenceKind:
+    | "runtime_permission_revoked"
+    | "recorded_revocation_only";
+  protocolSteps: typeof lifecycleSteps;
 }
 
 export function isTerminalRecoveryStatus(

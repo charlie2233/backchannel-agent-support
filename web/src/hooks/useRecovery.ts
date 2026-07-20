@@ -140,11 +140,77 @@ function terminalPairIsConsistent(
   snapshot: RecoverySnapshot,
   receipt: RecoveryReceipt,
 ): boolean {
-  return (
+  const snapshotModelIds = snapshot.modelIds;
+  const provenanceIsConsistent =
+    snapshot.rootTraceId !== undefined &&
+    receipt.rootTraceId !== undefined &&
+    snapshot.rootTraceId === receipt.rootTraceId &&
+    Array.isArray(snapshotModelIds) &&
+    snapshotModelIds.length === receipt.modelIds.length &&
+    snapshotModelIds.every(
+      (modelId, index) => modelId === receipt.modelIds[index],
+    ) &&
+    snapshot.sdkVersion !== undefined &&
+    receipt.sdkVersion !== undefined &&
+    snapshot.sdkVersion === receipt.sdkVersion &&
+    snapshot.protocolVersion !== undefined &&
+    receipt.protocolVersion !== undefined &&
+    snapshot.protocolVersion === receipt.protocolVersion &&
+    snapshot.agentGraphVersion !== undefined &&
+    receipt.agentGraphVersion !== undefined &&
+    snapshot.agentGraphVersion === receipt.agentGraphVersion &&
+    snapshot.promptToolSchemaHash !== undefined &&
+    receipt.promptToolSchemaHash !== undefined &&
+    snapshot.promptToolSchemaHash === receipt.promptToolSchemaHash;
+  const baseIsConsistent =
     snapshot.recoveryId === recoveryId &&
     receipt.recoveryId === recoveryId &&
     isTerminalRecoveryStatus(snapshot.status) &&
-    snapshot.status === receipt.status
+    snapshot.status === receipt.status &&
+    snapshot.executionMode === receipt.executionMode &&
+    provenanceIsConsistent;
+  if (!baseIsConsistent) {
+    return false;
+  }
+  const quotaEvidence = receipt.quotaEvidence;
+  const quotaScenario = snapshot.scenarioId === "api-quota";
+  if (quotaScenario !== (quotaEvidence !== null)) {
+    return false;
+  }
+  if (!quotaScenario || quotaEvidence === null) {
+    return true;
+  }
+  if (
+    snapshot.status !== "completed" ||
+    snapshot.currentStep !== 5 ||
+    snapshot.pendingApproval !== null ||
+    snapshot.executionMode === "openai_live"
+  ) {
+    return false;
+  }
+  if (snapshot.executionMode === "sdk_stub") {
+    return (
+      quotaEvidence.source === "sdk_simulator" &&
+      snapshot.rootTraceId === null &&
+      Array.isArray(snapshot.modelIds) &&
+      snapshot.modelIds.length === 0 &&
+      typeof snapshot.sdkVersion === "string" &&
+      snapshot.sdkVersion.length > 0 &&
+      snapshot.protocolVersion === "backchannel.quota.v1" &&
+      snapshot.agentGraphVersion === "backchannel.quota-agent.v1" &&
+      typeof snapshot.promptToolSchemaHash === "string" &&
+      /^[0-9a-f]{64}$/.test(snapshot.promptToolSchemaHash)
+    );
+  }
+  return (
+    quotaEvidence.source === "recorded_fixture" &&
+    snapshot.rootTraceId === null &&
+    Array.isArray(snapshot.modelIds) &&
+    snapshot.modelIds.length === 0 &&
+    snapshot.sdkVersion === null &&
+    snapshot.protocolVersion === null &&
+    snapshot.agentGraphVersion === null &&
+    snapshot.promptToolSchemaHash === null
   );
 }
 

@@ -14,6 +14,7 @@ from server.models import (
 )
 from server.orchestrator import RecoveryOrchestrator
 from server.providers.hotel_simulator import HotelSimulator
+from server.providers.quota_simulator import QuotaGrantResult
 from server.store import (
     APPROVED_RECEIPT_AUTHORIZATION,
     APPROVED_RECEIPT_VERIFICATIONS,
@@ -26,6 +27,114 @@ from server.store import (
 
 APPROVED_DIGEST = f"sha256:{'a' * 64}"
 OTHER_VALID_DIGEST = f"sha256:{'b' * 64}"
+QUOTA_BOUNDARY = (
+    "Deterministic Agents SDK quota model and demo quota adapter only; "
+    "no OpenAI model call or real provider quota change."
+)
+QUOTA_PROVIDER_RESULT = (
+    "Demo quota adapter verified a temporary US burst grant; "
+    "the base quota was unchanged."
+)
+QUOTA_AUTHORIZATION = (
+    "Delegated quota authority covered the temporary grant; "
+    "no human approval was requested."
+)
+QUOTA_VERIFICATIONS = [
+    "Provider proof established the 1000 rpm base ceiling.",
+    "The 1500 rpm temporary burst covered 1200 rpm demand in US for 900 seconds.",
+    "The 250 USD-minor cost stayed within the delegated 500 USD-minor maximum.",
+    "The base quota remained unchanged.",
+    "Runtime permission was revoked after grant verification.",
+]
+
+
+def quota_sdk_receipt(recovery_id: str) -> RecoveryReceipt:
+    return RecoveryReceipt(
+        recoveryId=recovery_id,
+        executionMode=ExecutionMode.SDK_STUB,
+        status="completed",
+        simulated=True,
+        providerExecution=True,
+        modelIds=[],
+        rootTraceId=None,
+        sdkVersion="0.18.3",
+        protocolVersion="backchannel.quota.v1",
+        agentGraphVersion="backchannel.quota-agent.v1",
+        promptToolSchemaHash="c" * 64,
+        boundary=QUOTA_BOUNDARY,
+        providerResult=QUOTA_PROVIDER_RESULT,
+        authorizationSource=QUOTA_AUTHORIZATION,
+        verificationResults=QUOTA_VERIFICATIONS,
+        decision=None,
+        decisionRemedyDigest=None,
+        executionCount=1,
+        providerDispatchStarted=True,
+        exactInterruptionRejected=False,
+        permissionRevoked=True,
+        scopeClosed=True,
+        approvedRemedyDigest=None,
+        quotaEvidence={
+            "providerCeilingRpm": 1000,
+            "recordedDemandRpm": 1200,
+            "temporaryBurstRpm": 1500,
+            "region": "US",
+            "durationSeconds": 900,
+            "extraCostMinor": 250,
+            "delegatedAuthorityMaxMinor": 500,
+            "currency": "USD",
+            "hardConstraints": {
+                "regionPreserved": True,
+                "burstCoversDemand": True,
+                "durationWithinLimit": True,
+                "baseQuotaUnchanged": True,
+            },
+            "humanInterruptions": 0,
+            "approvals": 0,
+            "providerProofVerified": True,
+            "grantVerified": True,
+            "source": "sdk_simulator",
+            "revocationEvidenceKind": "runtime_permission_revoked",
+            "protocolSteps": [
+                "Detect",
+                "Prove",
+                "Negotiate",
+                "Authorize",
+                "Execute",
+                "Verify & seal",
+            ],
+        },
+    )
+
+
+def quota_provider_result() -> QuotaGrantResult:
+    return QuotaGrantResult(
+        dispatch_id="demo-quota-dispatch-atomic",
+        grant_id="temporary-quota-grant-atomic",
+        status="verified",
+        simulated=True,
+        provider_ceiling_rpm=1000,
+        granted_burst_rpm=1500,
+        region="US",
+        duration_seconds=900,
+        extra_cost_minor=250,
+        currency="USD",
+        provider_result=QUOTA_PROVIDER_RESULT,
+    )
+
+
+def quota_execution(recovery_id: str) -> DurableExecution:
+    result = quota_provider_result()
+    return DurableExecution(
+        execution_id=f"quota-execution-{recovery_id}",
+        recovery_id=recovery_id,
+        idempotency_key=f"{recovery_id}:grant-quota-{recovery_id}",
+        status="completed",
+        provider_execution=True,
+        request_digest="d" * 64,
+        tool_call_id=f"grant-quota-{recovery_id}",
+        remedy_digest=None,
+        result_json=result.model_dump(mode="json"),
+    )
 
 
 def make_receipt(
@@ -200,6 +309,155 @@ def test_receipt_execution_mode_mismatch_writes_nothing(tmp_path) -> None:
         )
 
     assert_transition_was_atomic(store, recovery_id, original_event_count=event_count)
+
+
+def test_hotel_recovery_rejects_zero_decision_quota_receipt_atomically(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "hotel-quota-receipt.sqlite3")
+    recovery_id = "hotel-with-quota-evidence"
+    store.create_recovery(
+        recovery_id=recovery_id,
+        scenario_id=ScenarioId.HOTEL,
+        execution_mode=ExecutionMode.SDK_STUB,
+        current_step=0,
+        current_step_summary="Hotel SDK recovery created.",
+    )
+    event_count = len(store.list_events(recovery_id))
+
+    with pytest.raises(ReceiptTransitionError, match="scenario"):
+        store.record_transition(
+            recovery_id,
+            status=RecoveryStatus.COMPLETED,
+            current_step=5,
+            current_step_summary="Must not accept quota evidence.",
+            event_type="recovery.completed",
+            event_data={"phase": "Verify & seal"},
+            receipt=quota_sdk_receipt(recovery_id),
+        )
+
+    assert_transition_was_atomic(store, recovery_id, original_event_count=event_count)
+
+
+def test_api_quota_recovery_rejects_terminal_receipt_without_quota_evidence(
+    tmp_path,
+) -> None:
+    store = SQLiteStore(tmp_path / "quota-missing-evidence.sqlite3")
+    recovery_id = "quota-missing-evidence"
+    store.create_recovery(
+        recovery_id=recovery_id,
+        scenario_id=ScenarioId.API_QUOTA,
+        execution_mode=ExecutionMode.SDK_STUB,
+        current_step=0,
+        current_step_summary="Quota trace started.",
+    )
+    event_count = len(store.list_events(recovery_id))
+    missing_evidence = quota_sdk_receipt(recovery_id).model_copy(
+        update={"quota_evidence": None}
+    )
+
+    with pytest.raises(ReceiptTransitionError, match="quota evidence"):
+        store.record_transition(
+            recovery_id,
+            status=RecoveryStatus.COMPLETED,
+            current_step=5,
+            current_step_summary="Must not seal missing evidence.",
+            event_type="recovery.completed",
+            event_data={"summary": "Must not seal missing evidence."},
+            receipt=missing_evidence,
+        )
+
+    assert_transition_was_atomic(store, recovery_id, original_event_count=event_count)
+
+
+def test_completed_quota_graph_is_persisted_as_one_terminal_transaction(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "quota-terminal-atomic.sqlite3"
+    store = SQLiteStore(database_path)
+    recovery_id = "quota-terminal-atomic"
+    receipt = quota_sdk_receipt(recovery_id)
+
+    snapshot = store.create_completed_quota_recovery(
+        recovery_id=recovery_id,
+        execution=quota_execution(recovery_id),
+        receipt=receipt,
+    )
+
+    assert snapshot.status is RecoveryStatus.COMPLETED
+    assert snapshot.current_step == 5
+    assert store.get_receipt(recovery_id) == receipt
+    events = store.list_events(recovery_id)
+    assert len(events) == 7
+    assert [event.data.get("phase") for event in events[1:]] == [
+        "Detect",
+        "Prove",
+        "Negotiate",
+        "Authorize",
+        "Execute",
+        "Verify & seal",
+    ]
+    assert [event.terminal for event in events] == [
+        False,
+        False,
+        False,
+        False,
+        False,
+        False,
+        True,
+    ]
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM recoveries").fetchone() == (1,)
+        assert connection.execute("SELECT COUNT(*) FROM events").fetchone() == (7,)
+        assert connection.execute("SELECT COUNT(*) FROM executions").fetchone() == (1,)
+        assert connection.execute("SELECT COUNT(*) FROM receipts").fetchone() == (1,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM approval_decisions"
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM pending_approvals"
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT status FROM permission_scopes"
+        ).fetchone() == ("revoked",)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM receipt_provenance_migrations"
+        ).fetchone() == (1,)
+
+
+def test_completed_quota_graph_rolls_back_when_final_validation_fails(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    database_path = tmp_path / "quota-terminal-rollback.sqlite3"
+    store = SQLiteStore(database_path)
+    recovery_id = "quota-terminal-rollback"
+    original_validate = store._validate_durable_receipt_evidence
+
+    def reject_after_writes(connection, receipt, *, phase) -> None:
+        if receipt.quota_evidence is not None:
+            raise ReceiptTransitionError("Injected quota final validation failure")
+        original_validate(connection, receipt, phase=phase)
+
+    monkeypatch.setattr(store, "_validate_durable_receipt_evidence", reject_after_writes)
+
+    with pytest.raises(ReceiptTransitionError, match="Injected quota"):
+        store.create_completed_quota_recovery(
+            recovery_id=recovery_id,
+            execution=quota_execution(recovery_id),
+            receipt=quota_sdk_receipt(recovery_id),
+        )
+
+    with sqlite3.connect(database_path) as connection:
+        for table in (
+            "recoveries",
+            "events",
+            "executions",
+            "receipts",
+            "permission_scopes",
+            "receipt_provenance_migrations",
+        ):
+            assert connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone() == (
+                0,
+            )
 
 
 def test_nonterminal_transition_with_receipt_writes_nothing(tmp_path) -> None:

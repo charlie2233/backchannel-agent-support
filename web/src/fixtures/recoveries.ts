@@ -69,3 +69,41 @@ export const hotelReplayCompletedPresentation = {
     { label: "Receipt", value: "Completed simulated fixture evidence" },
   ],
 } as const satisfies Pick<RecoveryScenario, "summary" | "lifecycleDetails" | "evidence">;
+
+export const quotaSdkCompletedPresentation = {
+  summary: "One local deterministic SDK trace verified a temporary quota grant.",
+  lifecycleDetails: {
+    Detect: "Recorded demand reached 1200 rpm.",
+    Prove: "The simulator proved the provider ceiling was 1000 rpm in US.",
+    Negotiate: "A 1500 rpm temporary burst was selected for 900 seconds.",
+    Authorize: "All constraints fit delegated authority; no human approval occurred.",
+    Execute: "One local demo quota-adapter dispatch completed.",
+    "Verify & seal": "The grant was verified and runtime permission was revoked.",
+  },
+  evidence: [
+    { label: "Source", value: "sdk_simulator", monospace: true },
+    { label: "Model call", value: "None — deterministic SDK model" },
+    { label: "Provider dispatch", value: "One — local demo adapter" },
+    { label: "Human approvals", value: "0" },
+    { label: "Permission", value: "Revoked after verification" },
+  ],
+} as const satisfies Pick<RecoveryScenario, "summary" | "lifecycleDetails" | "evidence">;
+
+export const quotaReplayCompletedPresentation = {
+  summary: "A recorded quota trace was replayed without runtime execution.",
+  lifecycleDetails: {
+    Detect: "Recorded demand of 1200 rpm was replayed.",
+    Prove: "Recorded proof states a 1000 rpm provider ceiling in US.",
+    Negotiate: "Recorded terms contain a 1500 rpm burst for 900 seconds.",
+    Authorize: "Recorded constraints fit delegated authority; no approval occurred.",
+    Execute: "Recorded outcome only; no runtime provider dispatch occurred.",
+    "Verify & seal": "Recorded verification and revocation evidence was sealed.",
+  },
+  evidence: [
+    { label: "Source", value: "recorded_fixture", monospace: true },
+    { label: "Model call", value: "None — recorded replay" },
+    { label: "Provider dispatch", value: "None — recorded replay" },
+    { label: "Human approvals", value: "0" },
+    { label: "Revocation", value: "Recorded evidence only" },
+  ],
+} as const satisfies Pick<RecoveryScenario, "summary" | "lifecycleDetails" | "evidence">;
