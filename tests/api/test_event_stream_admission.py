@@ -1,19 +1,27 @@
 import asyncio
 import json
+import logging
 import re
 import sqlite3
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from unittest.mock import Mock
 
 import pytest
 from fastapi.testclient import TestClient
 from starlette.requests import ClientDisconnect
 
+from server import main as server_main
 from server.config import RuntimeSettings
 from server.events import EventStreamAdmissionController, lease_event_stream
 from server.main import _build_admitted_event_stream_response, create_app
 from server.models import RecoveryStatus
 from server.store import SQLiteStore
+
+_INVALID_EVENT_CURSOR_DETAIL = (
+    "Last-Event-ID must contain only ASCII digits and be between "
+    "0 and 9223372036854775807"
+)
 
 
 def _settings() -> RuntimeSettings:
@@ -32,6 +40,21 @@ def _create_terminal_recovery(client: TestClient) -> str:
     )
     assert response.status_code == 201
     return str(response.json()["recoveryId"])
+
+
+def _stable_security_headers(response) -> dict[str, str]:
+    return {
+        name: response.headers[name]
+        for name in (
+            "cache-control",
+            "content-security-policy",
+            "content-type",
+            "permissions-policy",
+            "referrer-policy",
+            "x-content-type-options",
+            "x-frame-options",
+        )
+    }
 
 
 def test_saturated_stream_returns_exact_finite_control_frame_without_polling(
@@ -93,25 +116,244 @@ def test_authorization_cursor_and_existence_checks_precede_saturated_admission(
 
         foreign_response = foreign.get(
             f"/api/recoveries/{recovery_id}/events",
-            headers={"Last-Event-ID": "not-an-integer"},
+            headers={"Last-Event-ID": str(2**63)},
         )
         absent_response = owner.get(
             "/api/recoveries/11111111-2222-4333-8444-555555555555/events",
-            headers={"Last-Event-ID": "not-an-integer"},
+            headers={"Last-Event-ID": str(2**63)},
+        )
+        duplicate_headers = [
+            ("Last-Event-ID", "0"),
+            ("Last-Event-ID", str(2**63)),
+        ]
+        foreign_duplicate = foreign.get(
+            f"/api/recoveries/{recovery_id}/events",
+            headers=duplicate_headers,
+        )
+        absent_duplicate = owner.get(
+            "/api/recoveries/11111111-2222-4333-8444-555555555555/events",
+            headers=duplicate_headers,
         )
         invalid_cursor = owner.get(
             f"/api/recoveries/{recovery_id}/events",
-            headers={"Last-Event-ID": "not-an-integer"},
+            headers={"Last-Event-ID": str(2**63)},
         )
 
         assert foreign_response.status_code == absent_response.status_code == 404
         assert foreign_response.content == absent_response.content == b'{"detail":"Not found"}'
+        assert _stable_security_headers(foreign_response) == _stable_security_headers(
+            absent_response
+        )
+        assert foreign_duplicate.status_code == absent_duplicate.status_code == 404
+        assert foreign_duplicate.content == absent_duplicate.content == b'{"detail":"Not found"}'
+        assert _stable_security_headers(foreign_duplicate) == _stable_security_headers(
+            absent_duplicate
+        )
         assert invalid_cursor.status_code == 400
-        assert invalid_cursor.json() == {
-            "detail": "Last-Event-ID must be a non-negative integer"
-        }
+        assert invalid_cursor.json() == {"detail": _INVALID_EVENT_CURSOR_DETAIL}
         assert controller.active_count == 1
         held.release()
+
+
+@pytest.mark.parametrize(
+    "last_event_id",
+    [
+        "",
+        " ",
+        "+1",
+        "-0",
+        "-1",
+        "1_0",
+        "true",
+        "not-an-integer",
+        str(2**63),
+    ],
+)
+def test_invalid_cursor_is_rejected_before_stream_admission_or_event_batch_read(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    last_event_id: str,
+) -> None:
+    store = SQLiteStore(tmp_path / "event-stream-invalid-cursor.sqlite3")
+    app = create_app(_settings(), store=store)
+    with TestClient(app) as client:
+        recovery_id = _create_terminal_recovery(client)
+        controller = app.state.event_stream_admission
+        acquire = Mock(side_effect=AssertionError("invalid cursor must not acquire a lease"))
+        read_batch = Mock(side_effect=AssertionError("invalid cursor must not stream events"))
+        monkeypatch.setattr(controller, "try_acquire", acquire)
+        monkeypatch.setattr(store, "read_event_batch", read_batch)
+
+        response = client.get(
+            f"/api/recoveries/{recovery_id}/events",
+            headers={"Last-Event-ID": last_event_id},
+        )
+
+        assert response.status_code == 400
+        assert response.json() == {"detail": _INVALID_EVENT_CURSOR_DETAIL}
+        assert response.headers["content-type"] == "application/json"
+        assert response.headers["cache-control"] == "no-store"
+        assert "x-accel-buffering" not in response.headers
+        assert acquire.call_count == 0
+        assert read_batch.call_count == 0
+        assert controller.active_count == 0
+
+
+def test_cursor_parser_accepts_leading_zeroes_but_rejects_unicode_digits() -> None:
+    assert server_main._parse_event_cursor("0001") == 1
+    assert server_main._parse_event_cursor("0" * 5_000 + str(2**63 - 1)) == 2**63 - 1
+    with pytest.raises(ValueError):
+        server_main._parse_event_cursor("9" * 5_000)
+    for unicode_digits in ("\u0661", "\uff11"):
+        with pytest.raises(ValueError):
+            server_main._parse_event_cursor(unicode_digits)
+
+
+def test_oversized_cursor_does_not_start_a_stream_or_log_an_internal_error(
+    tmp_path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.ERROR)
+    store = SQLiteStore(tmp_path / "event-stream-oversized-cursor.sqlite3")
+    app = create_app(_settings(), store=store)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        recovery_id = _create_terminal_recovery(client)
+        caplog.clear()
+
+        response = client.get(
+            f"/api/recoveries/{recovery_id}/events",
+            headers={"Last-Event-ID": str(2**63)},
+        )
+
+        assert response.status_code == 400
+        assert response.json() == {"detail": _INVALID_EVENT_CURSOR_DETAIL}
+        assert response.headers["content-type"] == "application/json"
+        assert response.headers["cache-control"] == "no-store"
+        assert "x-accel-buffering" not in response.headers
+        assert app.state.event_stream_admission.active_count == 0
+        assert not any(
+            record.getMessage().startswith("request_failed")
+            for record in caplog.records
+        )
+
+
+def test_sqlite_max_cursor_is_accepted_and_releases_its_stream_lease(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "event-stream-max-cursor.sqlite3")
+    app = create_app(_settings(), store=store)
+    with TestClient(app) as client:
+        recovery_id = _create_terminal_recovery(client)
+
+        response = client.get(
+            f"/api/recoveries/{recovery_id}/events",
+            headers={"Last-Event-ID": str(2**63 - 1)},
+        )
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        assert response.headers["cache-control"] == "no-cache"
+        assert response.headers["x-accel-buffering"] == "no"
+        assert response.text == ""
+        assert app.state.event_stream_admission.active_count == 0
+
+
+def test_invalid_authorized_cursor_precedes_targeted_expiry_side_effect(tmp_path) -> None:
+    database_path = tmp_path / "event-stream-cursor-before-expiry.sqlite3"
+    store = SQLiteStore(database_path)
+    app = create_app(_settings(), store=store)
+    with TestClient(app) as client:
+        pending = client.post(
+            "/api/recoveries",
+            json={"scenarioId": "hotel", "executionMode": "sdk_stub"},
+        )
+        assert pending.status_code == 201
+        recovery_id = str(pending.json()["recoveryId"])
+        event_types_before = [event.type for event in store.list_events(recovery_id)]
+        with sqlite3.connect(database_path) as connection:
+            connection.execute(
+                "UPDATE remedies SET expiry = ? WHERE recovery_id = ?",
+                (
+                    (datetime.now(UTC) - timedelta(seconds=1)).isoformat(),
+                    recovery_id,
+                ),
+            )
+
+        response = client.get(
+            f"/api/recoveries/{recovery_id}/events",
+            headers={"Last-Event-ID": "+1"},
+        )
+
+        assert response.status_code == 400
+        assert response.json() == {"detail": _INVALID_EVENT_CURSOR_DETAIL}
+        assert store.get_recovery(recovery_id).status is RecoveryStatus.PENDING_APPROVAL
+        assert [event.type for event in store.list_events(recovery_id)] == event_types_before
+        assert app.state.event_stream_admission.active_count == 0
+
+
+@pytest.mark.parametrize(
+    "cursor_values",
+    [
+        ("0", str(2**63)),
+        (str(2**63), "0"),
+        ("1", "2"),
+    ],
+)
+def test_duplicate_cursor_is_rejected_before_expiry_admission_read_or_log(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    cursor_values: tuple[str, str],
+) -> None:
+    caplog.set_level(logging.ERROR)
+    database_path = tmp_path / "event-stream-duplicate-cursor.sqlite3"
+    store = SQLiteStore(database_path)
+    app = create_app(_settings(), store=store)
+    with TestClient(app) as client:
+        pending = client.post(
+            "/api/recoveries",
+            json={"scenarioId": "hotel", "executionMode": "sdk_stub"},
+        )
+        assert pending.status_code == 201
+        recovery_id = str(pending.json()["recoveryId"])
+        event_types_before = [event.type for event in store.list_events(recovery_id)]
+        with sqlite3.connect(database_path) as connection:
+            connection.execute(
+                "UPDATE remedies SET expiry = ? WHERE recovery_id = ?",
+                (
+                    (datetime.now(UTC) - timedelta(seconds=1)).isoformat(),
+                    recovery_id,
+                ),
+            )
+        controller = app.state.event_stream_admission
+        acquire = Mock(side_effect=AssertionError("duplicate cursor must not acquire a lease"))
+        read_batch = Mock(side_effect=AssertionError("duplicate cursor must not stream events"))
+        original_read_batch = store.read_event_batch
+        monkeypatch.setattr(controller, "try_acquire", acquire)
+        monkeypatch.setattr(store, "read_event_batch", read_batch)
+        caplog.clear()
+
+        response = client.get(
+            f"/api/recoveries/{recovery_id}/events",
+            headers=[
+                ("Last-Event-ID", cursor_values[0]),
+                ("Last-Event-ID", cursor_values[1]),
+            ],
+        )
+
+        assert response.status_code == 400
+        assert response.json() == {"detail": _INVALID_EVENT_CURSOR_DETAIL}
+        assert response.headers["content-type"] == "application/json"
+        assert response.headers["cache-control"] == "no-store"
+        assert "x-accel-buffering" not in response.headers
+        assert store.get_recovery(recovery_id).status is RecoveryStatus.PENDING_APPROVAL
+        assert acquire.call_count == 0
+        assert read_batch.call_count == 0
+        assert controller.active_count == 0
+        persisted_events, _status = original_read_batch(recovery_id)
+        assert [event.type for event in persisted_events] == event_types_before
+        assert not any(
+            record.getMessage().startswith("request_failed")
+            for record in caplog.records
+        )
 
 
 def test_owner_reacquires_after_terminal_stream_and_replay_cursor_is_unchanged(

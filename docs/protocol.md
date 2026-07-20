@@ -29,10 +29,19 @@ restart; rotating the secret intentionally fails closed.
 
 ## Bounded event-stream admission
 
-After the session-access check, targeted expiry sweep, cursor validation, and existence check,
-the SSE route atomically attempts a process-local admission. Defaults are 16 active streams in
-the application process, four for one recovery, and a five-second retry. Acquisition never
-waits on a semaphore and rejected requests never begin durable-ledger polling.
+After the session-access check and cursor validation, the SSE route runs its targeted expiry
+sweep and existence check, then atomically attempts a process-local admission. Defaults are 16
+active streams in the application process, four for one recovery, and a five-second retry.
+Acquisition never waits on a semaphore and rejected requests never begin durable-ledger
+polling.
+
+`Last-Event-ID` is optional and may occur at most once. When present, its lexical form is one or
+more ASCII digits (`[0-9]+`); leading zeroes are accepted, but signs, whitespace, separators,
+booleans, and Unicode digits are not. Its numeric value must be in SQLite's signed integer cursor
+range, `0..9223372036854775807`. An authorized invalid or duplicate cursor receives JSON `400`
+with the stable detail `Last-Event-ID must contain only ASCII digits and be between 0 and
+9223372036854775807`, `Cache-Control: no-store`, and no SSE buffering headers. This validation
+occurs before expiry mutation, event-stream admission, and durable event polling.
 
 At capacity the HTTP response remains `200 text/event-stream`, preserves `no-cache` and
 `X-Accel-Buffering: no`, emits no event ID, recovery/session value, count, or limit, and closes

@@ -22,13 +22,16 @@ The browser validates the public response shape but never invents provenance or 
 state. A created recovery returns a typed snapshot. Its `recoveryId` selects one persisted,
 ordered event stream; native `EventSource` reconnects with `Last-Event-ID`, and the server
 replays later rows before waiting for new commits. Terminal events close the stream, after
-which the UI fetches the authoritative snapshot and receipt.
+which the UI fetches the authoritative snapshot and receipt. The authorized cursor header may
+occur at most once and accepts ASCII digits only in the SQLite-safe numeric range
+`0..9223372036854775807`; leading zeroes are allowed.
 
 Event delivery uses a lock-protected, fail-fast admission controller. The defaults admit at
 most 16 polling loops in this application process and at most four for one recovery. Session
-authorization, targeted consent expiry, `Last-Event-ID` validation, and recovery existence are
-checked before admission, so saturation changes neither the generic foreign/unknown 404 nor an
-authorized invalid-cursor 400. A rejected connection receives one finite `stream.capacity`
+authorization runs first; cursor validation then precedes targeted consent expiry, recovery
+existence confirmation, and stream admission. Saturation therefore changes neither the generic
+foreign/unknown 404 nor an authorized invalid-cursor 400, and an invalid authorized cursor
+cannot mutate lifecycle state. A rejected connection receives one finite `stream.capacity`
 control event with a five-second native retry field and then closes; it never enters the polling
 loop. The browser validates that exact control envelope, presents its message as transient, and
 leaves native `EventSource` reconnection active. A later durable recovery event clears the
@@ -76,12 +79,13 @@ while another request or worker might still be resolving it.
 
 Untouched SDK/live hotel consent is also durable lifecycle state. A bounded SQLite
 `BEGIN IMMEDIATE` sweep runs at startup, on the existing maintenance cadence, and before new
-recovery cleanup. Authorized snapshot, initial SSE, receipt, and decision requests first sweep
-their exact target after the session-access check. Expiry and decision claims therefore
-serialize as competing writers: a committed claim is never expired, while an expiration that
-commits first prevents a later claim. Expiration seals one `recovery.expired` event and receipt,
-marks the pending envelope and remedy expired, and releases the matching live admission with
-`COALESCE` so cooldown and aggregate usage evidence remain intact.
+recovery cleanup. Authorized snapshot, receipt, and decision requests sweep their exact target
+after the session-access check; initial SSE does so after both access and cursor validation.
+Expiry and decision claims therefore serialize as competing writers: a committed claim is never
+expired, while an expiration that commits first prevents a later claim. Expiration seals one
+`recovery.expired` event and receipt, marks the pending envelope and remedy expired, and releases
+the matching live admission with `COALESCE` so cooldown and aggregate usage evidence remain
+intact.
 
 ## Runtime provenance and trust boundary
 

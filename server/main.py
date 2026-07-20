@@ -6,11 +6,11 @@ from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from pathlib import Path
-from typing import Annotated, Any, cast
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 from agents.models.interface import ModelProvider
-from fastapi import FastAPI, Header, HTTPException, Request, Response, status
+from fastapi import FastAPI, HTTPException, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -260,6 +260,70 @@ _EVENT_STREAM_HEADERS = {
     "Cache-Control": "no-cache",
     "X-Accel-Buffering": "no",
 }
+_MAX_EVENT_CURSOR = 2**63 - 1
+_MAX_EVENT_CURSOR_TEXT = str(_MAX_EVENT_CURSOR)
+_EVENT_CURSOR_PATTERN = re.compile(r"^[0-9]+$")
+_INVALID_EVENT_CURSOR_DETAIL = (
+    "Last-Event-ID must contain only ASCII digits and be between "
+    f"0 and {_MAX_EVENT_CURSOR_TEXT}"
+)
+_EVENT_CURSOR_HEADER_DESCRIPTION = (
+    "Optional durable event cursor. When present, use ASCII decimal digits only "
+    f"and a value from 0 through {_MAX_EVENT_CURSOR_TEXT}. Authorization is "
+    "evaluated before this header, which must occur at most once."
+)
+_EVENT_STREAM_RESPONSES: dict[int | str, dict[str, Any]] = {
+    **_PRIVATE_NOT_FOUND_RESPONSE,
+    status.HTTP_400_BAD_REQUEST: {
+        "description": "The authorized event cursor is outside the supported contract.",
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["detail"],
+                    "properties": {
+                        "detail": {
+                            "type": "string",
+                            "enum": [_INVALID_EVENT_CURSOR_DETAIL],
+                        }
+                    },
+                }
+            }
+        },
+    },
+}
+_EVENT_STREAM_OPENAPI_EXTRA: dict[str, Any] = {
+    "parameters": [
+        {
+            "description": _EVENT_CURSOR_HEADER_DESCRIPTION,
+            "in": "header",
+            "name": "Last-Event-ID",
+            "required": False,
+            "schema": {
+                "pattern": _EVENT_CURSOR_PATTERN.pattern,
+                "type": "string",
+            },
+        }
+    ]
+}
+
+
+def _parse_event_cursor(last_event_id: str | None) -> int:
+    """Parse an SSE cursor without exceeding SQLite's signed integer domain."""
+
+    if last_event_id is None:
+        return 0
+    if _EVENT_CURSOR_PATTERN.fullmatch(last_event_id) is None:
+        raise ValueError("Event cursor must contain only ASCII decimal digits")
+    normalized = last_event_id.lstrip("0") or "0"
+    if (
+        len(normalized) > len(_MAX_EVENT_CURSOR_TEXT)
+        or len(normalized) == len(_MAX_EVENT_CURSOR_TEXT)
+        and normalized > _MAX_EVENT_CURSOR_TEXT
+    ):
+        raise ValueError("Event cursor exceeds SQLite's signed integer range")
+    return int(normalized)
 
 
 def _inline_local_schema_definitions(schema: dict[str, Any]) -> dict[str, Any]:
@@ -989,34 +1053,30 @@ def create_app(
         status_code=status.HTTP_200_OK,
         response_class=_LeaseReleasingStreamingResponse,
         description=_EVENT_STREAM_DESCRIPTION,
-        responses=_PRIVATE_NOT_FOUND_RESPONSE,
+        responses=_EVENT_STREAM_RESPONSES,
+        openapi_extra=_EVENT_STREAM_OPENAPI_EXTRA,
     )
     async def recovery_events(
         recovery_id: UUID,
         request: Request,
-        last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
     ) -> Response:
         recovery_key = str(recovery_id)
         _require_recovery_access(request, recovery_store, recovery_key)
+        try:
+            cursor_values = request.headers.getlist("last-event-id")
+            if len(cursor_values) > 1:
+                raise ValueError("Event cursor header must occur at most once")
+            cursor = _parse_event_cursor(cursor_values[0] if cursor_values else None)
+        except ValueError as error:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=_INVALID_EVENT_CURSOR_DETAIL,
+            ) from error
         expire_pending_approvals(
             recovery_store,
             batch_size=1,
             recovery_id=recovery_key,
         )
-        cursor = 0
-        if last_event_id is not None:
-            try:
-                cursor = int(last_event_id)
-            except ValueError as error:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Last-Event-ID must be a non-negative integer",
-                ) from error
-            if cursor < 0:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Last-Event-ID must be a non-negative integer",
-                )
         try:
             recovery_store.get_recovery(recovery_key)
         except RecoveryNotFoundError as error:

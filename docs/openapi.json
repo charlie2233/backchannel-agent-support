@@ -1075,19 +1075,13 @@
             }
           },
           {
+            "description": "Optional durable event cursor. When present, use ASCII decimal digits only and a value from 0 through 9223372036854775807. Authorization is evaluated before this header, which must occur at most once.",
             "in": "header",
             "name": "Last-Event-ID",
             "required": false,
             "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Last-Event-Id"
+              "pattern": "^[0-9]+$",
+              "type": "string"
             }
           }
         ],
@@ -1101,6 +1095,28 @@
               }
             },
             "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "detail": {
+                      "enum": [
+                        "Last-Event-ID must contain only ASCII digits and be between 0 and 9223372036854775807"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "detail"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The authorized event cursor is outside the supported contract."
           },
           "404": {
             "description": "Recovery not found."

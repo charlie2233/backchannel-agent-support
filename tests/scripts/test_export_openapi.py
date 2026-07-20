@@ -176,6 +176,54 @@ def test_event_stream_success_response_is_documented_as_sse() -> None:
     assert "application/json" not in content
 
 
+def test_event_stream_documents_exact_cursor_grammar_range_and_error() -> None:
+    schema = json.loads(_exporter().render_openapi())
+
+    operation = schema["paths"]["/api/recoveries/{recovery_id}/events"]["get"]
+    cursor_parameters = [
+        parameter
+        for parameter in operation["parameters"]
+        if parameter["in"] == "header" and parameter["name"] == "Last-Event-ID"
+    ]
+    assert cursor_parameters == [
+        {
+            "description": (
+                "Optional durable event cursor. When present, use ASCII decimal digits "
+                "only and a value from 0 through 9223372036854775807. Authorization is "
+                "evaluated before this header, which must occur at most once."
+            ),
+            "in": "header",
+            "name": "Last-Event-ID",
+            "required": False,
+            "schema": {
+                "pattern": "^[0-9]+$",
+                "type": "string",
+            },
+        }
+    ]
+    assert operation["responses"]["400"] == {
+        "description": "The authorized event cursor is outside the supported contract.",
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["detail"],
+                    "properties": {
+                        "detail": {
+                            "type": "string",
+                            "enum": [
+                                "Last-Event-ID must contain only ASCII digits and be "
+                                "between 0 and 9223372036854775807"
+                            ],
+                        }
+                    },
+                }
+            }
+        },
+    }
+
+
 def test_export_never_imports_global_app_or_mutates_caller_database(
     tmp_path: Path,
     monkeypatch,

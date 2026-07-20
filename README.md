@@ -76,6 +76,11 @@ model call nor a provider dispatch.
   five-second native retry interval; authorized streams retain durable replay, heartbeat, and
   terminal semantics. These counters are process-local, not a cross-worker or cross-container
   concurrency claim, and the packaged launcher deliberately runs one worker.
+- An authorized SSE `Last-Event-ID` may occur at most once and accepts ASCII digits only in the
+  SQLite-safe range `0..9223372036854775807` (leading zeroes are allowed). Invalid or duplicate
+  cursors return a stable JSON `400` before expiry changes, stream admission, or durable-ledger
+  polling; foreign and absent recoveries still receive the same generic `404` before cursor
+  parsing.
 - Decision resume is signed-session scoped and preserves the demo adapter's at-most-one dispatch
   boundary. It is not an original-tab capability or an at-most-one live-model-run claim, and an
   expired unfinished claim still fails closed without inventing a terminal outcome.
