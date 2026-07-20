@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import {
   createRecovery,
@@ -6,7 +6,10 @@ import {
   postDecision,
   PublicApiError,
 } from "./api/client";
+import { AppHeader } from "./components/AppHeader";
+import { ConsentSheet } from "./components/ConsentSheet";
 import { EvidenceInspector } from "./components/EvidenceInspector";
+import { EventLedger } from "./components/EventLedger";
 import { Lifecycle } from "./components/Lifecycle";
 import { ProvenanceStrip } from "./components/ProvenanceStrip";
 import { ScenarioRail } from "./components/ScenarioRail";
@@ -73,17 +76,16 @@ function recoveryStateLabel(snapshot: RecoverySnapshot | null, scenario: Recover
   return snapshot.pendingApproval === null ? "Decision in progress" : "Awaiting approval";
 }
 
-function environmentLabel(mode: ExecutionMode | null): string {
-  switch (mode) {
-    case "openai_live":
-      return "OpenAI live workspace";
-    case "sdk_stub":
-      return "SDK QA workspace";
-    case "replay_fixture":
-      return "Replay workspace";
-    case null:
-      return "Runtime pending";
-  }
+export function recoveryStatusAnnouncement(
+  stateLabel: string,
+  consentReviewAvailable: boolean,
+  consentTransitionAnnouncement: string,
+): string {
+  const transitionCopy =
+    consentReviewAvailable && consentTransitionAnnouncement !== ""
+      ? ` ${consentTransitionAnnouncement}`
+      : "";
+  return `Recovery status: ${stateLabel}.${transitionCopy}`;
 }
 
 function safeLiveStartError(error: unknown): Error {
@@ -123,6 +125,27 @@ function storedAutomaticDecisionRetry(
   };
 }
 
+function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState(() =>
+    typeof window !== "undefined" && typeof window.matchMedia === "function"
+      ? window.matchMedia(query).matches
+      : false,
+  );
+
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+      return;
+    }
+    const media = window.matchMedia(query);
+    const update = () => setMatches(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, [query]);
+
+  return matches;
+}
+
 export default function App() {
   const [activeId, setActiveId] = useState<ScenarioId>("hotel");
   const [health, setHealth] = useState<HealthStatus | null>(null);
@@ -142,6 +165,10 @@ export default function App() {
     useState<"sdk" | "replay" | null>(null);
   const [liveStartError, setLiveStartError] = useState<Error | null>(null);
   const [quotaStartError, setQuotaStartError] = useState<Error | null>(null);
+  const [consentSheetOpen, setConsentSheetOpen] = useState(false);
+  const [, setPendingDecisionRevision] = useState(0);
+  const [consentTransitionAnnouncement, setConsentTransitionAnnouncement] =
+    useState("");
   const [automaticDecisionRetry, setAutomaticDecisionRetry] =
     useState<AutomaticDecisionRetry | null>(() =>
       storedAutomaticDecisionRetry(hotelRecoveryId),
@@ -153,6 +180,12 @@ export default function App() {
   const quotaActionInFlight = useRef(false);
   const quotaSelectionGeneration = useRef(0);
   const quotaActionController = useRef<AbortController | null>(null);
+  const consentReviewTrigger = useRef<HTMLAnchorElement>(null);
+  const recoveryFocusTarget = useRef<HTMLHeadingElement>(null);
+  const compactLayout = useMediaQuery("(max-width: 759px)");
+  const previousCompactLayout = useRef(compactLayout);
+  const focusPreviousCompactLayout = useRef(compactLayout);
+  const previousConsentReviewAvailable = useRef<boolean | null>(null);
 
   const recovery = useRecovery(hotelRecoveryId, {
     initialSnapshot:
@@ -312,7 +345,9 @@ export default function App() {
       snapshot.status === receipt.status &&
       isTerminalRecoveryStatus(snapshot.status)
     ) {
-      clearPendingDecisionForRecovery(snapshot.recoveryId);
+      if (clearPendingDecisionForRecovery(snapshot.recoveryId)) {
+        setPendingDecisionRevision((revision) => revision + 1);
+      }
     }
   }, [recovery.receipt, recovery.snapshot]);
 
@@ -575,25 +610,68 @@ export default function App() {
     activeSnapshot.status === "pending_approval" &&
     activeSnapshot.pendingApproval !== null;
 
+  const activeEvents = activeId === "hotel" ? recovery.events : quotaRecovery.events;
+  const activeRecoveryStateLabel = recoveryStateLabel(
+    activeSnapshot,
+    activeScenarioView,
+  );
+  const activeElement =
+    typeof document !== "undefined" &&
+    document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+  const consentTransitionOriginHadFocus =
+    activeElement !== null &&
+    (activeElement === consentReviewTrigger.current ||
+      activeElement.closest(".consent-dialog") !== null ||
+      activeElement.closest(".evidence-inspector--consent") !== null);
+  const shouldFocusRecoveryAfterConsentTransition =
+    previousConsentReviewAvailable.current === true &&
+    consentTransitionOriginHadFocus &&
+    (!consentReviewAvailable ||
+      focusPreviousCompactLayout.current !== compactLayout);
+
+  useLayoutEffect(() => {
+    if (shouldFocusRecoveryAfterConsentTransition) {
+      recoveryFocusTarget.current?.focus();
+    }
+    previousConsentReviewAvailable.current = consentReviewAvailable;
+    focusPreviousCompactLayout.current = compactLayout;
+  }, [
+    compactLayout,
+    consentReviewAvailable,
+    shouldFocusRecoveryAfterConsentTransition,
+  ]);
+
+  useEffect(() => {
+    if (
+      previousCompactLayout.current !== compactLayout &&
+      consentReviewAvailable
+    ) {
+      setConsentTransitionAnnouncement(
+        compactLayout
+          ? "Consent review is available from Review exact remedy."
+          : "Consent review is available in the evidence inspector.",
+      );
+    }
+    previousCompactLayout.current = compactLayout;
+    if (!compactLayout || !consentReviewAvailable) {
+      setConsentSheetOpen(false);
+    }
+    if (!consentReviewAvailable) {
+      setConsentTransitionAnnouncement("");
+    }
+  }, [compactLayout, consentReviewAvailable]);
+
   return (
     <div className="app-frame">
-      <header className="top-bar">
-        <a className="brand" href="#workspace" aria-label="Backchannel console home">
-          <span className="brand-mark" aria-hidden="true">
-            <span />
-            <span />
-          </span>
-          <span>Backchannel</span>
-        </a>
-        <div className="top-context">
-          <span>Operational recovery console</span>
-          <span className="environment-badge">
-            {environmentLabel(activeExecutionMode)}
-          </span>
-        </div>
-      </header>
+      <div
+        className="app-content"
+        inert={compactLayout && consentSheetOpen && consentReviewAvailable}
+      >
+        <AppHeader executionMode={activeExecutionMode} />
 
-      <div className="console-shell" id="workspace">
+        <div className="console-shell" id="workspace">
         <ScenarioRail
           scenarios={scenarioRailScenarios}
           activeId={activeId}
@@ -673,15 +751,42 @@ export default function App() {
           <section className="recovery-heading" aria-labelledby="recovery-title">
             <div>
               <p className="eyebrow">Active recovery</p>
-              <h1 id="recovery-title">{activeScenarioView.title}</h1>
+              <h1 id="recovery-title" ref={recoveryFocusTarget} tabIndex={-1}>
+                {activeScenarioView.title}
+              </h1>
               {consentReviewAvailable ? (
-                <a className="consent-review-link" href="#approval-heading">
+                <a
+                  className="consent-review-link"
+                  href="#approval-heading"
+                  ref={consentReviewTrigger}
+                  onClick={(event) => {
+                    if (!compactLayout) {
+                      return;
+                    }
+                    event.preventDefault();
+                    setConsentSheetOpen(true);
+                    setConsentTransitionAnnouncement(
+                      "Approve exact remedy dialog opened.",
+                    );
+                  }}
+                >
                   Review exact remedy
                 </a>
               ) : null}
             </div>
-            <span className="recovery-state">
-              {recoveryStateLabel(activeSnapshot, activeScenarioView)}
+            <span className="recovery-state" aria-hidden="true">
+              {activeRecoveryStateLabel}
+            </span>
+            <span
+              className="visually-hidden"
+              role="status"
+              aria-label="Recovery status updates"
+            >
+              {recoveryStatusAnnouncement(
+                activeRecoveryStateLabel,
+                consentReviewAvailable,
+                consentTransitionAnnouncement,
+              )}
             </span>
           </section>
           {contentPending ? (
@@ -694,18 +799,41 @@ export default function App() {
                 "Choose an available execution mode to start this recovery."}
             </section>
           ) : (
-            <Lifecycle scenario={activeScenarioView} />
+            <>
+              <Lifecycle scenario={activeScenarioView} />
+              <EventLedger events={activeEvents} compact={compactLayout} />
+            </>
           )}
         </main>
 
         {contentPending ? (
-          <aside className="evidence-inspector" aria-live="polite" aria-busy="true">
+          <aside className="evidence-inspector" aria-busy="true">
             Loading authoritative evidence…
           </aside>
         ) : contentUnavailable ? (
-          <aside className="evidence-inspector" aria-live="polite">
+          <aside className="evidence-inspector">
             No authoritative recovery evidence is available.
           </aside>
+        ) : consentReviewAvailable && activeSnapshot !== null ? (
+          <ConsentSheet
+            snapshot={activeSnapshot}
+            displayMode={compactLayout ? "dialog" : "inline"}
+            open={!compactLayout || consentSheetOpen}
+            onClose={(reason) => {
+              setConsentSheetOpen(false);
+              setConsentTransitionAnnouncement(
+                reason === "escape"
+                  ? "Approve exact remedy dialog closed with Escape."
+                  : "Approve exact remedy dialog closed.",
+              );
+            }}
+            triggerRef={consentReviewTrigger}
+            fallbackFocusRef={recoveryFocusTarget}
+            scenarioTitle={activeScenarioView.title}
+            runtimePresentation={presentation}
+            runtimeHealthError={healthError}
+            externalSubmittingAction={automaticSubmittingAction}
+          />
         ) : (
           <EvidenceInspector
             scenario={activeScenarioView}
@@ -714,6 +842,7 @@ export default function App() {
             externalSubmittingAction={automaticSubmittingAction}
           />
         )}
+        </div>
       </div>
     </div>
   );

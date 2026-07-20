@@ -26,7 +26,11 @@ export function Lifecycle({ scenario }: LifecycleProps) {
                 ? "current"
                 : "upcoming";
           return (
-            <li className={`lifecycle-item lifecycle-item--${state}`} key={step}>
+            <li
+              className={`lifecycle-item lifecycle-item--${state}`}
+              key={step}
+              aria-current={state === "current" ? "step" : undefined}
+            >
               <div className="step-marker" aria-hidden="true">
                 {index + 1}
               </div>
