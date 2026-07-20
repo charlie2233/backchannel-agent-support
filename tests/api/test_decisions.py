@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from server.config import RuntimeSettings
 from server.main import create_app
+from server.models import ApprovalDecisionRequest
 from server.providers.hotel_simulator import HotelSimulator
 from server.store import SQLiteStore
 
@@ -59,6 +60,24 @@ def create_sdk_recovery(client: TestClient) -> dict[str, object]:
     assert snapshot["status"] == "pending_approval"
     assert snapshot["pendingApproval"]["executionStarted"] is False
     return snapshot
+
+
+def claim_without_continuing(
+    store: SQLiteStore,
+    snapshot: dict[str, object],
+    *,
+    action: str = "approve",
+    client_decision_id: str = "decision-resume-001",
+) -> dict[str, str]:
+    payload = {
+        **decision_payload(snapshot, client_decision_id=client_decision_id),
+        "action": action,
+    }
+    store.claim_approval_decision(
+        str(snapshot["recoveryId"]),
+        ApprovalDecisionRequest.model_validate(payload),
+    )
+    return payload
 
 
 def _decision_process_worker(

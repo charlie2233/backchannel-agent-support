@@ -98,6 +98,32 @@
         "title": "ApprovalDecisionResponse",
         "type": "object"
       },
+      "ClaimedDecisionView": {
+        "additionalProperties": false,
+        "description": "Minimal public evidence for one unfinished durable decision claim.",
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/DecisionAction"
+          },
+          "expiry": {
+            "format": "date-time",
+            "title": "Expiry",
+            "type": "string"
+          },
+          "remedyDigest": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Remedydigest",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "remedyDigest",
+          "expiry"
+        ],
+        "title": "ClaimedDecisionView",
+        "type": "object"
+      },
       "CreateRecoveryRequest": {
         "additionalProperties": false,
         "properties": {
@@ -122,6 +148,65 @@
         ],
         "title": "DecisionAction",
         "type": "string"
+      },
+      "DecisionResumeResponse": {
+        "additionalProperties": false,
+        "description": "Minimal exact-claim result returned to a browser that lacks the claim token.",
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/DecisionAction"
+          },
+          "approvedRemedyDigest": {
+            "anyOf": [
+              {
+                "pattern": "^sha256:[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approvedremedydigest"
+          },
+          "executionStarted": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Executionstarted"
+          },
+          "recoveryId": {
+            "title": "Recoveryid",
+            "type": "string"
+          },
+          "remedyDigest": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Remedydigest",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "completed",
+              "closed_without_action",
+              "outcome_unknown"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "recoveryId",
+          "remedyDigest",
+          "status",
+          "executionStarted"
+        ],
+        "title": "DecisionResumeResponse",
+        "type": "object"
       },
       "DemoResetResponse": {
         "additionalProperties": false,
@@ -509,6 +594,16 @@
       "RecoverySnapshot": {
         "additionalProperties": false,
         "properties": {
+          "claimedDecision": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ClaimedDecisionView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "createdAt": {
             "format": "date-time",
             "title": "Createdat",
@@ -840,6 +935,63 @@
           }
         },
         "summary": "Approve Recovery"
+      }
+    },
+    "/api/recoveries/{recovery_id}/decisions/resume": {
+      "post": {
+        "description": "Requires the signed opaque demo session issued when the recovery was created. Missing, expired, tampered, unrelated, and unknown sessions receive the same generic not-found response. Explicitly continues only the existing durable decision claim; the empty request cannot create or alter consent.",
+        "operationId": "resume_recovery_decision_api_recoveries__recovery_id__decisions_resume_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "recovery_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Recovery Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "maxProperties": 0,
+                "properties": {},
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DecisionResumeResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "Recovery not found."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Resume Recovery Decision"
       }
     },
     "/api/recoveries/{recovery_id}/events": {

@@ -8,7 +8,9 @@ import {
   createRecovery,
   getRecovery,
   getReceipt,
+  isRecoverySnapshot,
   postDecision,
+  postDecisionResume,
 } from "./client";
 
 const expectedMessages = {
@@ -181,6 +183,116 @@ describe("postDecision public errors", () => {
   );
 });
 
+describe("claimed decision and explicit resume contracts", () => {
+  const recoveryId = "11111111-2222-4333-8444-555555555555";
+  const claimedDecision = {
+    action: "approve" as const,
+    remedyDigest: `sha256:${"a".repeat(64)}` as `sha256:${string}`,
+    expiry: "2026-09-01T18:45:30Z",
+  };
+  const snapshot = {
+    recoveryId,
+    scenarioId: "hotel",
+    executionMode: "sdk_stub",
+    modelIds: [],
+    rootTraceId: "qa_trace_0123456789abcdef0123456789abcdef",
+    status: "pending_approval",
+    currentStep: 3,
+    currentStepSummary: "Exact approve claimed; outcome pending.",
+    createdAt: "2026-07-20T01:00:00Z",
+    updatedAt: "2026-07-20T01:00:01Z",
+    pendingApproval: null,
+    claimedDecision,
+  };
+
+  it("strictly validates the minimal claimedDecision snapshot", () => {
+    expect(isRecoverySnapshot(snapshot)).toBe(true);
+    expect(
+      isRecoverySnapshot({
+        ...snapshot,
+        claimedDecision: { ...claimedDecision, clientDecisionId: "hidden" },
+      }),
+    ).toBe(false);
+    expect(
+      isRecoverySnapshot({
+        ...snapshot,
+        claimedDecision: { ...claimedDecision, remedyDigest: `sha256:${"A".repeat(64)}` },
+      }),
+    ).toBe(false);
+    expect(
+      isRecoverySnapshot({
+        ...snapshot,
+        claimedDecision: { ...claimedDecision, expiry: "2026-09-01T11:45:30-07:00" },
+      }),
+    ).toBe(false);
+    expect(
+      isRecoverySnapshot({ ...snapshot, pendingApproval: {} }),
+    ).toBe(false);
+    expect(
+      isRecoverySnapshot({
+        ...snapshot,
+        executionMode: "replay_fixture",
+        modelIds: [],
+        rootTraceId: null,
+      }),
+    ).toBe(false);
+  });
+
+  it("posts exact empty JSON and accepts the matching strict response", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          action: "approve",
+          recoveryId,
+          remedyDigest: claimedDecision.remedyDigest,
+          status: "completed",
+          approvedRemedyDigest: claimedDecision.remedyDigest,
+          executionStarted: true,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(postDecisionResume(recoveryId, claimedDecision)).resolves.toEqual(
+      expect.objectContaining({ action: "approve", remedyDigest: claimedDecision.remedyDigest }),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      `/api/recoveries/${recoveryId}/decisions/resume`,
+      expect.objectContaining({ method: "POST", body: "{}" }),
+    );
+  });
+
+  it.each([
+    { changed: { action: "decline" }, label: "action mismatch" },
+    { changed: { recoveryId: "99999999-2222-4333-8444-555555555555" }, label: "recovery mismatch" },
+    { changed: { remedyDigest: `sha256:${"b".repeat(64)}` }, label: "digest mismatch" },
+    { changed: { clientDecisionId: "must-not-expand" }, label: "extra key" },
+  ])("rejects a resume response with $label", async ({ changed }) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            action: "approve",
+            recoveryId,
+            remedyDigest: claimedDecision.remedyDigest,
+            status: "completed",
+            approvedRemedyDigest: claimedDecision.remedyDigest,
+            executionStarted: true,
+            ...changed,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      ),
+    );
+
+    await expect(postDecisionResume(recoveryId, claimedDecision)).rejects.toThrow(
+      /resume response/i,
+    );
+  });
+});
+
 describe("getReceipt runtime validation", () => {
   const validReceipt = {
     recoveryId: "11111111-2222-4333-8444-555555555555",
@@ -238,6 +350,7 @@ describe("getReceipt runtime validation", () => {
             createdAt: "2026-07-19T12:00:00Z",
             updatedAt: "2026-07-19T12:00:01Z",
             pendingApproval: null,
+            claimedDecision: null,
           }),
           { status: 201, headers: { "Content-Type": "application/json" } },
         ),
@@ -337,6 +450,7 @@ describe("recovery response correlation", () => {
     createdAt: "2026-07-19T12:00:00Z",
     updatedAt: "2026-07-19T12:00:01Z",
     pendingApproval: null,
+    claimedDecision: null,
   };
 
   it("rejects a shape-valid GET response for a different recovery", async () => {

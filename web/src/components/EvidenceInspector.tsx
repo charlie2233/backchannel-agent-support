@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 
-import { DecisionCapacityError, postDecision } from "../api/client";
+import { DecisionCapacityError, postDecision, postDecisionResume } from "../api/client";
 import type { RecoveryEvent } from "../api/events";
 import type {
   DecisionAction,
@@ -75,6 +75,11 @@ function sheetTitle(
   if (snapshot?.pendingApproval !== null && snapshot?.pendingApproval !== undefined) {
     return "Approve exact remedy";
   }
+  if (snapshot?.claimedDecision !== null && snapshot?.claimedDecision !== undefined) {
+    return snapshot.claimedDecision.action === "approve"
+      ? "Resume exact approval"
+      : "Resume exact decline";
+  }
   if (snapshot?.status === "pending_approval") return "Decision in progress";
   return "Evidence inspector";
 }
@@ -96,21 +101,30 @@ export function EvidenceInspector({
   onServerSuccess,
   clientDecisionIdFactory = defaultDecisionId,
 }: EvidenceInspectorProps) {
-  const [submittingAction, setSubmittingAction] = useState<DecisionAction | null>(null);
+  const [, setSubmittingAction] = useState<DecisionAction | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [decisionAccepted, setDecisionAccepted] = useState(false);
   const [expiredContextKey, setExpiredContextKey] = useState<string | null>(null);
   const decisionIds = useRef<Partial<Record<DecisionAction, string>>>({});
+  const decisionRequestInFlight = useRef<{
+    key: string;
+    generation: number;
+    action: DecisionAction;
+  } | null>(null);
   const serverRefreshes = useRef(new Set<string>());
   const fallbackReturnFocusRef = useRef<HTMLElement | null>(null);
   const approval = snapshot?.pendingApproval ?? null;
+  const claimedDecision = snapshot?.claimedDecision ?? null;
   const decisionContextKey = [
     snapshot?.recoveryId ?? "no-recovery",
     approval?.remedyId ?? "no-remedy",
     approval?.remedyDigest ?? "no-remedy-digest",
     approval?.toolCallId ?? "no-tool-call",
     approval?.expiry ?? "no-expiry",
+    claimedDecision?.action ?? "no-claimed-action",
+    claimedDecision?.remedyDigest ?? "no-claimed-digest",
+    claimedDecision?.expiry ?? "no-claimed-expiry",
   ].join(":");
   const decisionContextRef = useRef({ key: decisionContextKey, generation: 0 });
   if (decisionContextRef.current.key !== decisionContextKey) {
@@ -119,6 +133,12 @@ export function EvidenceInspector({
       generation: decisionContextRef.current.generation + 1,
     };
   }
+  const currentDecisionRequest =
+    decisionRequestInFlight.current?.key === decisionContextKey &&
+    decisionRequestInFlight.current.generation === decisionContextRef.current.generation
+      ? decisionRequestInFlight.current
+      : null;
+  const contextSubmittingAction = currentDecisionRequest?.action ?? null;
 
   useEffect(
     () => () => {
@@ -139,14 +159,15 @@ export function EvidenceInspector({
     setExpiredContextKey(null);
   }, [decisionContextKey]);
 
-  const expiryMilliseconds = approval === null ? Number.NaN : Date.parse(approval.expiry);
-  const consentExpired =
-    approval !== null &&
+  const decisionExpiry = approval?.expiry ?? claimedDecision?.expiry ?? null;
+  const expiryMilliseconds = decisionExpiry === null ? Number.NaN : Date.parse(decisionExpiry);
+  const decisionExpired =
+    decisionExpiry !== null &&
     (expiredContextKey === decisionContextKey ||
       (Number.isFinite(expiryMilliseconds) && Date.now() >= expiryMilliseconds));
 
   useEffect(() => {
-    if (approval === null || !Number.isFinite(expiryMilliseconds)) return;
+    if (decisionExpiry === null || !Number.isFinite(expiryMilliseconds)) return;
     const submittedGeneration = decisionContextRef.current.generation;
     let cancelled = false;
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
@@ -188,7 +209,7 @@ export function EvidenceInspector({
       cancelled = true;
       if (timeoutId !== undefined) clearTimeout(timeoutId);
     };
-  }, [approval, decisionContextKey, expiryMilliseconds, onServerSuccess]);
+  }, [decisionContextKey, decisionExpiry, expiryMilliseconds, onServerSuccess]);
 
   const copyDigest = async () => {
     if (approval === null) return;
@@ -208,14 +229,20 @@ export function EvidenceInspector({
     if (
       snapshot === null ||
       approval === null ||
-      submittingAction !== null ||
-      consentExpired ||
+      currentDecisionRequest !== null ||
+      decisionExpired ||
       Date.now() >= Date.parse(approval.expiry)
     ) {
       return;
     }
     const stableDecisionId = decisionIds.current[action] ?? clientDecisionIdFactory();
     const submittedGeneration = decisionContextRef.current.generation;
+    const inFlight = {
+      key: decisionContextKey,
+      generation: submittedGeneration,
+      action,
+    };
+    decisionRequestInFlight.current = inFlight;
     decisionIds.current[action] = stableDecisionId;
     setSubmittingAction(action);
     setError(null);
@@ -254,6 +281,64 @@ export function EvidenceInspector({
           : `${action === "approve" ? "Approval" : "Decline"} could not be recorded. Try again with the same decision.`,
       );
     } finally {
+      if (decisionRequestInFlight.current === inFlight) {
+        decisionRequestInFlight.current = null;
+      }
+      if (decisionContextRef.current.generation === submittedGeneration) {
+        setSubmittingAction(null);
+      }
+    }
+  };
+
+  const resumeDecision = async () => {
+    if (
+      snapshot === null ||
+      claimedDecision === null ||
+      currentDecisionRequest !== null ||
+      decisionExpired ||
+      Date.now() >= Date.parse(claimedDecision.expiry)
+    ) {
+      return;
+    }
+    const submittedGeneration = decisionContextRef.current.generation;
+    const inFlight = {
+      key: decisionContextKey,
+      generation: submittedGeneration,
+      action: claimedDecision.action,
+    };
+    decisionRequestInFlight.current = inFlight;
+    setSubmittingAction(claimedDecision.action);
+    setError(null);
+    setStatusMessage(null);
+    try {
+      await postDecisionResume(snapshot.recoveryId, claimedDecision);
+      if (decisionContextRef.current.generation !== submittedGeneration) return;
+      setDecisionAccepted(true);
+      setStatusMessage(
+        `Exact ${claimedDecision.action} resumed by the server. Refreshing recovery evidence.`,
+      );
+      if (!serverRefreshes.current.has(decisionContextKey)) {
+        serverRefreshes.current.add(decisionContextKey);
+        try {
+          await onServerSuccess?.();
+        } catch {
+          if (decisionContextRef.current.generation !== submittedGeneration) return;
+          setError(
+            `Exact ${claimedDecision.action} resumed, but refreshed recovery evidence is unavailable.`,
+          );
+        }
+      }
+    } catch (caught: unknown) {
+      if (decisionContextRef.current.generation !== submittedGeneration) return;
+      setError(
+        caught instanceof DecisionCapacityError
+          ? caught.message
+          : `Exact ${claimedDecision.action} could not be resumed. Try the same resume action again.`,
+      );
+    } finally {
+      if (decisionRequestInFlight.current === inFlight) {
+        decisionRequestInFlight.current = null;
+      }
       if (decisionContextRef.current.generation === submittedGeneration) {
         setSubmittingAction(null);
       }
@@ -325,12 +410,12 @@ export function EvidenceInspector({
         </dl>
         <div className="execution-boundary" aria-live="polite">
           <strong>
-            {consentExpired
+            {decisionExpired
               ? "Consent deadline reached — checking the authoritative outcome"
               : "Execution has not begun."}
           </strong>
           <p>
-            {consentExpired
+            {decisionExpired
               ? "Decision controls are disabled while the server confirms whether a decision claim won."
               : "The server will recheck this exact consent immediately before dispatch."}
           </p>
@@ -345,18 +430,63 @@ export function EvidenceInspector({
         <button
           className="consent-action consent-action--decline"
           type="button"
-          disabled={submittingAction !== null || consentExpired}
+          disabled={contextSubmittingAction !== null || decisionExpired}
           onClick={() => void submitDecision("decline")}
         >
-          {submittingAction === "decline" ? "Submitting decline…" : "Decline"}
+          {contextSubmittingAction === "decline" ? "Submitting decline…" : "Decline"}
         </button>
         <button
           className="consent-action consent-action--approve"
           type="button"
-          disabled={submittingAction !== null || consentExpired}
+          disabled={contextSubmittingAction !== null || decisionExpired}
           onClick={() => void submitDecision("approve")}
         >
-          {submittingAction === "approve" ? "Submitting approval…" : "Approve remedy"}
+          {contextSubmittingAction === "approve" ? "Submitting approval…" : "Approve remedy"}
+        </button>
+      </div>
+    );
+  } else if (snapshot !== null && claimedDecision !== null) {
+    content = (
+      <>
+        <p className="inspector-summary">{snapshot.currentStepSummary}</p>
+        <div className="inspector-status">
+          <span className="status-symbol status-symbol--pending_approval" aria-hidden="true" />
+          <div><span>Status</span><strong>Decision claimed</strong></div>
+        </div>
+        <dl className="evidence-list consent-evidence">
+          <div><dt>Recovery ID</dt><dd className="mono">{snapshot.recoveryId}</dd></div>
+          <div><dt>Claimed action</dt><dd>{claimedDecision.action}</dd></div>
+          <div><dt>Remedy digest</dt><dd><code>{visibleDigest(claimedDecision.remedyDigest)}</code></dd></div>
+          <div><dt>Expiry</dt><dd><time dateTime={claimedDecision.expiry}>{utcDisplay(claimedDecision.expiry)}</time></dd></div>
+        </dl>
+        <div className="execution-boundary" aria-live="polite">
+          <strong>
+            {decisionExpired
+              ? "Decision deadline reached — checking the authoritative outcome"
+              : "A durable exact decision is ready to resume."}
+          </strong>
+          <p>
+            {decisionExpired
+              ? "Resume is disabled while the server refreshes claim evidence."
+              : "Only the server-authored claimed action can continue; no new consent can be created here."}
+          </p>
+        </div>
+        {error === null ? null : <p role="alert">{error}</p>}
+        <p className="decision-status" aria-live="polite">{statusMessage}</p>
+      </>
+    );
+    const resumeLabel = claimedDecision.action === "approve"
+      ? "Resume exact approval"
+      : "Resume exact decline";
+    footer = (
+      <div className="consent-actions">
+        <button
+          className={`consent-action consent-action--${claimedDecision.action}`}
+          type="button"
+          disabled={contextSubmittingAction !== null || decisionExpired}
+          onClick={() => void resumeDecision()}
+        >
+          {contextSubmittingAction === claimedDecision.action ? "Resuming exact decision…" : resumeLabel}
         </button>
       </div>
     );
@@ -429,7 +559,7 @@ export function EvidenceInspector({
 
   return (
     <ConsentSheet
-      busy={submittingAction !== null}
+      busy={contextSubmittingAction !== null}
       footer={footer}
       mobile={mobile}
       onClose={onClose}

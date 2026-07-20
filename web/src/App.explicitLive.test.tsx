@@ -35,6 +35,7 @@ function liveSnapshot(
     createdAt: "2026-07-19T12:00:00Z",
     updatedAt: "2026-07-19T12:00:01Z",
     pendingApproval: null,
+    claimedDecision: null,
     ...overrides,
   };
 }
@@ -245,6 +246,106 @@ describe("explicit, reload-safe live recovery", () => {
       method: "GET",
     });
     expect(requests.filter(({ url }) => url === "/api/recoveries")).toHaveLength(0);
+  });
+
+  it("restores a durable claim without posting until the explicit resume action", async () => {
+    class ControlledEventSource {
+      onmessage: ((event: MessageEvent<string>) => void) | null = null;
+      onerror: ((event: Event) => void) | null = null;
+      close = vi.fn();
+      addEventListener = vi.fn();
+      removeEventListener = vi.fn();
+    }
+    vi.stubGlobal("EventSource", ControlledEventSource);
+    window.sessionStorage.setItem(HOTEL_RECOVERY_KEY, LIVE_RECOVERY_ID);
+    const digest = `sha256:${"a".repeat(64)}`;
+    let resumePosts = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/health") return Promise.resolve(liveHealth());
+        if (url === `/api/recoveries/${LIVE_RECOVERY_ID}`) {
+          return Promise.resolve(
+            jsonResponse(
+              liveSnapshot(
+                resumePosts === 0
+                  ? {
+                      status: "pending_approval",
+                      currentStep: 3,
+                      currentStepSummary: "Exact approve claimed; outcome pending.",
+                      claimedDecision: {
+                        action: "approve",
+                        remedyDigest: digest,
+                        expiry: "2099-08-01T18:45:30Z",
+                      },
+                    }
+                  : {
+                      status: "completed",
+                      currentStep: 5,
+                      currentStepSummary: "Resumed execution completed.",
+                    },
+              ),
+            ),
+          );
+        }
+        if (url === `/api/recoveries/${LIVE_RECOVERY_ID}/decisions/resume`) {
+          resumePosts += 1;
+          expect(init?.method).toBe("POST");
+          expect(init?.body).toBe("{}");
+          return Promise.resolve(
+            jsonResponse({
+              action: "approve",
+              recoveryId: LIVE_RECOVERY_ID,
+              remedyDigest: digest,
+              status: "completed",
+              approvedRemedyDigest: digest,
+              executionStarted: true,
+            }),
+          );
+        }
+        if (url === `/api/recoveries/${LIVE_RECOVERY_ID}/receipt`) {
+          return Promise.resolve(
+            jsonResponse({
+              recoveryId: LIVE_RECOVERY_ID,
+              executionMode: "openai_live",
+              status: "completed",
+              simulated: true,
+              providerExecution: true,
+              modelCall: true,
+              modelIds: ["gpt-5.6-luna", "gpt-5.6-terra"],
+              rootTraceId: "trace_0123456789abcdef0123456789abcdef",
+              sdkVersion: "0.18.3",
+              protocolVersion: "backchannel.approval.v1",
+              agentGraphVersion: "backchannel.hotel-agent.v1",
+              definitionDigest: "b".repeat(64),
+              boundary:
+                "OpenAI agent model calls and demo hotel adapter only; no real booking or payment change.",
+              providerResult: "Resumed demo-adapter execution completed.",
+              authorizationSource: "Previously claimed exact approval.",
+              verificationResults: ["Existing durable claim resumed explicitly."],
+              approvalCount: 1,
+              approvedRemedyDigest: digest,
+            }),
+          );
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+
+    render(
+      <StrictMode>
+        <App />
+      </StrictMode>,
+    );
+
+    const resume = await screen.findByRole("button", { name: "Resume exact approval" });
+    expect(resumePosts).toBe(0);
+    fireEvent.click(resume);
+    fireEvent.click(resume);
+
+    await waitFor(() => expect(resumePosts).toBe(1));
+    expect(await screen.findByText("Resumed execution completed.")).toBeVisible();
   });
 
   it("restores terminal snapshot and receipt with zero recovery POSTs", async () => {

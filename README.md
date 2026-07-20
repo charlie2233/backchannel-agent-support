@@ -64,11 +64,18 @@ model call nor a provider dispatch.
   at the displayed deadline and refreshes server evidence instead of inventing the outcome.
 - Compatible pending approvals survive a process restart; version or definition drift fails
   closed with `resume_incompatible`.
+- An unfinished durable decision claim can be continued after reload without storing its request
+  in the browser. The authorized snapshot exposes only the claimed action, digest, and expiry;
+  **Resume exact approval/decline** sends an explicit empty request, and the server reloads and
+  revalidates its immutable claim. Mount and reload never submit it automatically.
 - SSE polling is fail-fast bounded to 16 streams per server process and four per recovery by
   default. At capacity, the server returns a finite `stream.capacity` control event with a
   five-second native retry interval; authorized streams retain durable replay, heartbeat, and
   terminal semantics. These counters are process-local, not a cross-worker or cross-container
   concurrency claim, and the packaged launcher deliberately runs one worker.
+- Decision resume is signed-session scoped and preserves the demo adapter's at-most-one dispatch
+  boundary. It is not an original-tab capability or an at-most-one live-model-run claim, and an
+  expired unfinished claim still fails closed without inventing a terminal outcome.
 - API quota recovery is the complementary zero-approval case: deterministic delegated
   authority, simulated execution verification, permission revocation, and a sealed receipt.
 

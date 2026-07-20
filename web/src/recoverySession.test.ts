@@ -25,6 +25,17 @@ describe("hotel recovery session hint", () => {
     expect(readHotelRecoveryHint(storage)).toEqual({ hadHint: true, recoveryId: VALID_ID });
 
     expect(writeHotelRecoveryHint("not-a-uuid", storage)).toBe(false);
+    expect(
+      writeHotelRecoveryHint(
+        JSON.stringify({
+          recoveryId: VALID_ID,
+          action: "approve",
+          remedyDigest: `sha256:${"a".repeat(64)}`,
+          clientDecisionId: "must-not-be-stored",
+        }),
+        storage,
+      ),
+    ).toBe(false);
     expect(readHotelRecoveryHint(storage)).toEqual({ hadHint: false, recoveryId: null });
 
     storage.setItem("backchannel.hotelRecoveryId", "bad");

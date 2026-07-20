@@ -29,8 +29,10 @@ The focused security regression is:
 ```bash
 uv run pytest -q tests/security/test_session_isolation.py
 uv run pytest -q tests/domain/test_pending_expiry.py tests/api/test_expiry_lifecycle.py
+uv run pytest -q tests/domain/test_decision_resume.py tests/api/test_decision_resume.py
 uv run pytest -q tests/domain/test_event_stream_admission.py tests/api/test_event_stream_admission.py
 npm --workspace web exec -- vitest run src/components/EvidenceInspector.test.tsx
+npm --workspace web exec -- vitest run src/api/client.test.ts src/App.explicitLive.test.tsx
 npm --workspace web exec -- vitest run src/api/events.test.ts src/hooks/useRecovery.test.tsx
 npm --workspace web exec -- vitest run src/App.explicitLive.test.tsx src/recoverySession.test.ts
 ```
@@ -44,6 +46,14 @@ usage preservation, restart idempotence, decision-versus-expiry writer serializa
 access-check ordering, synchronous snapshot/SSE/receipt/decision truth, bounded UTC maintenance,
 stable `remedy_expired` retries, and fake-timer controls that refresh once without posting a
 stale decision or continuing after unmount.
+The decision-resume suites prove a minimal mutually exclusive claimed view, full stored-request
+fingerprint verification, session authorization before JSON or claim inspection, exact empty
+requests, stored approve/decline continuation, zero-dispatch declines, completed-response replay,
+and expiry before live capacity or dispatch. Browser coverage proves StrictMode/reload performs
+no resume POST, rapid explicit activation coalesces, response action/digest mismatches fail
+closed, and only the server-authored action remains available. The proof is signed-session scoped
+and establishes at most one demo-adapter dispatch, not original-tab ownership, cross-process
+live-model serialization, deployment, or provider execution outside the demo adapter.
 The event-stream admission suites prove atomic global/per-recovery caps under threaded stress,
 idempotent cleanup, finite exact capacity framing without a polling loop, privacy and cursor
 ordering while saturated, expiry-before-admission, replay preservation, and reacquisition after

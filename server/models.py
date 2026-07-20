@@ -251,6 +251,86 @@ class ApprovalDecisionResponse(ApiModel):
         return self
 
 
+class DecisionResumeRequest(ApiModel):
+    """An explicit resume signal with no client-authored decision fields."""
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid", frozen=True)
+
+
+class DecisionResumeResponse(ApiModel):
+    """Minimal exact-claim result returned to a browser that lacks the claim token."""
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid", frozen=True)
+
+    action: DecisionAction
+    recovery_id: str = Field(alias="recoveryId")
+    remedy_digest: str = Field(
+        alias="remedyDigest",
+        pattern=r"^sha256:[0-9a-f]{64}$",
+    )
+    status: Literal["completed", "closed_without_action", "outcome_unknown"]
+    approved_remedy_digest: str | None = Field(
+        default=None,
+        alias="approvedRemedyDigest",
+        pattern=r"^sha256:[0-9a-f]{64}$",
+    )
+    execution_started: bool | None = Field(alias="executionStarted")
+
+    @classmethod
+    def from_decision(
+        cls,
+        response: ApprovalDecisionResponse,
+        *,
+        remedy_digest: str,
+    ) -> Self:
+        return cls(
+            action=response.action,
+            recoveryId=response.recovery_id,
+            remedyDigest=remedy_digest,
+            status=response.status,
+            approvedRemedyDigest=response.approved_remedy_digest,
+            executionStarted=response.execution_started,
+        )
+
+    @model_validator(mode="after")
+    def enforce_action_outcome(self) -> Self:
+        if self.action is DecisionAction.APPROVE:
+            if (
+                self.status != "completed"
+                or self.execution_started is not True
+                or self.approved_remedy_digest != self.remedy_digest
+            ):
+                raise ValueError("Resumed approvals require exact completed evidence")
+            return self
+        if self.status == "completed" or self.approved_remedy_digest is not None:
+            raise ValueError("Resumed declines cannot claim approved execution evidence")
+        if self.status == "closed_without_action" and self.execution_started is not False:
+            raise ValueError("Closed resumed declines require zero execution evidence")
+        if self.status == "outcome_unknown" and self.execution_started is not None:
+            raise ValueError("Unknown resumed outcomes cannot claim execution state")
+        return self
+
+
+class ClaimedDecisionView(ApiModel):
+    """Minimal public evidence for one unfinished durable decision claim."""
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid", frozen=True)
+
+    action: DecisionAction
+    remedy_digest: str = Field(
+        alias="remedyDigest",
+        pattern=r"^sha256:[0-9a-f]{64}$",
+    )
+    expiry: datetime
+
+    @field_validator("expiry")
+    @classmethod
+    def require_utc_expiry(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() != timedelta(0):
+            raise ValueError("Claimed decision expiry must be timezone-aware UTC")
+        return value
+
+
 class RecoverySnapshot(ApiModel):
     recovery_id: str = Field(alias="recoveryId")
     scenario_id: ScenarioId = Field(alias="scenarioId")
@@ -263,9 +343,25 @@ class RecoverySnapshot(ApiModel):
     created_at: datetime = Field(alias="createdAt")
     updated_at: datetime = Field(alias="updatedAt")
     pending_approval: PendingApprovalView | None = Field(default=None, alias="pendingApproval")
+    claimed_decision: ClaimedDecisionView | None = Field(
+        default=None,
+        alias="claimedDecision",
+    )
 
     @model_validator(mode="after")
     def enforce_execution_mode_trace_provenance(self) -> Self:
+        if self.pending_approval is not None and self.claimed_decision is not None:
+            raise ValueError("Pending consent and a durable decision claim are mutually exclusive")
+        if self.claimed_decision is not None and (
+            self.status is not RecoveryStatus.PENDING_APPROVAL
+            or self.scenario_id is not ScenarioId.HOTEL
+            or self.execution_mode
+            not in {ExecutionMode.SDK_STUB, ExecutionMode.OPENAI_LIVE}
+            or self.pending_approval is not None
+        ):
+            raise ValueError(
+                "Claimed decisions require one resumable pending hotel recovery"
+            )
         if self.execution_mode is ExecutionMode.REPLAY_FIXTURE:
             if self.model_ids or self.root_trace_id is not None:
                 raise ValueError("Replay snapshots require no model IDs or root trace ID")

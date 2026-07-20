@@ -55,6 +55,12 @@ export interface PendingApproval {
   executionStarted: false;
 }
 
+export interface ClaimedDecision {
+  action: DecisionAction;
+  remedyDigest: `sha256:${string}`;
+  expiry: string;
+}
+
 export interface RecoverySnapshot {
   recoveryId: string;
   scenarioId: ScenarioId;
@@ -67,6 +73,7 @@ export interface RecoverySnapshot {
   createdAt: string;
   updatedAt: string;
   pendingApproval: PendingApproval | null;
+  claimedDecision: ClaimedDecision | null;
 }
 
 export type ReceiptStatus =
@@ -135,6 +142,15 @@ export type ApprovalDecisionResponse =
   | ApprovedDecisionResponse
   | ClosedDecisionResponse
   | UnknownDecisionResponse;
+
+export interface DecisionResumeResponse {
+  action: DecisionAction;
+  recoveryId: string;
+  remedyDigest: `sha256:${string}`;
+  status: "completed" | "closed_without_action" | "outcome_unknown";
+  approvedRemedyDigest: `sha256:${string}` | null;
+  executionStarted: boolean | null;
+}
 
 export interface EvidenceEntry {
   label: string;

@@ -41,6 +41,8 @@ from server.models import (
     ApprovalDecisionRequest,
     ApprovalDecisionResponse,
     CreateRecoveryRequest,
+    DecisionResumeRequest,
+    DecisionResumeResponse,
     DemoResetResponse,
     ExecutionMode,
     HealthResponse,
@@ -737,6 +739,95 @@ def create_app(
             ):
                 public_controls.release_live(recovery_key)
             return response
+        except ApprovalDecisionError as error:
+            raise HTTPException(
+                status_code=error.status_code,
+                detail=error.public_detail,
+            ) from error
+        except ResumeIncompatibleError as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=error.public_detail,
+            ) from error
+
+    @application.post(
+        "/api/recoveries/{recovery_id}/decisions/resume",
+        response_model=DecisionResumeResponse,
+        description=(
+            f"{_PRIVATE_RECOVERY_DESCRIPTION} Explicitly continues only the existing "
+            "durable decision claim; the empty request cannot create or alter consent."
+        ),
+        responses=_PRIVATE_NOT_FOUND_RESPONSE,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": False,
+                            "maxProperties": 0,
+                        }
+                    }
+                },
+            }
+        },
+    )
+    async def resume_recovery_decision(
+        recovery_id: UUID,
+        request: Request,
+    ) -> DecisionResumeResponse:
+        recovery_key = str(recovery_id)
+        _require_recovery_access(request, recovery_store, recovery_key)
+        request.state.recovery_id = recovery_key
+        try:
+            try:
+                media_type = request.headers.get("content-type", "").partition(";")[0]
+                if media_type.strip().lower() != "application/json":
+                    raise ValueError("Resume requires an application/json body")
+                raw_payload = await request.json()
+                DecisionResumeRequest.model_validate(raw_payload)
+            except (TypeError, ValueError):
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail={
+                        "code": "decision_resume_body_invalid",
+                        "recoveryId": recovery_key,
+                    },
+                ) from None
+
+            expire_pending_approvals(
+                recovery_store,
+                batch_size=1,
+                recovery_id=recovery_key,
+            )
+            claim = recovery_orchestrator.preflight_decision_resume(recovery_key)
+            if claim.response is not None:
+                response = claim.response
+            else:
+                recovery_before = recovery_store.get_recovery(recovery_key)
+                if recovery_before.execution_mode is ExecutionMode.OPENAI_LIVE:
+                    try:
+                        public_controls.guard_live_resume(recovery_key)
+                        async with public_controls.live_model_slot(recovery_key):
+                            response = await recovery_orchestrator.resume_decision(claim)
+                    except LiveAdmissionError as error:
+                        if error.code is LiveAdmissionCode.LIVE_CAPACITY:
+                            raise LiveDecisionCapacityError from None
+                        raise
+                else:
+                    response = await recovery_orchestrator.resume_decision(claim)
+            recovery = recovery_store.get_recovery(recovery_key)
+            if (
+                recovery.execution_mode is ExecutionMode.OPENAI_LIVE
+                and recovery.status.terminal
+            ):
+                public_controls.release_live(recovery_key)
+            return DecisionResumeResponse.from_decision(
+                response,
+                remedy_digest=claim.request.remedy_digest,
+            )
         except ApprovalDecisionError as error:
             raise HTTPException(
                 status_code=error.status_code,

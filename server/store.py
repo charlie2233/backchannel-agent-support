@@ -22,6 +22,7 @@ from server.models import (
     SDK_STUB_BOUNDARY,
     ApprovalDecisionRequest,
     ApprovalDecisionResponse,
+    ClaimedDecisionView,
     DecisionAction,
     ExecutionMode,
     HotelRemedyTerms,
@@ -1101,6 +1102,7 @@ class SQLiteStore:
         row: sqlite3.Row,
         *,
         pending_approval: PendingApprovalView | None = None,
+        claimed_decision: ClaimedDecisionView | None = None,
     ) -> RecoverySnapshot:
         parsed_model_ids = json.loads(cast(str, row["model_ids_json"]))
         if not isinstance(parsed_model_ids, list) or not all(
@@ -1119,6 +1121,7 @@ class SQLiteStore:
             createdAt=datetime.fromisoformat(cast(str, row["created_at"])),
             updatedAt=datetime.fromisoformat(cast(str, row["updated_at"])),
             pendingApproval=pending_approval,
+            claimedDecision=claimed_decision,
         )
 
     @staticmethod
@@ -1235,6 +1238,35 @@ class SQLiteStore:
             request_fingerprint=cast(str, row["request_fingerprint"]),
             response=response,
         )
+
+    @classmethod
+    def _verified_decision_claim_from_row(
+        cls,
+        row: sqlite3.Row,
+        *,
+        recovery_id: str,
+    ) -> ApprovalDecisionClaim:
+        """Recompute the complete stored tuple fingerprint before trusting it."""
+
+        try:
+            claim = cls._decision_claim_from_row(row)
+            recomputed = cls._decision_fingerprint(claim.recovery_id, claim.request)
+        except (TypeError, ValueError):
+            raise ApprovalDecisionError(
+                "resume_incompatible",
+                recovery_id,
+                status_code=409,
+            ) from None
+        if (
+            claim.recovery_id != recovery_id
+            or claim.request_fingerprint != recomputed
+        ):
+            raise ApprovalDecisionError(
+                "resume_incompatible",
+                recovery_id,
+                status_code=409,
+            )
+        return claim
 
     def _validate_consent_for_decision(
         self,
@@ -1361,6 +1393,55 @@ class SQLiteStore:
         if consent.consent_digest != cast(str, pending["consent_digest"]):
             raise ValueError("Pending approval consent digest linkage is invalid")
         return consent.public_view(tool_call_id=cast(str, pending["tool_call_id"]))
+
+    def _public_claimed_decision_view(
+        self,
+        connection: sqlite3.Connection,
+        recovery_id: str,
+    ) -> ClaimedDecisionView | None:
+        row = connection.execute(
+            """
+            SELECT approval_decisions.*
+            FROM approval_decisions
+            WHERE recovery_id = ? AND status = 'claimed'
+            """,
+            (recovery_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        claim = self._verified_decision_claim_from_row(row, recovery_id=recovery_id)
+        remedy = connection.execute(
+            """
+            SELECT * FROM remedies
+            WHERE recovery_id = ? AND id = ?
+            """,
+            (recovery_id, claim.request.remedy_id),
+        ).fetchone()
+        if remedy is None:
+            raise ApprovalDecisionError(
+                "resume_incompatible",
+                recovery_id,
+                status_code=409,
+            )
+        try:
+            consent = self._remedy_consent_from_row(remedy)
+        except (TypeError, ValueError):
+            raise ApprovalDecisionError(
+                "resume_incompatible",
+                recovery_id,
+                status_code=409,
+            ) from None
+        if consent.consent_digest != claim.request.remedy_digest:
+            raise ApprovalDecisionError(
+                "resume_incompatible",
+                recovery_id,
+                status_code=409,
+            )
+        return ClaimedDecisionView(
+            action=claim.request.action,
+            remedyDigest=claim.request.remedy_digest,
+            expiry=consent.expiry,
+        )
 
     @staticmethod
     def _execution_from_row(row: sqlite3.Row) -> DurableExecution:
@@ -1951,15 +2032,28 @@ class SQLiteStore:
             row = connection.execute(
                 "SELECT * FROM recoveries WHERE id = ?", (recovery_id,)
             ).fetchone()
+            is_pending_hotel = (
+                row is not None
+                and cast(str, row["status"]) == RecoveryStatus.PENDING_APPROVAL.value
+                and cast(str, row["scenario_id"]) == ScenarioId.HOTEL.value
+            )
             pending_view = (
                 self._public_pending_view(connection, recovery_id)
-                if row is not None
-                and cast(str, row["status"]) == RecoveryStatus.PENDING_APPROVAL.value
+                if is_pending_hotel
+                else None
+            )
+            claimed_view = (
+                self._public_claimed_decision_view(connection, recovery_id)
+                if is_pending_hotel
                 else None
             )
         if row is None:
             raise RecoveryNotFoundError("Recovery not found")
-        return self._recovery_from_row(row, pending_approval=pending_view)
+        return self._recovery_from_row(
+            row,
+            pending_approval=pending_view,
+            claimed_decision=claimed_view,
+        )
 
     def get_recovery_provenance(self, recovery_id: str) -> RecoveryProvenance:
         with self._lock, self._connect() as connection:
@@ -2132,7 +2226,10 @@ class SQLiteStore:
                 raise ApprovalDecisionError(
                     "decision_unavailable", claim.recovery_id, status_code=409
                 )
-            durable_claim = self._decision_claim_from_row(row)
+            durable_claim = self._verified_decision_claim_from_row(
+                row,
+                recovery_id=claim.recovery_id,
+            )
             if (
                 durable_claim.request.client_decision_id != claim.request.client_decision_id
                 or durable_claim.request_fingerprint != claim.request_fingerprint
@@ -2149,6 +2246,39 @@ class SQLiteStore:
                 now=now,
             )
             return durable_claim
+
+    def load_decision_claim_for_resume(
+        self,
+        recovery_id: str,
+    ) -> ApprovalDecisionClaim:
+        """Load the sole durable resume authority and run owner-safe preflight checks."""
+
+        now = self._now()
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM approval_decisions WHERE recovery_id = ?",
+                (recovery_id,),
+            ).fetchone()
+            if row is None:
+                raise ApprovalDecisionError(
+                    "decision_resume_unavailable",
+                    recovery_id,
+                    status_code=409,
+                )
+            claim = self._verified_decision_claim_from_row(
+                row,
+                recovery_id=recovery_id,
+            )
+            if claim.response is not None:
+                return claim
+            self._validate_consent_for_decision(
+                connection,
+                recovery_id,
+                claim.request,
+                now=now,
+            )
+            return claim
 
     def assert_provider_dispatch_authorized(
         self,

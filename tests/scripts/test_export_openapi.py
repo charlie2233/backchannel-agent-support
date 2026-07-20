@@ -39,6 +39,7 @@ def test_private_recovery_operations_document_one_generic_not_found_boundary() -
         ("/api/recoveries/{recovery_id}/events", "get"),
         ("/api/recoveries/{recovery_id}/receipt", "get"),
         ("/api/recoveries/{recovery_id}/decisions", "post"),
+        ("/api/recoveries/{recovery_id}/decisions/resume", "post"),
     )
     for path, method in operations:
         operation = schema["paths"][path][method]
@@ -48,6 +49,24 @@ def test_private_recovery_operations_document_one_generic_not_found_boundary() -
         description = operation["description"].lower()
         assert "signed opaque demo session" in description
         assert "generic not-found" in description
+
+
+def test_decision_resume_documents_only_an_exact_empty_json_request() -> None:
+    schema = json.loads(_exporter().render_openapi())
+
+    operation = schema["paths"][
+        "/api/recoveries/{recovery_id}/decisions/resume"
+    ]["post"]
+    request_body = operation["requestBody"]
+
+    assert request_body["required"] is True
+    assert set(request_body["content"]) == {"application/json"}
+    assert request_body["content"]["application/json"]["schema"] == {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+        "maxProperties": 0,
+    }
 
 
 def test_event_stream_success_response_is_documented_as_sse() -> None:

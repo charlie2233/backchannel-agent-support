@@ -3,6 +3,8 @@ import type { ExecutionMode } from "../domain/runtime";
 import type {
   ApprovalDecisionRequest,
   ApprovalDecisionResponse,
+  ClaimedDecision,
+  DecisionResumeResponse,
   HotelRemedyTerms,
   PendingApproval,
   RecoveryReceipt,
@@ -133,6 +135,17 @@ function isPendingApproval(value: unknown): value is PendingApproval {
   );
 }
 
+function isClaimedDecision(value: unknown): value is ClaimedDecision {
+  return (
+    isRecord(value) &&
+    hasExactKeys(value, ["action", "remedyDigest", "expiry"]) &&
+    (value.action === "approve" || value.action === "decline") &&
+    typeof value.remedyDigest === "string" &&
+    /^sha256:[0-9a-f]{64}$/.test(value.remedyDigest) &&
+    isUtcTimestamp(value.expiry)
+  );
+}
+
 function isHealthStatus(value: unknown): value is HealthStatus {
   if (typeof value !== "object" || value === null) {
     return false;
@@ -228,6 +241,7 @@ export function isRecoverySnapshot(value: unknown): value is RecoverySnapshot {
       "createdAt",
       "updatedAt",
       "pendingApproval",
+      "claimedDecision",
     ])
   ) {
     return false;
@@ -240,6 +254,8 @@ export function isRecoverySnapshot(value: unknown): value is RecoverySnapshot {
     value.status === "outcome_unknown";
   const approvalIsValid =
     value.pendingApproval === null || isPendingApproval(value.pendingApproval);
+  const claimIsValid =
+    value.claimedDecision === null || isClaimedDecision(value.claimedDecision);
   const modeProvenanceIsValid =
     isStringArray(value.modelIds) &&
     ((value.executionMode === "replay_fixture" &&
@@ -268,7 +284,14 @@ export function isRecoverySnapshot(value: unknown): value is RecoverySnapshot {
     isUtcTimestamp(value.updatedAt) &&
     modeProvenanceIsValid &&
     approvalIsValid &&
-    (value.status === "pending_approval" || value.pendingApproval === null)
+    claimIsValid &&
+    !(value.pendingApproval !== null && value.claimedDecision !== null) &&
+    (value.claimedDecision === null ||
+      (value.status === "pending_approval" &&
+        value.scenarioId === "hotel" &&
+        (value.executionMode === "sdk_stub" || value.executionMode === "openai_live"))) &&
+    (value.status === "pending_approval" ||
+      (value.pendingApproval === null && value.claimedDecision === null))
   );
 }
 
@@ -595,6 +618,81 @@ export async function postDecision(
       body.approvedRemedyDigest !== decision.remedyDigest)
   ) {
     throw new Error("Decision response did not match the requested decision");
+  }
+  return body;
+}
+
+function isDecisionResumeResponse(value: unknown): value is DecisionResumeResponse {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, [
+      "action",
+      "recoveryId",
+      "remedyDigest",
+      "status",
+      "approvedRemedyDigest",
+      "executionStarted",
+    ]) ||
+    typeof value.recoveryId !== "string" ||
+    typeof value.remedyDigest !== "string" ||
+    !/^sha256:[0-9a-f]{64}$/.test(value.remedyDigest)
+  ) {
+    return false;
+  }
+  if (value.action === "approve") {
+    return (
+      value.status === "completed" &&
+      value.approvedRemedyDigest === value.remedyDigest &&
+      value.executionStarted === true
+    );
+  }
+  if (value.action !== "decline" || value.approvedRemedyDigest !== null) {
+    return false;
+  }
+  return (
+    (value.status === "closed_without_action" && value.executionStarted === false) ||
+    (value.status === "outcome_unknown" && value.executionStarted === null)
+  );
+}
+
+export async function postDecisionResume(
+  recoveryId: string,
+  claimedDecision: ClaimedDecision,
+  signal?: AbortSignal,
+): Promise<DecisionResumeResponse> {
+  const response = await fetch(
+    `/api/recoveries/${encodeURIComponent(recoveryId)}/decisions/resume`,
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({}),
+      signal,
+    },
+  );
+  if (!response.ok) {
+    let body: unknown = null;
+    try {
+      body = await response.json();
+    } catch {
+      // A malformed error response is handled by the generic status-only path.
+    }
+    const capacityError = readDecisionCapacityError(body, response.status);
+    if (capacityError !== null) throw capacityError;
+    throw new Error(`Decision resume failed with status ${response.status}`);
+  }
+  const body: unknown = await response.json();
+  if (!isDecisionResumeResponse(body)) {
+    throw new Error("Decision resume response did not match the resume contract");
+  }
+  if (
+    body.recoveryId !== recoveryId ||
+    body.action !== claimedDecision.action ||
+    body.remedyDigest !== claimedDecision.remedyDigest
+  ) {
+    throw new Error("Decision resume response did not match the claimed decision");
   }
   return body;
 }

@@ -64,6 +64,7 @@ function stubPendingRecovery() {
               currentStepSummary: "Approval required before demo-provider dispatch.",
               createdAt: "2026-07-19T12:00:00Z",
               updatedAt: "2026-07-19T12:00:01Z",
+              claimedDecision: null,
               pendingApproval: {
                 remedyId: "remedy-server",
                 remedyDigest: `sha256:${"a".repeat(64)}`,

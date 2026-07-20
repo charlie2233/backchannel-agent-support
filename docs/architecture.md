@@ -54,6 +54,21 @@ SDK, protocol, agent-graph, and definition versions that must still match on res
 reconciliation can seal a receipt from an already committed demo-adapter result without
 dispatching it again.
 
+The browser never needs a duplicate decision request to continue an unfinished claim. An
+authorized snapshot may expose only its server-authored action, remedy digest, and UTC expiry.
+The single **Resume exact approval/decline** action posts exact empty JSON; session access and
+request-shape checks precede claim inspection, and SQLite supplies the immutable client decision
+ID, remedy, digest, tool call, and fingerprint. The orchestrator then uses the same continuation
+pipeline and immediate consent/version validation as the original decision. Completed claims
+replay without model or provider work. Live claims retain the existing lease and model-capacity
+gate, with no automatic retry or replay fallback.
+
+This resume capability follows the signed demo session, not an original browser tab. It cannot
+create or change consent, and reload never invokes it. Concurrent attempts retain the durable
+demo-adapter idempotency boundary, but they do not prove one live model run across processes. A
+claim that remains unfinished at expiry fails closed; the server does not synthesize cancellation
+while another request or worker might still be resolving it.
+
 Untouched SDK/live hotel consent is also durable lifecycle state. A bounded SQLite
 `BEGIN IMMEDIATE` sweep runs at startup, on the existing maintenance cadence, and before new
 recovery cleanup. Authorized snapshot, initial SSE, receipt, and decision requests first sweep

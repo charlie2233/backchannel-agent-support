@@ -113,6 +113,31 @@ at-most-one dispatch property for this demo adapter, not a universal exactly-onc
 An unrelated session cannot participate in that race: it receives 404 before a decision claim
 and cannot win, renew a live lease, or trigger provider dispatch.
 
+### Explicit durable-claim resume
+
+If a process or response is interrupted after the decision claim commits, an authorized
+snapshot keeps `pendingApproval=null` and may expose only `claimedDecision.action`,
+`claimedDecision.remedyDigest`, and `claimedDecision.expiry`. It never exposes the durable
+`clientDecisionId`, remedy ID, tool-call ID, request fingerprint, or serialized SDK state. The
+browser still stores only the recovery UUID and never submits a decision on mount or reload.
+
+The user-controlled **Resume exact approval** or **Resume exact decline** action calls
+`POST /api/recoveries/{recoveryId}/decisions/resume` with exact `{}` JSON. Session access is
+checked before content type, body, or claim inspection. A foreign, missing, expired, or tampered
+session therefore keeps the generic 404 boundary; an authorized recovery without a claim gets
+`409 decision_resume_unavailable`, and no decision is created. The server recomputes the stored
+full-request fingerprint, performs consent/expiry/version preflight before live capacity, and
+repeats those checks immediately inside the shared continuation pipeline. A completed claim
+returns a minimal stored result without acquiring live capacity or rerunning model/provider work.
+
+This is a signed-session capability, not proof of the original tab: another tab with the same
+HttpOnly session and recovery UUID may explicitly continue the already-fixed claim. Concurrent
+attempts remain bounded by the durable execution/idempotency ledger to at most one demo-adapter
+dispatch, but may duplicate live model work across workers. Capacity returns the existing
+`decision_capacity` response and leaves the explicit action available; it never starts replay or
+retries automatically. At or after the original consent expiry, resume returns
+`422 remedy_expired` before capacity or dispatch and does not invent a cancellation or receipt.
+
 If the authoritative UTC expiry is reached with the recovery and envelope still pending and no
 decision, execution, receipt, or terminal event exists, a bounded `BEGIN IMMEDIATE` lifecycle
 sweep closes the recovery instead. A decision claim that commits first wins and is left for the

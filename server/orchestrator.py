@@ -123,6 +123,15 @@ class PendingSdkApproval:
 
 
 @dataclass(frozen=True, slots=True)
+class ValidatedDecisionResume:
+    recovery: RecoverySnapshot
+    envelope: PendingApprovalEnvelope
+    consent: RemedyConsentRecord
+    context: HotelAgentContext
+    agent: Agent[HotelAgentContext]
+
+
+@dataclass(frozen=True, slots=True)
 class CompletedSdkRecovery:
     recovery: RecoverySnapshot
     sdk_result: RunResult
@@ -647,6 +656,41 @@ class RecoveryOrchestrator:
         """Claim, resume, and durably replay one exact approve or decline decision."""
 
         claim = self._store.claim_approval_decision(recovery_id, request)
+        return await self._continue_decision_claim(claim)
+
+    def preflight_decision_resume(self, recovery_id: str) -> ApprovalDecisionClaim:
+        """Load and fully validate the stored claim before any live capacity wait."""
+
+        claim = self._store.load_decision_claim_for_resume(recovery_id)
+        if claim.response is None:
+            self._validate_decision_resume_compatibility(claim)
+        return claim
+
+    async def resume_decision(
+        self,
+        claim: ApprovalDecisionClaim,
+    ) -> ApprovalDecisionResponse:
+        """Continue only the already-durable claim supplied by server preflight."""
+
+        durable_claim = self._store.load_decision_claim_for_resume(claim.recovery_id)
+        if (
+            durable_claim.request_fingerprint != claim.request_fingerprint
+            or durable_claim.request != claim.request
+        ):
+            raise ApprovalDecisionError(
+                "resume_incompatible",
+                claim.recovery_id,
+                status_code=409,
+            )
+        return await self._continue_decision_claim(durable_claim)
+
+    async def _continue_decision_claim(
+        self,
+        claim: ApprovalDecisionClaim,
+    ) -> ApprovalDecisionResponse:
+        """Shared continuation pipeline for an original or resumed exact claim."""
+
+        recovery_id = claim.recovery_id
         if claim.response is not None:
             return claim.response
         if claim.request.action is DecisionAction.DECLINE:
@@ -663,7 +707,7 @@ class RecoveryOrchestrator:
                 raise
             return self._complete_committed_claim(claim, execution)
         if completed is None:
-            replayed = self._store.claim_approval_decision(recovery_id, request)
+            replayed = self._store.load_decision_claim_for_resume(recovery_id)
             if replayed.response is not None:
                 return replayed.response
         execution = self._store.get_completed_execution(recovery_id)
@@ -671,11 +715,11 @@ class RecoveryOrchestrator:
             raise RuntimeError("Approved SDK run completed without a durable execution")
         return self._complete_committed_claim(claim, execution)
 
-    async def _resume_claimed_approval(
+    def _validate_decision_resume_compatibility(
         self,
         claim: ApprovalDecisionClaim,
-    ) -> RunResult | None:
-        """Restore the exact interruption only after a durable decision claim."""
+    ) -> ValidatedDecisionResume:
+        """Recompute every static resume marker without running a model or provider."""
 
         recovery_id = claim.recovery_id
         try:
@@ -704,7 +748,6 @@ class RecoveryOrchestrator:
             expected_definition_digest = hotel_definition_digest(fresh_agent)
             expected_model_ids: tuple[str, ...] = ()
             expected_tool_call_id = f"commit-remedy-{recovery_id}"
-            run_config = configure_sdk_stub_tracing()
             valid_root_trace = is_valid_qa_trace_id(envelope.root_trace_id)
         elif recovery.execution_mode is ExecutionMode.OPENAI_LIVE:
             arguments = consent.evidence
@@ -718,11 +761,6 @@ class RecoveryOrchestrator:
             )
             expected_model_ids = (LIVE_CONSUMER_MODEL, LIVE_BROKER_MODEL)
             expected_tool_call_id = envelope.tool_call_id
-            run_config = configure_live_tracing(
-                recovery_id=recovery_id,
-                root_trace_id=envelope.root_trace_id,
-                model_provider=self._model_provider,
-            )
             valid_root_trace = is_valid_live_trace_id(envelope.root_trace_id)
         else:
             self._raise_incompatible(recovery_id, "execution_mode")
@@ -798,6 +836,38 @@ class RecoveryOrchestrator:
             self._raise_incompatible(recovery_id, "authority_result")
         if not policy_result.delegated_authority_satisfied:
             self._raise_incompatible(recovery_id, "authority_denied")
+
+        return ValidatedDecisionResume(
+            recovery=recovery,
+            envelope=envelope,
+            consent=consent,
+            context=fresh_context,
+            agent=fresh_agent,
+        )
+
+    async def _resume_claimed_approval(
+        self,
+        claim: ApprovalDecisionClaim,
+    ) -> RunResult | None:
+        """Restore the exact interruption only after a durable decision claim."""
+
+        validated = self._validate_decision_resume_compatibility(claim)
+        recovery_id = claim.recovery_id
+        recovery = validated.recovery
+        envelope = validated.envelope
+        consent = validated.consent
+        fresh_context = validated.context
+        fresh_agent = validated.agent
+        if recovery.execution_mode is ExecutionMode.SDK_STUB:
+            run_config = configure_sdk_stub_tracing()
+        elif recovery.execution_mode is ExecutionMode.OPENAI_LIVE:
+            run_config = configure_live_tracing(
+                recovery_id=recovery_id,
+                root_trace_id=envelope.root_trace_id,
+                model_provider=self._model_provider,
+            )
+        else:
+            self._raise_incompatible(recovery_id, "execution_mode")
 
         try:
             state = await RunState.from_json(

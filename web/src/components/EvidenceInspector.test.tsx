@@ -1,3 +1,4 @@
+import { StrictMode } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -20,6 +21,7 @@ function pendingSnapshot(): RecoverySnapshot {
     currentStepSummary: "Server paused at exact consent.",
     createdAt: "2026-07-18T20:00:00Z",
     updatedAt: "2026-07-18T20:00:01Z",
+    claimedDecision: null,
     pendingApproval: {
       remedyId: "remedy-server-742",
       remedyDigest: fullDigest,
@@ -48,6 +50,22 @@ function pendingSnapshot(): RecoverySnapshot {
   };
 }
 
+function claimedSnapshot(
+  action: "approve" | "decline" = "approve",
+  expiry = "2026-09-01T18:45:30Z",
+): RecoverySnapshot {
+  return {
+    ...pendingSnapshot(),
+    currentStepSummary: `Exact ${action} claimed; outcome pending.`,
+    pendingApproval: null,
+    claimedDecision: {
+      action,
+      remedyDigest: fullDigest,
+      expiry,
+    },
+  } as RecoverySnapshot;
+}
+
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
@@ -56,6 +74,157 @@ afterEach(() => {
 });
 
 describe("EvidenceInspector exact consent", () => {
+  it.each([
+    ["approve", "Resume exact approval", "approval"],
+    ["decline", "Resume exact decline", "decline"],
+  ] as const)(
+    "renders only the server-authored %s resume action and evidence",
+    (action, buttonName, oppositeWord) => {
+      render(
+        <EvidenceInspector
+          scenario={recoveryScenarios[0]}
+          snapshot={claimedSnapshot(action)}
+        />,
+      );
+
+      expect(screen.getByText(`Exact ${action} claimed; outcome pending.`)).toBeVisible();
+      expect(screen.getByText("sha256:0123456789ab…89abcdef")).toBeVisible();
+      expect(screen.getByText("2026-09-01 18:45:30 UTC")).toBeVisible();
+      expect(screen.getByRole("button", { name: buttonName })).toBeEnabled();
+      expect(
+        screen.queryByRole("button", {
+          name: oppositeWord === "approval" ? "Resume exact decline" : "Resume exact approval",
+        }),
+      ).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Approve remedy" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Decline" })).not.toBeInTheDocument();
+    },
+  );
+
+  it("never resumes on mount, reload rendering, or StrictMode effects", () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const { rerender } = render(
+      <StrictMode>
+        <EvidenceInspector
+          scenario={recoveryScenarios[0]}
+          snapshot={claimedSnapshot()}
+        />
+      </StrictMode>,
+    );
+
+    rerender(
+      <StrictMode>
+        <EvidenceInspector
+          scenario={recoveryScenarios[0]}
+          snapshot={claimedSnapshot()}
+        />
+      </StrictMode>,
+    );
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("sends one exact empty resume request under rapid clicks", async () => {
+    let resolveResume: ((response: Response) => void) | undefined;
+    const fetchMock = vi.fn().mockImplementation(
+      () => new Promise<Response>((resolve) => { resolveResume = resolve; }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const onServerSuccess = vi.fn().mockResolvedValue(undefined);
+    render(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={claimedSnapshot()}
+        onServerSuccess={onServerSuccess}
+      />,
+    );
+    const button = screen.getByRole("button", { name: "Resume exact approval" });
+
+    fireEvent.click(button);
+    fireEvent.click(button);
+    fireEvent.click(button);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/recoveries/11111111-2222-4333-8444-555555555555/decisions/resume",
+      expect.objectContaining({ method: "POST", body: "{}" }),
+    );
+
+    resolveResume?.(
+      new Response(
+        JSON.stringify({
+          action: "approve",
+          recoveryId: "11111111-2222-4333-8444-555555555555",
+          remedyDigest: fullDigest,
+          status: "completed",
+          approvedRemedyDigest: fullDigest,
+          executionStarted: true,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    await waitFor(() => expect(onServerSuccess).toHaveBeenCalledTimes(1));
+  });
+
+  it("retains the exact resume affordance after network failure", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
+    render(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={claimedSnapshot("decline")}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Resume exact decline" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Exact decline could not be resumed",
+    );
+    expect(screen.getByRole("button", { name: "Resume exact decline" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Resume exact approval" })).not.toBeInTheDocument();
+  });
+
+  it("disables an expired claimed decision and refreshes evidence without posting", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T18:45:31.000Z"));
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const onServerSuccess = vi.fn().mockResolvedValue(undefined);
+    render(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={claimedSnapshot("approve")}
+        onServerSuccess={onServerSuccess}
+      />,
+    );
+    await act(async () => { await Promise.resolve(); });
+
+    const button = screen.getByRole("button", { name: "Resume exact approval" });
+    expect(button).toBeDisabled();
+    fireEvent.click(button);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(onServerSuccess).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes the fresh-decision rapid-click window before React state commits", () => {
+    const fetchMock = vi.fn().mockImplementation(() => new Promise<Response>(() => {}));
+    vi.stubGlobal("fetch", fetchMock);
+    render(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={pendingSnapshot()}
+      />,
+    );
+    const button = screen.getByRole("button", { name: "Approve remedy" });
+
+    fireEvent.click(button);
+    fireEvent.click(button);
+    fireEvent.click(button);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps the pending tool-call ID visible before collapsed mobile technical evidence", () => {
     const { container } = render(
       <EvidenceInspector
