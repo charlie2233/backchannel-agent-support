@@ -2029,6 +2029,7 @@ class SQLiteStore:
 
     def get_recovery(self, recovery_id: str) -> RecoverySnapshot:
         with self._lock, self._connect() as connection:
+            connection.execute("BEGIN")
             row = connection.execute(
                 "SELECT * FROM recoveries WHERE id = ?", (recovery_id,)
             ).fetchone()
