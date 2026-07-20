@@ -242,3 +242,14 @@ def test_task3_schema_migration_preserves_parent_child_rows_and_foreign_keys(
     with sqlite3.connect(database_path) as connection:
         assert connection.execute("SELECT COUNT(*) FROM remedies").fetchone() == (1,)
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        access_columns = connection.execute(
+            "PRAGMA table_info(recovery_access)"
+        ).fetchall()
+        assert [(row[1], row[5]) for row in access_columns] == [
+            ("recovery_id", 1),
+            ("session_key", 2),
+        ]
+        assert connection.execute(
+            "SELECT COUNT(*) FROM recovery_access WHERE recovery_id = ?",
+            ("legacy-recovery",),
+        ).fetchone() == (0,)

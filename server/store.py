@@ -177,6 +177,15 @@ CREATE TABLE IF NOT EXISTS demo_sessions (
     expires_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS recovery_access (
+    recovery_id TEXT NOT NULL REFERENCES recoveries(id) ON DELETE CASCADE,
+    session_key TEXT NOT NULL,
+    PRIMARY KEY (recovery_id, session_key)
+);
+
+CREATE INDEX IF NOT EXISTS recovery_access_session_idx
+ON recovery_access(session_key);
+
 CREATE TABLE IF NOT EXISTS live_admissions (
     recovery_id TEXT PRIMARY KEY,
     ip_key TEXT NOT NULL,
@@ -338,6 +347,7 @@ class SQLiteStore:
             self._migrate_task6_approval_decisions(connection)
             self._migrate_task8_usage_ledger(connection)
             self._migrate_stateless_demo_sessions(connection)
+            self._migrate_recovery_access(connection)
             event_columns = {
                 cast(str, row["name"])
                 for row in connection.execute("PRAGMA table_info(events)").fetchall()
@@ -369,6 +379,40 @@ class SQLiteStore:
         """Clear legacy server-side sessions now replaced by signed cookies."""
 
         connection.execute("DELETE FROM demo_sessions")
+
+    @staticmethod
+    def _migrate_recovery_access(connection: sqlite3.Connection) -> None:
+        """Require the exact opaque, fail-closed recovery ownership schema."""
+
+        columns = connection.execute("PRAGMA table_info(recovery_access)").fetchall()
+        expected = [("recovery_id", 1), ("session_key", 2)]
+        actual = [(cast(str, row["name"]), cast(int, row["pk"])) for row in columns]
+        if actual != expected:
+            raise RuntimeError("Unsupported recovery access schema")
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS recovery_access_session_idx "
+            "ON recovery_access(session_key)"
+        )
+        foreign_keys = connection.execute(
+            "PRAGMA foreign_key_list(recovery_access)"
+        ).fetchall()
+        if len(foreign_keys) != 1:
+            raise RuntimeError("Unsupported recovery access foreign key")
+        foreign_key = foreign_keys[0]
+        if (
+            cast(str, foreign_key["table"]),
+            cast(str, foreign_key["from"]),
+            cast(str, foreign_key["to"]),
+            cast(str, foreign_key["on_delete"]).upper(),
+        ) != ("recoveries", "recovery_id", "id", "CASCADE"):
+            raise RuntimeError("Unsupported recovery access foreign key")
+        session_index = connection.execute(
+            "PRAGMA index_info(recovery_access_session_idx)"
+        ).fetchall()
+        if [cast(str, row["name"]) for row in session_index] != ["session_key"]:
+            raise RuntimeError("Unsupported recovery access session index")
+        if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+            raise RuntimeError("Recovery access migration violated foreign keys")
 
     @staticmethod
     def _migrate_task8_usage_ledger(connection: sqlite3.Connection) -> None:
@@ -1012,6 +1056,33 @@ class SQLiteStore:
         return datetime.now(UTC)
 
     @staticmethod
+    def _require_opaque_session_key(session_key: str) -> None:
+        if len(session_key) != 64 or any(
+            character not in "0123456789abcdef" for character in session_key
+        ):
+            raise ValueError("Session key must be an opaque SHA-256 correlation value")
+
+    @classmethod
+    def _bind_recovery_access(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        recovery_id: str,
+        session_key: str | None,
+    ) -> None:
+        if session_key is None:
+            return
+        cls._require_opaque_session_key(session_key)
+        connection.execute(
+            """
+            INSERT INTO recovery_access (recovery_id, session_key)
+            VALUES (?, ?)
+            ON CONFLICT(recovery_id, session_key) DO NOTHING
+            """,
+            (recovery_id, session_key),
+        )
+
+    @staticmethod
     def _recovery_from_row(
         row: sqlite3.Row,
         *,
@@ -1332,6 +1403,7 @@ class SQLiteStore:
         protocol_version: str | None = None,
         agent_graph_version: str | None = None,
         definition_digest: str | None = None,
+        session_key: str | None = None,
     ) -> RecoverySnapshot:
         selected_model_ids = list(model_ids or [])
         if execution_mode is ExecutionMode.REPLAY_FIXTURE:
@@ -1420,6 +1492,11 @@ class SQLiteStore:
                 """,
                 (recovery_id, created_data, now.isoformat()),
             )
+            self._bind_recovery_access(
+                connection,
+                recovery_id=recovery_id,
+                session_key=session_key,
+            )
         return self.get_recovery(recovery_id)
 
     def get_or_create_replay(
@@ -1427,6 +1504,7 @@ class SQLiteStore:
         *,
         recovery_id: str,
         scenario: ReplayScenarioDefinition,
+        session_key: str | None = None,
     ) -> RecoverySnapshot:
         """Atomically persist or reuse one complete canonical replay fixture."""
 
@@ -1538,6 +1616,11 @@ class SQLiteStore:
                 scenario=scenario,
                 created_payload=created_payload,
                 receipt=receipt,
+            )
+            self._bind_recovery_access(
+                connection,
+                recovery_id=recovery_id,
+                session_key=session_key,
             )
             return self._recovery_from_row(row)
 
@@ -2376,6 +2459,20 @@ class SQLiteStore:
                 connection.execute("SELECT COUNT(*) FROM recoveries").fetchone()[0],
             )
 
+    def recovery_is_accessible(self, recovery_id: str, session_key: str) -> bool:
+        """Return only whether this opaque session owns access to one recovery."""
+
+        self._require_opaque_session_key(session_key)
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM recovery_access
+                WHERE recovery_id = ? AND session_key = ?
+                """,
+                (recovery_id, session_key),
+            ).fetchone()
+        return row is not None
+
     def create_demo_session(
         self,
         session_key: str,
@@ -3061,12 +3158,43 @@ class SQLiteStore:
             raise RecoveryNotFoundError("Receipt not found")
         return RecoveryReceipt.model_validate_json(cast(str, row["receipt_json"]))
 
-    def reset(self) -> None:
+    def reset(self, session_key: str) -> None:
+        """Detach one session and delete only detail no other session can access."""
+
+        self._require_opaque_session_key(session_key)
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            connection.execute("DELETE FROM live_admissions")
-            connection.execute("DELETE FROM usage_ledger")
-            connection.execute("DELETE FROM recoveries")
+            now_text = self._now().isoformat()
+            connection.execute(
+                """
+                UPDATE live_admissions
+                SET released_at = COALESCE(released_at, ?)
+                WHERE session_key = ?
+                """,
+                (now_text, session_key),
+            )
+            connection.execute(
+                """
+                DELETE FROM recoveries
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM recovery_access AS caller_access
+                    WHERE caller_access.recovery_id = recoveries.id
+                      AND caller_access.session_key = ?
+                )
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM recovery_access AS other_access
+                    WHERE other_access.recovery_id = recoveries.id
+                      AND other_access.session_key <> ?
+                )
+                """,
+                (session_key, session_key),
+            )
+            connection.execute(
+                "DELETE FROM recovery_access WHERE session_key = ?",
+                (session_key,),
+            )
 
     def close(self) -> None:
         with self._lock:

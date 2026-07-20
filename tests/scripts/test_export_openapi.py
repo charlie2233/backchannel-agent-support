@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import sys
 from pathlib import Path
@@ -29,6 +30,24 @@ def test_openapi_export_is_deterministic_and_secret_free() -> None:
     assert first.endswith("\n")
     assert "OPENAI_API_KEY" not in first
     assert "state_json" not in first
+
+
+def test_private_recovery_operations_document_one_generic_not_found_boundary() -> None:
+    schema = json.loads(_exporter().render_openapi())
+    operations = (
+        ("/api/recoveries/{recovery_id}", "get"),
+        ("/api/recoveries/{recovery_id}/events", "get"),
+        ("/api/recoveries/{recovery_id}/receipt", "get"),
+        ("/api/recoveries/{recovery_id}/decisions", "post"),
+    )
+    for path, method in operations:
+        operation = schema["paths"][path][method]
+        assert operation["responses"]["404"] == {
+            "description": "Recovery not found."
+        }
+        description = operation["description"].lower()
+        assert "signed opaque demo session" in description
+        assert "generic not-found" in description
 
 
 def test_export_never_imports_global_app_or_mutates_caller_database(

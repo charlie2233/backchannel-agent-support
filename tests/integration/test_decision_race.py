@@ -49,6 +49,8 @@ def test_approve_and_decline_race_has_one_durable_terminal_winner(
         )
         assert created.status_code == 201
         snapshot = cast(dict[str, object], created.json())
+        session_cookie = creator.cookies.get("backchannel_demo_session")
+        assert session_cookie is not None
     recovery_id = cast(str, snapshot["recoveryId"])
 
     second_store = SQLiteStore(database_path)
@@ -62,6 +64,7 @@ def test_approve_and_decline_race_has_one_durable_terminal_winner(
 
     def submit(app: Any, action: str) -> tuple[str, int, dict[str, object]]:
         with TestClient(app) as client:
+            client.cookies.set("backchannel_demo_session", session_cookie)
             barrier.wait(timeout=15)
             response = client.post(
                 f"/api/recoveries/{recovery_id}/decisions",

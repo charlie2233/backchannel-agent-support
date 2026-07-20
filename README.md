@@ -48,6 +48,8 @@ model call nor a provider dispatch.
 ## What the console proves
 
 - The server, not the browser, owns recovery state, ordered events, decisions, and receipts.
+- Recovery detail is bound to the signed HttpOnly demo session that created or explicitly
+  started it. Foreign, expired, missing, and tampered sessions receive the same generic 404.
 - Hotel execution pauses at the Agents SDK `commit_remedy` interruption. Consent displays
   exact terms, a UTC expiry, and a canonical `sha256:` digest.
 - Approval rechecks the digest, interruption, expiry, hard constraints, and delegated

@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from pathlib import Path
-from typing import Annotated, cast
+from typing import Annotated, Any, cast
 from uuid import UUID, uuid4
 
 from agents.models.interface import ModelProvider
@@ -153,6 +153,7 @@ _READY_SCHEMA_COLUMNS = {
         {"id", "recovery_id", "category", "amount", "recorded_at"}
     ),
     "demo_sessions": frozenset({"id", "created_at", "expires_at"}),
+    "recovery_access": frozenset({"recovery_id", "session_key"}),
     "live_admissions": frozenset(
         {
             "recovery_id",
@@ -169,6 +170,14 @@ _SPA_SEGMENT = re.compile(r"^[A-Za-z0-9_-]+$")
 _RESERVED_ROUTE_ROOTS = frozenset(
     {"api", "assets", "docs", "health", "openapi.json", "readyz", "redoc"}
 )
+_PRIVATE_RECOVERY_DESCRIPTION = (
+    "Requires the signed opaque demo session issued when the recovery was created. "
+    "Missing, expired, tampered, unrelated, and unknown sessions receive the same "
+    "generic not-found response."
+)
+_PRIVATE_NOT_FOUND_RESPONSE: dict[int | str, dict[str, Any]] = {
+    status.HTTP_404_NOT_FOUND: {"description": "Recovery not found."}
+}
 
 
 def _store_schema_is_ready(store: SQLiteStore) -> bool:
@@ -179,6 +188,8 @@ def _store_schema_is_ready(store: SQLiteStore) -> bool:
             integrity = connection.execute("PRAGMA quick_check(1)").fetchone()
             if integrity is None or integrity[0] != "ok":
                 return False
+            if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                return False
             for table_name, required_columns in _READY_SCHEMA_COLUMNS.items():
                 actual_columns = {
                     str(row[1])
@@ -188,6 +199,27 @@ def _store_schema_is_ready(store: SQLiteStore) -> bool:
                 }
                 if not required_columns.issubset(actual_columns):
                     return False
+            access_columns = [
+                (str(row[1]), int(row[5]))
+                for row in connection.execute(
+                    'PRAGMA table_info("recovery_access")'
+                ).fetchall()
+            ]
+            if access_columns != [("recovery_id", 1), ("session_key", 2)]:
+                return False
+            access_foreign_keys = connection.execute(
+                'PRAGMA foreign_key_list("recovery_access")'
+            ).fetchall()
+            if len(access_foreign_keys) != 1:
+                return False
+            access_foreign_key = access_foreign_keys[0]
+            if (
+                str(access_foreign_key[2]),
+                str(access_foreign_key[3]),
+                str(access_foreign_key[4]),
+                str(access_foreign_key[6]).upper(),
+            ) != ("recoveries", "recovery_id", "id", "CASCADE"):
+                return False
     except Exception:
         return False
     return True
@@ -219,6 +251,19 @@ def _validated_recovery_id(request: Request) -> str | None:
         return str(UUID(value))
     except ValueError:
         return None
+
+
+def _require_recovery_access(
+    request: Request,
+    store: SQLiteStore,
+    recovery_id: str,
+) -> None:
+    identity = cast(ClientIdentity, request.state.demo_identity)
+    if not store.recovery_is_accessible(recovery_id, identity.session_key):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Not found",
+        )
 
 
 def _public_error_response(
@@ -471,6 +516,7 @@ def create_app(
         payload: CreateRecoveryRequest,
         request: Request,
     ) -> RecoverySnapshot:
+        identity = cast(ClientIdentity, request.state.demo_identity)
         cleanup_terminal_recoveries(
             recovery_store,
             terminal_ttl=timedelta(
@@ -480,10 +526,17 @@ def create_app(
         )
         if payload.execution_mode is ExecutionMode.REPLAY_FIXTURE:
             try:
-                return replay_engine.start(
+                replay = replay_engine.start(
                     payload.scenario_id,
                     execution_mode=payload.execution_mode,
+                    session_key=identity.session_key,
                 )
+                if not recovery_store.recovery_is_accessible(
+                    replay.recovery_id,
+                    identity.session_key,
+                ):
+                    raise RuntimeError("Recovery access binding was not persisted")
+                return replay
             except (ScenarioNotFoundError, UnsupportedExecutionModeError) as error:
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -512,7 +565,6 @@ def create_app(
             )
         try:
             if payload.execution_mode is ExecutionMode.OPENAI_LIVE:
-                identity = cast(ClientIdentity, request.state.demo_identity)
                 recovery_id = str(uuid4())
                 request.state.recovery_id = recovery_id
                 public_controls.admit_live(
@@ -526,7 +578,13 @@ def create_app(
                             payload.scenario_id,
                             execution_mode=payload.execution_mode,
                             recovery_id=recovery_id,
+                            session_key=identity.session_key,
                         )
+                    if not recovery_store.recovery_is_accessible(
+                        pending.recovery.recovery_id,
+                        identity.session_key,
+                    ):
+                        raise RuntimeError("Recovery access binding was not persisted")
                 except Exception:
                     public_controls.release_live(recovery_id)
                     raise
@@ -534,7 +592,13 @@ def create_app(
                 pending = await recovery_orchestrator.start(
                     payload.scenario_id,
                     execution_mode=payload.execution_mode,
+                    session_key=identity.session_key,
                 )
+                if not recovery_store.recovery_is_accessible(
+                    pending.recovery.recovery_id,
+                    identity.session_key,
+                ):
+                    raise RuntimeError("Recovery access binding was not persisted")
             return pending.recovery
         except UnsupportedOrchestrationError as error:
             raise HTTPException(
@@ -545,6 +609,8 @@ def create_app(
     @application.post(
         "/api/recoveries/{recovery_id}/decisions",
         response_model=ApprovalDecisionResponse,
+        description=_PRIVATE_RECOVERY_DESCRIPTION,
+        responses=_PRIVATE_NOT_FOUND_RESPONSE,
     )
     async def approve_recovery(
         recovery_id: UUID,
@@ -552,6 +618,7 @@ def create_app(
         request: Request,
     ) -> ApprovalDecisionResponse:
         recovery_key = str(recovery_id)
+        _require_recovery_access(request, recovery_store, recovery_key)
         request.state.recovery_id = recovery_key
         try:
             try:
@@ -598,22 +665,33 @@ def create_app(
             ) from error
 
     @application.get(
-        "/api/recoveries/{recovery_id}", response_model=RecoverySnapshot
+        "/api/recoveries/{recovery_id}",
+        response_model=RecoverySnapshot,
+        description=_PRIVATE_RECOVERY_DESCRIPTION,
+        responses=_PRIVATE_NOT_FOUND_RESPONSE,
     )
-    def get_recovery(recovery_id: UUID) -> RecoverySnapshot:
+    def get_recovery(recovery_id: UUID, request: Request) -> RecoverySnapshot:
+        recovery_key = str(recovery_id)
+        _require_recovery_access(request, recovery_store, recovery_key)
         try:
-            return recovery_store.get_recovery(str(recovery_id))
+            return recovery_store.get_recovery(recovery_key)
         except RecoveryNotFoundError as error:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Not found"
             ) from error
 
-    @application.get("/api/recoveries/{recovery_id}/events")
+    @application.get(
+        "/api/recoveries/{recovery_id}/events",
+        description=_PRIVATE_RECOVERY_DESCRIPTION,
+        responses=_PRIVATE_NOT_FOUND_RESPONSE,
+    )
     async def recovery_events(
         recovery_id: UUID,
         request: Request,
         last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
     ) -> Response:
+        recovery_key = str(recovery_id)
+        _require_recovery_access(request, recovery_store, recovery_key)
         cursor = 0
         if last_event_id is not None:
             try:
@@ -628,7 +706,6 @@ def create_app(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Last-Event-ID must be a non-negative integer",
                 )
-        recovery_key = str(recovery_id)
         try:
             recovery_store.get_recovery(recovery_key)
         except RecoveryNotFoundError as error:
@@ -651,24 +728,30 @@ def create_app(
         )
 
     @application.get(
-        "/api/recoveries/{recovery_id}/receipt", response_model=RecoveryReceipt
+        "/api/recoveries/{recovery_id}/receipt",
+        response_model=RecoveryReceipt,
+        description=_PRIVATE_RECOVERY_DESCRIPTION,
+        responses=_PRIVATE_NOT_FOUND_RESPONSE,
     )
-    def get_receipt(recovery_id: UUID) -> RecoveryReceipt:
+    def get_receipt(recovery_id: UUID, request: Request) -> RecoveryReceipt:
+        recovery_key = str(recovery_id)
+        _require_recovery_access(request, recovery_store, recovery_key)
         try:
-            return recovery_store.get_receipt(str(recovery_id))
+            return recovery_store.get_receipt(recovery_key)
         except RecoveryNotFoundError as error:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Not found"
             ) from error
 
     @application.post("/api/demo/reset", response_model=DemoResetResponse)
-    def reset_demo() -> DemoResetResponse:
+    def reset_demo(request: Request) -> DemoResetResponse:
         if not runtime_settings.demo_reset_enabled:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Forbidden",
             )
-        recovery_store.reset()
+        identity = cast(ClientIdentity, request.state.demo_identity)
+        recovery_store.reset(identity.session_key)
         return DemoResetResponse(reset=True)
 
     if configured_static_dir is not None:

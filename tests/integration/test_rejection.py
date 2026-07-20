@@ -50,6 +50,8 @@ def test_restart_decline_rejects_exact_interruption_and_replays(
         )
     ) as client:
         snapshot = _create_pending(client)
+        session_cookie = client.cookies.get("backchannel_demo_session")
+        assert session_cookie is not None
     recovery_id = cast(str, snapshot["recoveryId"])
     approval = cast(dict[str, object], snapshot["pendingApproval"])
     payload = _decline_payload(snapshot)
@@ -89,6 +91,7 @@ def test_restart_decline_rejects_exact_interruption_and_replays(
             hotel_provider=restarted_provider,
         )
     ) as restarted_client:
+        restarted_client.cookies.set("backchannel_demo_session", session_cookie)
         first = restarted_client.post(
             f"/api/recoveries/{recovery_id}/decisions",
             json=payload,
@@ -104,6 +107,7 @@ def test_restart_decline_rejects_exact_interruption_and_replays(
             hotel_provider=replay_provider,
         )
     ) as replay_client:
+        replay_client.cookies.set("backchannel_demo_session", session_cookie)
         duplicate = replay_client.post(
             f"/api/recoveries/{recovery_id}/decisions",
             json=payload,

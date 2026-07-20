@@ -746,6 +746,7 @@
     },
     "/api/recoveries/{recovery_id}": {
       "get": {
+        "description": "Requires the signed opaque demo session issued when the recovery was created. Missing, expired, tampered, unrelated, and unknown sessions receive the same generic not-found response.",
         "operationId": "get_recovery_api_recoveries__recovery_id__get",
         "parameters": [
           {
@@ -770,6 +771,9 @@
             },
             "description": "Successful Response"
           },
+          "404": {
+            "description": "Recovery not found."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -786,6 +790,7 @@
     },
     "/api/recoveries/{recovery_id}/decisions": {
       "post": {
+        "description": "Requires the signed opaque demo session issued when the recovery was created. Missing, expired, tampered, unrelated, and unknown sessions receive the same generic not-found response.",
         "operationId": "approve_recovery_api_recoveries__recovery_id__decisions_post",
         "parameters": [
           {
@@ -820,6 +825,9 @@
             },
             "description": "Successful Response"
           },
+          "404": {
+            "description": "Recovery not found."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -836,6 +844,7 @@
     },
     "/api/recoveries/{recovery_id}/events": {
       "get": {
+        "description": "Requires the signed opaque demo session issued when the recovery was created. Missing, expired, tampered, unrelated, and unknown sessions receive the same generic not-found response.",
         "operationId": "recovery_events_api_recoveries__recovery_id__events_get",
         "parameters": [
           {
@@ -874,6 +883,9 @@
             },
             "description": "Successful Response"
           },
+          "404": {
+            "description": "Recovery not found."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -890,6 +902,7 @@
     },
     "/api/recoveries/{recovery_id}/receipt": {
       "get": {
+        "description": "Requires the signed opaque demo session issued when the recovery was created. Missing, expired, tampered, unrelated, and unknown sessions receive the same generic not-found response.",
         "operationId": "get_receipt_api_recoveries__recovery_id__receipt_get",
         "parameters": [
           {
@@ -913,6 +926,9 @@
               }
             },
             "description": "Successful Response"
+          },
+          "404": {
+            "description": "Recovery not found."
           },
           "422": {
             "content": {

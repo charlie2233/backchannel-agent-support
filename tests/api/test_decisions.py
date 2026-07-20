@@ -103,7 +103,8 @@ def _decision_process_worker(
                 if job is None:
                     report_phase("stopping")
                     return
-                iteration, recovery_id, payload = job
+                iteration, recovery_id, payload, session_cookie = job
+                client.cookies.set("backchannel_demo_session", session_cookie)
                 report_phase("waiting_at_barrier")
                 start_barrier.wait(timeout=20)
                 before_dispatches = provider.dispatch_count
@@ -387,6 +388,8 @@ def test_two_processes_race_twenty_times_with_one_durable_winner(tmp_path) -> No
                 _drain_process_phases(phases)
                 snapshot = create_sdk_recovery(creator)
                 recovery_id = str(snapshot["recoveryId"])
+                session_cookie = creator.cookies.get("backchannel_demo_session")
+                assert session_cookie is not None
                 first_jobs.put(
                     (
                         iteration,
@@ -395,6 +398,7 @@ def test_two_processes_race_twenty_times_with_one_durable_winner(tmp_path) -> No
                             snapshot,
                             client_decision_id=f"process-a-{iteration}",
                         ),
+                        session_cookie,
                     )
                 )
                 second_jobs.put(
@@ -405,6 +409,7 @@ def test_two_processes_race_twenty_times_with_one_durable_winner(tmp_path) -> No
                             snapshot,
                             client_decision_id=f"process-b-{iteration}",
                         ),
+                        session_cookie,
                     )
                 )
                 outcomes: list[dict[str, object]] = []
@@ -505,6 +510,8 @@ def test_same_decision_id_can_race_and_replay_one_result(tmp_path) -> None:
     )
     with TestClient(first_app) as creator:
         snapshot = create_sdk_recovery(creator)
+        session_cookie = creator.cookies.get("backchannel_demo_session")
+        assert session_cookie is not None
     recovery_id = str(snapshot["recoveryId"])
     second_store = SQLiteStore(database_path)
     second_provider = HotelSimulator(store=second_store)
@@ -517,6 +524,7 @@ def test_same_decision_id_can_race_and_replay_one_result(tmp_path) -> None:
 
     def submit(app):
         with TestClient(app) as client:
+            client.cookies.set("backchannel_demo_session", session_cookie)
             barrier.wait(timeout=15)
             response = client.post(
                 f"/api/recoveries/{recovery_id}/decisions",

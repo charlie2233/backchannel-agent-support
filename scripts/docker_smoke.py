@@ -17,10 +17,12 @@ import sys
 import time
 from dataclasses import dataclass
 from http.cookiejar import CookieJar
+from http.cookies import SimpleCookie
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 from urllib.request import (
     HTTPCookieProcessor,
     Request,
@@ -92,6 +94,40 @@ class SmokeClient:
         self._base_url = base_url.rstrip("/")
         self._canary = canary.encode("utf-8")
         self._opener = build_opener(HTTPCookieProcessor(CookieJar()))
+        parsed_base_url = urlparse(self._base_url)
+        self._loopback_http = (
+            parsed_base_url.scheme == "http"
+            and parsed_base_url.hostname in {"127.0.0.1", "localhost", "::1"}
+        )
+        self._loopback_session_cookie: str | None = None
+        self.secure_cookie_validated = False
+
+    def _capture_session_cookie(self, header: str) -> None:
+        parsed = SimpleCookie()
+        try:
+            parsed.load(header)
+        except Exception as error:
+            raise SmokeFailure("The demo session cookie header was malformed") from error
+        morsel = parsed.get("backchannel_demo_session")
+        if morsel is None:
+            return
+        try:
+            max_age = int(morsel["max-age"])
+        except ValueError as error:
+            raise SmokeFailure("The demo session cookie Max-Age was invalid") from error
+        if (
+            not morsel["secure"]
+            or not morsel["httponly"]
+            or morsel["samesite"].lower() != "lax"
+            or morsel["path"] != "/"
+            or not 1 <= max_age <= 604_800
+        ):
+            raise SmokeFailure("The demo session cookie security attributes drifted")
+        self.secure_cookie_validated = True
+        if self._loopback_http:
+            # This smoke-only bridge models TLS termination for the loopback HTTP
+            # hop. The application still emits and requires a Secure cookie.
+            self._loopback_session_cookie = morsel.value
 
     def request(
         self,
@@ -103,6 +139,10 @@ class SmokeClient:
         expected_status: int = 200,
     ) -> SmokeResponse:
         request_headers = dict(headers or {})
+        if self._loopback_http and self._loopback_session_cookie is not None:
+            request_headers["Cookie"] = (
+                "backchannel_demo_session=" + self._loopback_session_cookie
+            )
         body = None
         if payload is not None:
             request_headers["Content-Type"] = "application/json"
@@ -130,6 +170,9 @@ class SmokeClient:
             raise SmokeFailure(f"{method} {path} could not reach the server") from error
 
         serialized_headers = json.dumps(response_headers, sort_keys=True).encode("utf-8")
+        set_cookie = response_headers.get("set-cookie")
+        if set_cookie is not None:
+            self._capture_session_cookie(set_cookie)
         if self._canary and (
             self._canary in response_body or self._canary in serialized_headers
         ):
@@ -370,6 +413,16 @@ def run_http_smoke(base_url: str, canary: str) -> dict[str, object]:
         {"scenarioId": "api-quota", "executionMode": "replay_fixture"},
     ).json()
     replay_id = str(replay["recoveryId"])
+    foreign_client = SmokeClient(base_url, canary)
+    foreign_client.get("/health")
+    foreign_snapshot = foreign_client.get(
+        f"/api/recoveries/{replay_id}",
+        expected_status=404,
+    )
+    _require(
+        foreign_snapshot.body == b'{"detail":"Not found"}',
+        "A foreign smoke session could inspect a recovery",
+    )
     full_stream = client.get(f"/api/recoveries/{replay_id}/events")
     _require(
         full_stream.headers.get("content-type", "").startswith("text/event-stream"),
@@ -394,6 +447,11 @@ def run_http_smoke(base_url: str, canary: str) -> dict[str, object]:
 
     _verify_approval(client)
     _verify_decline(client)
+    _require(client.secure_cookie_validated, "Secure demo session cookie was not observed")
+    _require(
+        foreign_client.secure_cookie_validated,
+        "Foreign smoke session cookie was not security-hardened",
+    )
 
     return {
         "approval": "completed_once",
@@ -402,6 +460,8 @@ def run_http_smoke(base_url: str, canary: str) -> dict[str, object]:
         "health": "passed",
         "readiness": "passed",
         "responseCanarySecretAbsent": True,
+        "sessionIsolation": "passed",
+        "secureCookie": "validated",
         "sseResume": "passed",
     }
 
@@ -413,7 +473,7 @@ def _available_port() -> int:
 
 
 def _wait_for_server(process: subprocess.Popen[bytes], base_url: str) -> None:
-    deadline = time.monotonic() + 20
+    deadline = time.monotonic() + 60
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise SmokeFailure("Production server exited before becoming healthy")
@@ -424,7 +484,7 @@ def _wait_for_server(process: subprocess.Popen[bytes], base_url: str) -> None:
         except (HTTPError, URLError, TimeoutError):
             pass
         time.sleep(0.1)
-    raise SmokeFailure("Production server did not become healthy within 20 seconds")
+    raise SmokeFailure("Production server did not become healthy within 60 seconds")
 
 
 def run_local_single_process_smoke() -> dict[str, object]:

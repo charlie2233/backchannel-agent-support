@@ -25,7 +25,8 @@ replays later rows before waiting for new commits. Terminal events close the str
 which the UI fetches the authoritative snapshot and receipt.
 
 SQLite persists the pending Agents SDK state envelope, consent evidence, decision claim,
-provider execution record, event ledger, and receipt. A pending approval carries the Agents
+provider execution record, event ledger, receipt, and opaque recovery-access association. A
+pending approval carries the Agents
 SDK, protocol, agent-graph, and definition versions that must still match on resume. Startup
 reconciliation can seal a receipt from an already committed demo-adapter result without
 dispatching it again.
@@ -69,5 +70,18 @@ cookie. Deployed mode additionally requires an exact HTTPS origin allowlist and 
 32-byte-or-longer identity-hash secret. Proxy headers are ignored unless the direct peer is in
 an explicit trusted CIDR allowlist.
 
+The cookie contains a random nonce, expiry, and HMAC signature. SQLite never stores that raw
+cookie, nonce, client address, API key, or authorization value. Instead, creation atomically
+associates the recovery with a keyed 64-character session correlation value. Snapshot, SSE,
+receipt, and decision routes check that association before any state read, lease renewal,
+decision claim, or provider dispatch. Unknown, missing, expired, tampered, and unrelated
+sessions all receive the same generic 404. Canonical replay rows may be associated with more
+than one session only after each session explicitly starts that replay scenario.
+
 The reset endpoint is disabled by default and is intended only for disposable capture runs.
-Secrets remain runtime inputs: they are not copied into the frontend build or container image.
+When enabled, it detaches only the caller's associations, deletes recovery detail only when no
+other session retains access, and marks the caller's live admissions released. Cooldown history
+and the global usage ledger remain intact, so reset cannot restore live budget or bypass an IP
+or session cooldown. Retention cleanup cascades access rows with expired recovery detail while
+preserving aggregate usage. Secrets remain runtime inputs: they are not copied into the
+frontend build or container image.

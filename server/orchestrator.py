@@ -221,6 +221,7 @@ class RecoveryOrchestrator:
         *,
         execution_mode: ExecutionMode,
         recovery_id: str | None = None,
+        session_key: str | None = None,
     ) -> PendingSdkApproval | CompletedSdkRecovery:
         try:
             approved_scenario = ScenarioId(scenario_id)
@@ -231,7 +232,10 @@ class RecoveryOrchestrator:
                 raise UnsupportedOrchestrationError(
                     "API quota recovery supports sdk_stub only in orchestration"
                 )
-            return await self._start_quota_sdk(recovery_id=recovery_id)
+            return await self._start_quota_sdk(
+                recovery_id=recovery_id,
+                session_key=session_key,
+            )
         if execution_mode is ExecutionMode.OPENAI_LIVE and not self._live_ready:
             raise UnsupportedOrchestrationError(
                 "openai_live requires a server-side live-ready runtime"
@@ -273,6 +277,7 @@ class RecoveryOrchestrator:
                 protocol_version=self._version_policy.protocol_version,
                 agent_graph_version=agent_graph_version,
                 definition_digest=definition_digest,
+                session_key=session_key,
             )
             result = await Runner.run(
                 original_root_agent,
@@ -355,6 +360,7 @@ class RecoveryOrchestrator:
                 protocol_version=self._version_policy.protocol_version,
                 agent_graph_version=agent_graph_version,
                 definition_digest=definition_digest,
+                session_key=session_key,
             )
 
         action_digest = remedy_action_digest(arguments)
@@ -442,6 +448,7 @@ class RecoveryOrchestrator:
         self,
         *,
         recovery_id: str | None,
+        session_key: str | None,
     ) -> CompletedSdkRecovery:
         """Complete the zero-interruption quota protocol through one keyless SDK run."""
 
@@ -466,6 +473,7 @@ class RecoveryOrchestrator:
             protocol_version=QUOTA_PROTOCOL_VERSION,
             agent_graph_version=QUOTA_AGENT_GRAPH_VERSION,
             definition_digest=definition_digest,
+            session_key=session_key,
         )
         sdk_result = await Runner.run(
             agent,

@@ -10,16 +10,48 @@ from uuid import UUID
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 from server.config import RuntimeSettings
+from server.controls import ClientIdentity, PublicDemoControls
 from server.logging import SafeLogFilter
 from server.main import create_app
 from server.models import ExecutionMode, ScenarioId
 from server.store import SQLiteStore
 
 
+def _new_demo_identity(controls: PublicDemoControls) -> ClientIdentity:
+    identity = controls.resolve_client_identity(
+        Request(
+            {
+                "type": "http",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "method": "GET",
+                "scheme": "http",
+                "path": "/health",
+                "raw_path": b"/health",
+                "query_string": b"",
+                "root_path": "",
+                "headers": [],
+                "client": ("testclient", 50_000),
+                "server": ("testserver", 80),
+            }
+        )
+    )
+    assert identity.new_session_cookie is not None
+    return identity
+
+
 class ExplodingOrchestrator:
-    async def start(self, _scenario_id: str, *, execution_mode: ExecutionMode) -> NoReturn:
+    async def start(
+        self,
+        _scenario_id: str,
+        *,
+        execution_mode: ExecutionMode,
+        session_key: str | None = None,
+    ) -> NoReturn:
+        del session_key
         raise RuntimeError(
             "sk-secret Authorization: Bearer private-token prompt=private-prompt "
             "state_json=serialized-state tool_args=private-args tool_results=private-result"
@@ -41,7 +73,9 @@ class LiveStartExplodingOrchestrator:
         *,
         execution_mode: ExecutionMode,
         recovery_id: str | None = None,
+        session_key: str | None = None,
     ) -> NoReturn:
+        del session_key
         assert execution_mode is ExecutionMode.OPENAI_LIVE
         assert recovery_id is not None
         self.recovery_ids.append(recovery_id)
@@ -133,6 +167,13 @@ def test_unexpected_decision_error_logs_validated_recovery_correlation_only(
 ) -> None:
     caplog.set_level(logging.ERROR)
     store = SQLiteStore(tmp_path / "decision-correlation.sqlite3")
+    settings = RuntimeSettings(live_ready=False)
+    app = create_app(
+        settings,
+        store=store,
+        orchestrator=DecisionExplodingOrchestrator(),  # type: ignore[arg-type]
+    )
+    identity = _new_demo_identity(app.state.public_demo_controls)
     recovery_id = "11111111-2222-4333-8444-555555555555"
     UUID(recovery_id)
     store.create_recovery(
@@ -145,15 +186,13 @@ def test_unexpected_decision_error_logs_validated_recovery_correlation_only(
         protocol_version="backchannel.approval.v1",
         agent_graph_version="backchannel.hotel-agent.v1",
         definition_digest="sdk-definition",
+        session_key=identity.session_key,
     )
     client = TestClient(
-        create_app(
-            RuntimeSettings(live_ready=False),
-            store=store,
-            orchestrator=DecisionExplodingOrchestrator(),  # type: ignore[arg-type]
-        ),
+        app,
         raise_server_exceptions=False,
     )
+    client.cookies.set("backchannel_demo_session", identity.new_session_cookie)
 
     response = client.post(
         f"/api/recoveries/{recovery_id}/decisions",

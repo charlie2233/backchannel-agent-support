@@ -12,6 +12,21 @@ Backchannel uses the same visible lifecycle for every scenario:
 
 The integer `currentStep` is zero-based in the API and maps to this fixed order.
 
+## Signed session access
+
+Creating a recovery also binds it to the signed, HttpOnly opaque demo session in the request.
+That access association is committed in the same SQLite transaction as a new SDK/live recovery
+or, for replay, only after the canonical snapshot, events, and receipt have passed integrity
+validation. The durable association contains only `recoveryId` and a keyed session correlation
+value; the raw cookie, nonce, client address, API key, and authorization headers are not stored.
+
+The recovery snapshot, SSE stream, receipt, and decision endpoint require the same valid
+session. Authorization runs before SSE cursor parsing, live-lease renewal, consent validation,
+decision claiming, or provider dispatch. An unknown UUID and a UUID owned by another, expired,
+missing, or tampered session produce the same generic 404, without disclosing whether recovery
+state exists. A valid cookie and unchanged identity secret preserve access across process
+restart; rotating the secret intentionally fails closed.
+
 ## Provenance modes
 
 `openai_live` runs two narrow `gpt-5.6-luna` structured-output agents and one
@@ -55,6 +70,8 @@ delegated authority, and the stored SDK interruption. The provider execution key
 the recovery, interruption, and action digest. Retrying the same decision ID returns its stored
 result; a different loser receives `409 already_decided`. These controls and tests establish an
 at-most-one dispatch property for this demo adapter, not a universal exactly-once guarantee.
+An unrelated session cannot participate in that race: it receives 404 before a decision claim
+and cannot win, renew a live lease, or trigger provider dispatch.
 
 Pending state also records `sdkVersion`, `protocolVersion`, `agentGraphVersion`, and a
 `definitionDigest` over prompts, model selections, structured-output schemas, and tool schema.

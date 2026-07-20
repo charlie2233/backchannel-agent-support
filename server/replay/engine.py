@@ -52,6 +52,7 @@ class ReplayEngine:
         scenario_id: str | ScenarioId,
         *,
         execution_mode: ExecutionMode,
+        session_key: str | None = None,
     ) -> RecoverySnapshot:
         if execution_mode is not ExecutionMode.REPLAY_FIXTURE:
             raise UnsupportedExecutionModeError("Task 2 supports replay_fixture only")
@@ -60,4 +61,5 @@ class ReplayEngine:
         return self._store.get_or_create_replay(
             recovery_id=replay_recovery_id(scenario),
             scenario=scenario,
+            session_key=session_key,
         )

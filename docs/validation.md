@@ -19,7 +19,21 @@ npm run openapi:check
 and pytest. `smoke:stub` proves the keyless deterministic Agents SDK approval path. The local
 production smoke starts the same one-process static/API/SSE application used by the image and
 checks approval, decline, receipts, replay SSE resume, CSP, readiness, static routing, and a
-canary-secret non-disclosure rule.
+canary-secret non-disclosure rule. It also verifies the deployed session cookie remains Secure,
+HttpOnly, SameSite=Lax, and bounded by Max-Age. Because the local production lane models TLS
+termination over loopback HTTP, only that smoke client manually carries the observed Secure
+cookie across the loopback hop; the application never weakens the emitted cookie flags.
+
+The focused security regression is:
+
+```bash
+uv run pytest -q tests/security/test_session_isolation.py
+```
+
+It proves foreign snapshot/SSE/receipt/approve/decline all match an absent recovery's generic
+404, owner approval remains at-most-once under a foreign race, the signed cookie survives a
+same-secret restart, tampered cookies fail closed, shared replay access detaches per session,
+reset preserves cooldown/budget history, and retention cleanup cascades access rows.
 
 When a Docker-compatible engine is available, run:
 

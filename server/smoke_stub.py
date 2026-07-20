@@ -112,6 +112,8 @@ def _run_smoke() -> None:
                 "remedyDigest": cast(str, decline_record["remedyDigest"]),
                 "toolCallId": cast(str, decline_record["toolCallId"]),
             }
+            session_cookie = client.cookies.get("backchannel_demo_session")
+            assert session_cookie is not None
 
         store.close()
         del hotel_provider, store
@@ -125,6 +127,10 @@ def _run_smoke() -> None:
                 hotel_provider=restarted_provider,
             )
         ) as restarted_client:
+            restarted_client.cookies.set(
+                "backchannel_demo_session",
+                session_cookie,
+            )
             approved = restarted_client.post(
                 f"/api/recoveries/{approve_recovery_id}/decisions",
                 json=approve_payload,

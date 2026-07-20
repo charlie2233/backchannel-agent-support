@@ -67,7 +67,17 @@ def test_readiness_is_generic_503_when_configured_static_index_is_missing(
     store.close()
 
 
-@pytest.mark.parametrize("failure", ["closed", "missing_schema", "malformed_schema"])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "closed",
+        "missing_schema",
+        "malformed_schema",
+        "missing_access",
+        "malformed_access",
+        "access_foreign_key_violation",
+    ],
+)
 def test_readiness_is_generic_503_for_sqlite_or_schema_failure(
     tmp_path: Path,
     failure: str,
@@ -88,10 +98,23 @@ def test_readiness_is_generic_503_for_sqlite_or_schema_failure(
             with sqlite3.connect(database_path) as connection:
                 if failure == "missing_schema":
                     connection.execute("DROP TABLE receipts")
-                else:
+                elif failure == "malformed_schema":
                     connection.execute(
                         "ALTER TABLE receipts "
                         "RENAME COLUMN receipt_json TO broken_receipt"
+                    )
+                elif failure == "missing_access":
+                    connection.execute("DROP TABLE recovery_access")
+                elif failure == "malformed_access":
+                    connection.execute(
+                        "ALTER TABLE recovery_access "
+                        "RENAME COLUMN session_key TO broken_session_key"
+                    )
+                else:
+                    connection.execute(
+                        "INSERT INTO recovery_access (recovery_id, session_key) "
+                        "VALUES ('missing-recovery', ?)",
+                        ("f" * 64,),
                     )
         response = client.get("/readyz")
         health = client.get("/health")
@@ -102,6 +125,8 @@ def test_readiness_is_generic_503_for_sqlite_or_schema_failure(
     assert str(database_path).lower() not in public_body
     assert "sqlite" not in public_body
     assert "receipt" not in public_body
+    assert "recovery_access" not in public_body
+    assert "session" not in public_body
     assert health.status_code == 200
 
 

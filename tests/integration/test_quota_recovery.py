@@ -217,6 +217,7 @@ class _LiveHotelOnlyOrchestrator:
         *,
         execution_mode: ExecutionMode,
         recovery_id: str | None = None,
+        session_key: str | None = None,
     ) -> SimpleNamespace:
         scenario = ScenarioId(scenario_id)
         self.calls.append((scenario, execution_mode))
@@ -236,6 +237,7 @@ class _LiveHotelOnlyOrchestrator:
             protocol_version="test-protocol",
             agent_graph_version="test-live-hotel",
             definition_digest="a" * 64,
+            session_key=session_key,
         )
         return SimpleNamespace(recovery=recovery)
 
