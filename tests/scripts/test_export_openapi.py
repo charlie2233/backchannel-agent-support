@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
+from server.models import ApprovalDecisionRequest
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -66,6 +68,100 @@ def test_decision_resume_documents_only_an_exact_empty_json_request() -> None:
         "properties": {},
         "additionalProperties": False,
         "maxProperties": 0,
+    }
+
+
+def test_decision_documents_the_exact_strict_pydantic_request_schema() -> None:
+    schema = json.loads(_exporter().render_openapi())
+
+    operation = schema["paths"]["/api/recoveries/{recovery_id}/decisions"]["post"]
+    request_body = operation["requestBody"]
+    expected = ApprovalDecisionRequest.model_json_schema(by_alias=True)
+    definitions = expected.pop("$defs")
+    action_schema = expected["properties"]["action"]
+    assert action_schema == {"$ref": "#/$defs/DecisionAction"}
+    expected["properties"]["action"] = definitions["DecisionAction"]
+
+    assert request_body["required"] is True
+    assert set(request_body["content"]) == {"application/json"}
+    operation_schema = request_body["content"]["application/json"]["schema"]
+    assert operation_schema == expected
+    serialized = json.dumps(operation_schema)
+    assert '"$defs"' not in serialized
+    assert '"$ref"' not in serialized
+
+
+def test_decision_422_documents_both_stable_public_error_shapes() -> None:
+    schema = json.loads(_exporter().render_openapi())
+
+    response = schema["paths"]["/api/recoveries/{recovery_id}/decisions"]["post"][
+        "responses"
+    ]["422"]
+
+    assert response == {
+        "description": (
+            "The authenticated decision body or consent is invalid, or the recovery "
+            "path is not a valid UUID."
+        ),
+        "content": {
+            "application/json": {
+                "schema": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["detail"],
+                            "properties": {
+                                "detail": {
+                                    "type": "object",
+                                    "additionalProperties": False,
+                                    "required": ["code", "recoveryId"],
+                                    "properties": {
+                                        "code": {
+                                            "type": "string",
+                                            "enum": [
+                                                "authority_denied",
+                                                "constraint_denied",
+                                                "decision_body_invalid",
+                                                "remedy_digest_mismatch",
+                                                "remedy_expired",
+                                                "remedy_mismatch",
+                                                "tool_call_mismatch",
+                                            ],
+                                        },
+                                        "recoveryId": {
+                                            "type": "string",
+                                            "format": "uuid",
+                                        },
+                                    },
+                                }
+                            },
+                        },
+                        {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["code", "message", "requestId"],
+                            "properties": {
+                                "code": {
+                                    "type": "string",
+                                    "enum": ["invalid_request"],
+                                },
+                                "message": {
+                                    "type": "string",
+                                    "enum": [
+                                        "The request did not match the public API contract."
+                                    ],
+                                },
+                                "requestId": {
+                                    "type": "string",
+                                    "pattern": "^[0-9a-f]{32}$",
+                                },
+                            },
+                        },
+                    ]
+                }
+            }
+        },
     }
 
 

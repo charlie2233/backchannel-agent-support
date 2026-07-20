@@ -187,6 +187,70 @@ _PRIVATE_RECOVERY_DESCRIPTION = (
 _PRIVATE_NOT_FOUND_RESPONSE: dict[int | str, dict[str, Any]] = {
     status.HTTP_404_NOT_FOUND: {"description": "Recovery not found."}
 }
+_INVALID_REQUEST_MESSAGE = "The request did not match the public API contract."
+_DECISION_UNPROCESSABLE_RESPONSE: dict[str, Any] = {
+    "description": (
+        "The authenticated decision body or consent is invalid, or the recovery "
+        "path is not a valid UUID."
+    ),
+    "content": {
+        "application/json": {
+            "schema": {
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["detail"],
+                        "properties": {
+                            "detail": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": ["code", "recoveryId"],
+                                "properties": {
+                                    "code": {
+                                        "type": "string",
+                                        "enum": [
+                                            "authority_denied",
+                                            "constraint_denied",
+                                            "decision_body_invalid",
+                                            "remedy_digest_mismatch",
+                                            "remedy_expired",
+                                            "remedy_mismatch",
+                                            "tool_call_mismatch",
+                                        ],
+                                    },
+                                    "recoveryId": {
+                                        "type": "string",
+                                        "format": "uuid",
+                                    },
+                                },
+                            }
+                        },
+                    },
+                    {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["code", "message", "requestId"],
+                        "properties": {
+                            "code": {
+                                "type": "string",
+                                "enum": ["invalid_request"],
+                            },
+                            "message": {
+                                "type": "string",
+                                "enum": [_INVALID_REQUEST_MESSAGE],
+                            },
+                            "requestId": {
+                                "type": "string",
+                                "pattern": "^[0-9a-f]{32}$",
+                            },
+                        },
+                    },
+                ]
+            }
+        }
+    },
+}
 _EVENT_STREAM_DESCRIPTION = (
     f"{_PRIVATE_RECOVERY_DESCRIPTION} Streams are admitted by bounded, "
     "process-local capacity. At capacity, the endpoint returns a finite "
@@ -196,6 +260,38 @@ _EVENT_STREAM_HEADERS = {
     "Cache-Control": "no-cache",
     "X-Accel-Buffering": "no",
 }
+
+
+def _inline_local_schema_definitions(schema: dict[str, Any]) -> dict[str, Any]:
+    """Return a self-contained copy of a Pydantic schema with local refs expanded."""
+
+    definitions = schema.get("$defs", {})
+    if not isinstance(definitions, Mapping):
+        raise ValueError("Pydantic schema definitions must be an object")
+
+    def expand(value: Any) -> Any:
+        if isinstance(value, list):
+            return [expand(item) for item in value]
+        if not isinstance(value, Mapping):
+            return value
+        reference = value.get("$ref")
+        if isinstance(reference, str) and reference.startswith("#/$defs/"):
+            if set(value) != {"$ref"}:
+                raise ValueError("Local schema references cannot have siblings")
+            definition = definitions.get(reference.removeprefix("#/$defs/"))
+            if not isinstance(definition, Mapping):
+                raise ValueError("Local schema reference target is missing")
+            return expand(definition)
+        return {
+            key: expand(item)
+            for key, item in value.items()
+            if key != "$defs"
+        }
+
+    expanded = expand(schema)
+    if not isinstance(expanded, dict):
+        raise ValueError("Pydantic schema must expand to an object")
+    return expanded
 
 
 class _LeaseReleasingStreamingResponse(StreamingResponse):
@@ -512,7 +608,7 @@ def create_app(
             request,
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             code="invalid_request",
-            message="The request did not match the public API contract.",
+            message=_INVALID_REQUEST_MESSAGE,
         )
 
     @application.exception_handler(RequestBodyTooLarge)
@@ -685,16 +781,44 @@ def create_app(
         "/api/recoveries/{recovery_id}/decisions",
         response_model=ApprovalDecisionResponse,
         description=_PRIVATE_RECOVERY_DESCRIPTION,
-        responses=_PRIVATE_NOT_FOUND_RESPONSE,
+        responses={
+            **_PRIVATE_NOT_FOUND_RESPONSE,
+            status.HTTP_422_UNPROCESSABLE_CONTENT: _DECISION_UNPROCESSABLE_RESPONSE,
+        },
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": _inline_local_schema_definitions(
+                            ApprovalDecisionRequest.model_json_schema(by_alias=True)
+                        )
+                    }
+                },
+            }
+        },
     )
     async def approve_recovery(
         recovery_id: UUID,
-        payload: ApprovalDecisionRequest,
         request: Request,
     ) -> ApprovalDecisionResponse:
         recovery_key = str(recovery_id)
         _require_recovery_access(request, recovery_store, recovery_key)
         request.state.recovery_id = recovery_key
+        try:
+            media_type = request.headers.get("content-type", "").partition(";")[0]
+            if media_type.strip().lower() != "application/json":
+                raise ValueError("Decision requires an application/json body")
+            raw_payload = await request.json()
+            payload = ApprovalDecisionRequest.model_validate(raw_payload)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={
+                    "code": "decision_body_invalid",
+                    "recoveryId": recovery_key,
+                },
+            ) from None
         try:
             expire_pending_approvals(
                 recovery_store,

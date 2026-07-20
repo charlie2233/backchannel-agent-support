@@ -6,9 +6,11 @@ import os
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
 from queue import Empty
 from threading import Barrier
 from typing import Any
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -253,6 +255,208 @@ def test_public_sdk_stub_creation_and_typed_approval_complete_once(
     assert "statejson" not in public_output
     assert "consumer_proof" not in public_output
     assert "provider_proof" not in public_output
+
+
+def test_valid_decision_accepts_json_content_type_parameters(sdk_client) -> None:
+    client, store, provider = sdk_client
+    snapshot = create_sdk_recovery(client)
+    recovery_id = str(snapshot["recoveryId"])
+    payload = decision_payload(snapshot)
+
+    response = client.post(
+        f"/api/recoveries/{recovery_id}/decisions",
+        content=json.dumps(payload),
+        headers={"Content-Type": "application/json; charset=utf-8"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["approvedRemedyDigest"] == payload["remedyDigest"]
+    assert store.count_decisions(recovery_id) == 1
+    assert store.count_executions(recovery_id) == 1
+    assert provider.dispatch_count == 1
+
+
+_INVALID_DECISION_REQUESTS = (
+    pytest.param({}, id="missing-body"),
+    pytest.param(
+        {
+            "content": "not-json",
+            "headers": {"Content-Type": "application/json"},
+        },
+        id="malformed-json",
+    ),
+    pytest.param({"json": []}, id="nonobject-json"),
+    pytest.param(
+        {
+            "content": "{}",
+            "headers": {"Content-Type": "text/plain"},
+        },
+        id="wrong-media-type",
+    ),
+    pytest.param({"json": {"unexpected": "secret-sentinel"}}, id="extra-field"),
+    pytest.param({"json": {"action": "execute-now"}}, id="invalid-fields"),
+)
+
+
+@pytest.mark.parametrize("request_kwargs", _INVALID_DECISION_REQUESTS)
+def test_foreign_and_absent_decisions_are_generic_404_before_body_validation(
+    sdk_client,
+    request_kwargs: dict[str, object],
+) -> None:
+    owner, _store, _provider = sdk_client
+    snapshot = create_sdk_recovery(owner)
+    recovery_id = str(snapshot["recoveryId"])
+
+    with TestClient(owner.app) as foreign:
+        foreign_response = foreign.post(
+            f"/api/recoveries/{recovery_id}/decisions",
+            **request_kwargs,
+        )
+        absent_response = foreign.post(
+            f"/api/recoveries/{uuid4()}/decisions",
+            **request_kwargs,
+        )
+
+    assert foreign_response.status_code == absent_response.status_code == 404
+    assert foreign_response.json() == absent_response.json() == {"detail": "Not found"}
+
+
+def test_invalid_decision_path_uuid_uses_correlated_public_error(sdk_client) -> None:
+    client, store, provider = sdk_client
+    marker = "private-decision-marker"
+
+    response = client.post(
+        "/api/recoveries/not-a-uuid/decisions",
+        json={"unexpected": marker},
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "code": "invalid_request",
+        "message": "The request did not match the public API contract.",
+        "requestId": response.headers["x-request-id"],
+    }
+    assert marker not in response.text
+    assert store.count_recoveries() == 0
+    assert provider.dispatch_count == 0
+
+
+@pytest.mark.parametrize("request_kwargs", _INVALID_DECISION_REQUESTS)
+def test_authorized_invalid_decision_body_is_stable_redacted_422_without_effects(
+    sdk_client,
+    request_kwargs: dict[str, object],
+) -> None:
+    client, store, provider = sdk_client
+    snapshot = create_sdk_recovery(client)
+    recovery_id = str(snapshot["recoveryId"])
+
+    response = client.post(
+        f"/api/recoveries/{recovery_id}/decisions",
+        **request_kwargs,
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "detail": {
+            "code": "decision_body_invalid",
+            "recoveryId": recovery_id,
+        }
+    }
+    assert store.count_decisions(recovery_id) == 0
+    assert store.count_executions(recovery_id) == 0
+    assert provider.dispatch_count == 0
+
+
+def test_invalid_decision_body_precedes_expiry_and_live_capacity_side_effects(
+    sdk_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, store, provider = sdk_client
+    snapshot = create_sdk_recovery(client)
+    recovery_id = str(snapshot["recoveryId"])
+    approval = snapshot["pendingApproval"]
+    assert isinstance(approval, dict)
+    expiry = datetime.fromisoformat(str(approval["expiry"]))
+    monkeypatch.setattr(store, "_now", lambda: expiry + timedelta(seconds=1))
+    with store._connect() as connection:
+        connection.execute(
+            "UPDATE recoveries SET execution_mode = 'openai_live' WHERE id = ?",
+            (recovery_id,),
+        )
+    controls = client.app.state.public_demo_controls
+    guard_called = False
+
+    def unexpected_guard(_recovery_id: str) -> None:
+        nonlocal guard_called
+        guard_called = True
+
+    monkeypatch.setattr(controls, "guard_live_resume", unexpected_guard)
+
+    response = client.post(
+        f"/api/recoveries/{recovery_id}/decisions",
+        content="not-json",
+        headers={"Content-Type": "application/json; charset=utf-8"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == {
+        "code": "decision_body_invalid",
+        "recoveryId": recovery_id,
+    }
+    assert store.recovery_has_expiration_evidence(recovery_id) is False
+    with store._connect() as connection:
+        persisted_status = connection.execute(
+            "SELECT status FROM recoveries WHERE id = ?",
+            (recovery_id,),
+        ).fetchone()
+    assert persisted_status is not None
+    assert persisted_status["status"] == "pending_approval"
+    assert store.count_decisions(recovery_id) == 0
+    assert store.count_executions(recovery_id) == 0
+    assert provider.dispatch_count == 0
+    assert guard_called is False
+
+
+def test_nonexpired_live_invalid_body_precedes_capacity_guard(
+    sdk_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, store, provider = sdk_client
+    snapshot = create_sdk_recovery(client)
+    recovery_id = str(snapshot["recoveryId"])
+    approval = snapshot["pendingApproval"]
+    assert isinstance(approval, dict)
+    expiry = datetime.fromisoformat(str(approval["expiry"]))
+    assert expiry > datetime.now(expiry.tzinfo)
+    with store._connect() as connection:
+        connection.execute(
+            "UPDATE recoveries SET execution_mode = 'openai_live' WHERE id = ?",
+            (recovery_id,),
+        )
+    controls = client.app.state.public_demo_controls
+    guard_called = False
+
+    def unexpected_guard(_recovery_id: str) -> None:
+        nonlocal guard_called
+        guard_called = True
+
+    monkeypatch.setattr(controls, "guard_live_resume", unexpected_guard)
+
+    response = client.post(
+        f"/api/recoveries/{recovery_id}/decisions",
+        json={"action": "approve"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == {
+        "code": "decision_body_invalid",
+        "recoveryId": recovery_id,
+    }
+    assert guard_called is False
+    assert store.recovery_has_expiration_evidence(recovery_id) is False
+    assert store.count_decisions(recovery_id) == 0
+    assert store.count_executions(recovery_id) == 0
+    assert provider.dispatch_count == 0
 
 
 def test_openai_live_creation_remains_rejected(sdk_client) -> None:

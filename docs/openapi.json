@@ -1,46 +1,6 @@
 {
   "components": {
     "schemas": {
-      "ApprovalDecisionRequest": {
-        "additionalProperties": false,
-        "properties": {
-          "action": {
-            "$ref": "#/components/schemas/DecisionAction"
-          },
-          "clientDecisionId": {
-            "maxLength": 128,
-            "minLength": 1,
-            "title": "Clientdecisionid",
-            "type": "string"
-          },
-          "remedyDigest": {
-            "pattern": "^sha256:[0-9a-f]{64}$",
-            "title": "Remedydigest",
-            "type": "string"
-          },
-          "remedyId": {
-            "maxLength": 128,
-            "minLength": 1,
-            "title": "Remedyid",
-            "type": "string"
-          },
-          "toolCallId": {
-            "maxLength": 256,
-            "minLength": 1,
-            "title": "Toolcallid",
-            "type": "string"
-          }
-        },
-        "required": [
-          "action",
-          "clientDecisionId",
-          "remedyId",
-          "remedyDigest",
-          "toolCallId"
-        ],
-        "title": "ApprovalDecisionRequest",
-        "type": "object"
-      },
       "ApprovalDecisionResponse": {
         "additionalProperties": false,
         "properties": {
@@ -903,7 +863,49 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/ApprovalDecisionRequest"
+                "additionalProperties": false,
+                "properties": {
+                  "action": {
+                    "enum": [
+                      "approve",
+                      "decline"
+                    ],
+                    "title": "DecisionAction",
+                    "type": "string"
+                  },
+                  "clientDecisionId": {
+                    "maxLength": 128,
+                    "minLength": 1,
+                    "title": "Clientdecisionid",
+                    "type": "string"
+                  },
+                  "remedyDigest": {
+                    "pattern": "^sha256:[0-9a-f]{64}$",
+                    "title": "Remedydigest",
+                    "type": "string"
+                  },
+                  "remedyId": {
+                    "maxLength": 128,
+                    "minLength": 1,
+                    "title": "Remedyid",
+                    "type": "string"
+                  },
+                  "toolCallId": {
+                    "maxLength": 256,
+                    "minLength": 1,
+                    "title": "Toolcallid",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "action",
+                  "clientDecisionId",
+                  "remedyId",
+                  "remedyDigest",
+                  "toolCallId"
+                ],
+                "title": "ApprovalDecisionRequest",
+                "type": "object"
               }
             }
           },
@@ -927,11 +929,74 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "oneOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "detail": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "code": {
+                              "enum": [
+                                "authority_denied",
+                                "constraint_denied",
+                                "decision_body_invalid",
+                                "remedy_digest_mismatch",
+                                "remedy_expired",
+                                "remedy_mismatch",
+                                "tool_call_mismatch"
+                              ],
+                              "type": "string"
+                            },
+                            "recoveryId": {
+                              "format": "uuid",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "code",
+                            "recoveryId"
+                          ],
+                          "type": "object"
+                        }
+                      },
+                      "required": [
+                        "detail"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "enum": [
+                            "invalid_request"
+                          ],
+                          "type": "string"
+                        },
+                        "message": {
+                          "enum": [
+                            "The request did not match the public API contract."
+                          ],
+                          "type": "string"
+                        },
+                        "requestId": {
+                          "pattern": "^[0-9a-f]{32}$",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message",
+                        "requestId"
+                      ],
+                      "type": "object"
+                    }
+                  ]
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "The authenticated decision body or consent is invalid, or the recovery path is not a valid UUID."
           }
         },
         "summary": "Approve Recovery"
