@@ -5,12 +5,20 @@ import {
 
 interface LifecycleProps {
   scenario: RecoveryScenario;
+  phase?: "active" | "idle" | "awaiting";
 }
 
 function stepState(
   scenario: RecoveryScenario,
   index: number,
+  phase: "active" | "idle" | "awaiting",
 ): { className: string; label: string; current: boolean } {
+  if (phase === "idle") {
+    return { className: "not-started", label: "Not started", current: false };
+  }
+  if (phase === "awaiting") {
+    return { className: "awaiting", label: "Awaiting", current: false };
+  }
   if (scenario.status === "completed") {
     return { className: "complete", label: "Recorded", current: false };
   }
@@ -35,8 +43,13 @@ function stepState(
   return { className: "upcoming", label: "Upcoming", current: false };
 }
 
-export function Lifecycle({ scenario }: LifecycleProps) {
+export function Lifecycle({ scenario, phase = "active" }: LifecycleProps) {
   const currentStep = lifecycleSteps[scenario.currentStep];
+  const neutralLabel = phase === "idle" ? "Not started" : "Awaiting server evidence";
+  const neutralDescription =
+    phase === "idle"
+      ? "No server run started."
+      : "Waiting for an authoritative server recovery snapshot.";
 
   return (
     <section className="lifecycle-panel" aria-labelledby="lifecycle-heading">
@@ -46,13 +59,15 @@ export function Lifecycle({ scenario }: LifecycleProps) {
           <h2 id="lifecycle-heading">Recovery lifecycle</h2>
         </div>
         <span className="step-count">
-          Step {scenario.currentStep + 1} of {lifecycleSteps.length}
+          {phase === "active"
+            ? `Step ${scenario.currentStep + 1} of ${lifecycleSteps.length}`
+            : neutralLabel}
         </span>
       </div>
 
       <ol className="lifecycle" aria-label="Recovery lifecycle">
         {lifecycleSteps.map((step, index) => {
-          const state = stepState(scenario, index);
+          const state = stepState(scenario, index, phase);
           return (
             <li
               className={`lifecycle-item lifecycle-item--${state.className}`}
@@ -67,15 +82,21 @@ export function Lifecycle({ scenario }: LifecycleProps) {
                   <h3>{step}</h3>
                   <span>{state.label}</span>
                 </div>
-                <p className="step-description">{scenario.lifecycleDetails[step]}</p>
+                <p className="step-description">
+                  {phase === "active" ? scenario.lifecycleDetails[step] : neutralDescription}
+                </p>
               </div>
             </li>
           );
         })}
       </ol>
-      <div className="current-step-detail" role="note" aria-label="Current step detail">
-        <strong>{currentStep}</strong>
-        <p>{scenario.lifecycleDetails[currentStep]}</p>
+      <div
+        className="current-step-detail"
+        role="note"
+        aria-label={phase === "active" ? "Current step detail" : "Lifecycle state"}
+      >
+        <strong>{phase === "active" ? currentStep : neutralLabel}</strong>
+        <p>{phase === "active" ? scenario.lifecycleDetails[currentStep] : neutralDescription}</p>
       </div>
     </section>
   );

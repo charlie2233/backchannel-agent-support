@@ -376,7 +376,8 @@ code,
   color: #073b9b;
 }
 
-.replay-fallback {
+.replay-fallback,
+.live-start {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -387,7 +388,8 @@ code,
   padding: 10px 12px;
 }
 
-.replay-fallback p {
+.replay-fallback p,
+.live-start p {
   margin: 2px 0 0;
   color: #713a13;
   font-size: 11px;
@@ -406,6 +408,7 @@ code,
 }
 
 .replay-fallback button,
+.live-start button,
 .receipt-error button {
   min-height: 44px;
   border: 1px solid #9c4d16;
@@ -416,6 +419,26 @@ code,
   font-size: 11px;
   font-weight: 750;
   cursor: pointer;
+}
+
+.live-start {
+  border-color: #8aa9dc;
+  background: #f3f7ff;
+}
+
+.live-start p {
+  color: #183a70;
+}
+
+.live-start button {
+  border-color: #1d5fc4;
+  background: #0b4aa2;
+  color: #ffffff;
+}
+
+.live-start button:disabled {
+  cursor: wait;
+  opacity: 0.65;
 }
 
 .recovery-heading {
@@ -1191,7 +1214,8 @@ code,
     font-size: 9px;
   }
 
-  .replay-fallback {
+  .replay-fallback,
+  .live-start {
     display: grid;
     gap: 10px;
     margin-top: 10px;

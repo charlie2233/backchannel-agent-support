@@ -19,6 +19,18 @@ function terminalScenario(
 }
 
 describe("Lifecycle terminal truth", () => {
+  it.each([
+    { phase: "idle", label: "Not started" },
+    { phase: "awaiting", label: "Awaiting server evidence" },
+  ] as const)("renders a neutral $phase lifecycle without a current step", ({ phase, label }) => {
+    render(<Lifecycle phase={phase} scenario={recoveryScenarios[0]} />);
+    const lifecycle = screen.getByRole("list", { name: "Recovery lifecycle" });
+
+    expect(within(lifecycle).queryByRole("listitem", { current: "step" })).not.toBeInTheDocument();
+    expect(screen.getByText(label, { selector: ".step-count" })).toBeVisible();
+    expect(screen.queryByText("Step 1 of 6")).not.toBeInTheDocument();
+  });
+
   it("keeps the six-step timeline compact while exposing one readable current-step detail", () => {
     const scenario = recoveryScenarios[0];
     render(<Lifecycle scenario={scenario} />);

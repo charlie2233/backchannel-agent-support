@@ -27,12 +27,22 @@ missing, or tampered session produce the same generic 404, without disclosing wh
 state exists. A valid cookie and unchanged identity secret preserve access across process
 restart; rotating the secret intentionally fails closed.
 
+The UI stores no cookie, session correlation, serialized run state, approval payload, or
+provenance claim in browser storage. It may retain one syntactically validated hotel recovery
+UUID in same-tab `sessionStorage` as a non-authoritative reload hint. The server-authorized GET
+must return a contract-valid hotel snapshot before that hint can restore the event stream,
+consent, or receipt. Any failed lookup clears the hint and does not create a replacement run.
+On a keyless runtime, the browser then offers replay and SDK QA as explicit actions; it does not
+reuse copy that claims an automatic fallback is underway.
+
 ## Provenance modes
 
 `openai_live` runs two narrow `gpt-5.6-luna` structured-output agents and one
 `gpt-5.6-terra` broker inside one explicit Agents SDK root trace. It proves real model calls
 only when the receipt records model IDs, `modelCall=true`, a valid `trace_...` root, and the
-live execution mode. The provider is still a simulated hotel adapter.
+live execution mode. The provider is still a simulated hotel adapter. The browser starts this
+mode only from the explicit **Start live recovery** action; mount and reload never infer consent
+to spend model quota.
 
 `sdk_stub` uses the actual Agents SDK runner, tool interruption, serialized state, and resume
 path with deterministic local model responses. Its `qa_trace_...` value is a local correlation

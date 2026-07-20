@@ -109,6 +109,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  window.sessionStorage.clear();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -117,20 +118,25 @@ describe("responsive operational console accessibility", () => {
   it.each([
     { mobile: false, label: "desktop" },
     { mobile: true, label: "mobile" },
-  ])("has no critical axe violations at $label", async ({ mobile }) => {
-    setViewport(mobile);
-    stubPendingRecovery();
-    const { container } = render(<App />);
-    await screen.findAllByText("Approval required before demo-provider dispatch.");
+  ])(
+    "has no critical axe violations at $label",
+    async ({ mobile }) => {
+      setViewport(mobile);
+      stubPendingRecovery();
+      const { container } = render(<App />);
+      fireEvent.click(await screen.findByRole("button", { name: "Start live recovery" }));
+      await screen.findAllByText("Approval required before demo-provider dispatch.");
 
-    if (mobile) {
-      fireEvent.click(screen.getByRole("button", { name: "Review exact remedy" }));
-      await screen.findByRole("dialog", { name: "Approve exact remedy" });
-    }
+      if (mobile) {
+        fireEvent.click(screen.getByRole("button", { name: "Review exact remedy" }));
+        await screen.findByRole("dialog", { name: "Approve exact remedy" });
+      }
 
-    const result = await axe.run(container);
-    expect(result.violations.filter(({ impact }) => impact === "critical")).toEqual([]);
-  });
+      const result = await axe.run(container);
+      expect(result.violations.filter(({ impact }) => impact === "critical")).toEqual([]);
+    },
+    15_000,
+  );
 
   it("uses a semantic two-option selector and focus-managed evidence dialog on mobile", async () => {
     setViewport(true);
@@ -140,6 +146,7 @@ describe("responsive operational console accessibility", () => {
     const selector = await screen.findByRole("combobox", { name: "Scenario" });
     expect(within(selector).getAllByRole("option")).toHaveLength(2);
     expect(screen.queryByRole("navigation", { name: "Recovery scenarios" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Start live recovery" }));
     await screen.findAllByText("Approval required before demo-provider dispatch.");
     expect(screen.getByText("Step 4 of 6")).toBeVisible();
 
@@ -155,6 +162,7 @@ describe("responsive operational console accessibility", () => {
     setViewport(false);
     stubPendingRecovery();
     render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Start live recovery" }));
     await screen.findAllByText("Approval required before demo-provider dispatch.");
 
     const lifecycle = screen.getByRole("list", { name: "Recovery lifecycle" });

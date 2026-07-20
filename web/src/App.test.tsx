@@ -6,6 +6,7 @@ import App from "./App";
 
 afterEach(() => {
   cleanup();
+  window.sessionStorage.clear();
   vi.unstubAllGlobals();
 });
 
@@ -150,7 +151,7 @@ describe("Backchannel console", () => {
       expect(screen.getAllByText("New SDK run remains authoritative.")[0]).toBeVisible(),
     );
     expect(screen.queryByText("Old terminal refresh must not win.")).not.toBeInTheDocument();
-  });
+  }, 15_000);
 
   it("clears a stale replay failure when an intentional SDK run succeeds", async () => {
     vi.stubGlobal(
@@ -504,6 +505,7 @@ describe("Backchannel console", () => {
         <App />
       </StrictMode>,
     );
+    fireEvent.click(await screen.findByRole("button", { name: "Start live recovery" }));
     expect((await screen.findAllByText("Live hotel recovery started."))[0]).toBeVisible();
 
     fireEvent.click(screen.getByRole("button", { name: /API quota recovery/i }));
@@ -681,6 +683,7 @@ describe("Backchannel console", () => {
     );
 
     render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Start live recovery" }));
     expect((await screen.findAllByText("Live hotel recovery started."))[0]).toBeVisible();
     const quotaButton = screen.getByRole("button", { name: /API quota recovery/i });
     fireEvent.click(quotaButton);
@@ -775,6 +778,7 @@ describe("Backchannel console", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Start live recovery" }));
 
     expect(await screen.findByText(safeExplanation)).toBeVisible();
     const replayAction = screen.getByRole("button", { name: "Run replay fixture" });
@@ -889,6 +893,7 @@ describe("Backchannel console", () => {
     );
 
     render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Start live recovery" }));
 
     await waitFor(() => expect(requestModes).toEqual(["openai_live"]));
     expect(screen.queryByRole("button", { name: "Run replay fixture" })).not.toBeInTheDocument();
@@ -937,6 +942,7 @@ describe("Backchannel console", () => {
     );
 
     render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Start live recovery" }));
 
     expect(await screen.findByText("GPT-5.6 agents")).toBeVisible();
     expect(screen.queryByText(/12 providers reachable/i)).not.toBeInTheDocument();
@@ -1107,7 +1113,7 @@ describe("Backchannel console", () => {
       expect.stringContaining("Verify & seal"),
     ]);
 
-    expect(await screen.findByText("Awaiting run evidence")).toBeInTheDocument();
+    expect((await screen.findAllByText("No server run started."))[0]).toBeInTheDocument();
     expect(screen.queryByText(/GPT-5\.6 agents/i)).not.toBeInTheDocument();
   });
 

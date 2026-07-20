@@ -34,7 +34,8 @@ curl -sS http://127.0.0.1:8000/api/recoveries \
 ```
 
 For a live-ready local process, supply `OPENAI_API_KEY` only to the server environment,
-restart `npm run start`, and use the hotel scenario. The redacted command-line gate is:
+restart `npm run start`, and select **Start live recovery** in the hotel scenario. A page load
+never starts a billed live run. The redacted command-line gate is:
 
 ```bash
 npm run smoke:live
@@ -50,6 +51,9 @@ model call nor a provider dispatch.
 - The server, not the browser, owns recovery state, ordered events, decisions, and receipts.
 - Recovery detail is bound to the signed HttpOnly demo session that created or explicitly
   started it. Foreign, expired, missing, and tampered sessions receive the same generic 404.
+- The browser keeps only the last validated hotel recovery UUID in `sessionStorage`. Reload
+  first asks the session-authorized snapshot endpoint to restore that run; an invalid or
+  inaccessible hint is cleared and never causes a replacement live run.
 - Hotel execution pauses at the Agents SDK `commit_remedy` interruption. Consent displays
   exact terms, a UTC expiry, and a canonical `sha256:` digest.
 - Approval rechecks the digest, interruption, expiry, hard constraints, and delegated

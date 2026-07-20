@@ -26,12 +26,42 @@ import type {
 import { isTerminalRecoveryStatus } from "./domain/recovery";
 import { recoveryScenarios } from "./fixtures/recoveries";
 import { useRecoveryEvents } from "./hooks/useRecovery";
+import {
+  clearHotelRecoveryHint,
+  readHotelRecoveryHint,
+  writeHotelRecoveryHint,
+} from "./recoverySession";
 
 const MOBILE_QUERY = "(max-width: 759px)";
 const SDK_QA_NOTICE =
   "Live recovery is unavailable in this demo. You are viewing the deterministic SDK QA trace; replay remains available explicitly.";
 const EXPLICIT_REPLAY_NOTICE =
   "Live recovery is unavailable in this demo. You are viewing an explicitly requested replay fixture.";
+const EXPLICIT_DEMO_NOTICE =
+  "Live recovery is unavailable in this demo. No fallback run has started; choose a replay fixture or SDK QA trace explicitly.";
+const AWAITING_DEMO_NOTICE =
+  "Awaiting authoritative server evidence for the explicitly requested demo run.";
+
+type HotelResumeState = "checking" | "none" | "invalid" | "restored";
+
+const HOTEL_IDLE_SCENARIO: RecoveryScenario = {
+  id: "hotel",
+  title: "Hotel booking recovery",
+  summary: "No server recovery has been started in this browser session.",
+  executionMode: "replay_fixture",
+  status: "in_progress",
+  currentStep: 0,
+  currentStepSummary: "No server run started.",
+  lifecycleDetails: {
+    Detect: "No server run started.",
+    Prove: "No provider evidence has been requested.",
+    Negotiate: "No remedy has been prepared.",
+    Authorize: "No consent request exists.",
+    Execute: "No provider dispatch has been authorized.",
+    "Verify & seal": "No server receipt exists.",
+  },
+  evidence: [],
+};
 
 function useMobileLayout(): boolean {
   const [mobile, setMobile] = useState(
@@ -139,11 +169,16 @@ export default function App() {
   const [health, setHealth] = useState<HealthStatus | null>(null);
   const [healthError, setHealthError] = useState(false);
   const [hotelSnapshot, setHotelSnapshot] = useState<RecoverySnapshot | null>(null);
+  const [hotelResumeState, setHotelResumeState] = useState<HotelResumeState>("checking");
+  const [hotelLiveLoading, setHotelLiveLoading] = useState(false);
   const [quotaSnapshot, setQuotaSnapshot] = useState<RecoverySnapshot | null>(null);
   const [quotaLoading, setQuotaLoading] = useState(false);
   const [quotaError, setQuotaError] = useState<string | null>(null);
   const quotaStartedRef = useRef(false);
   const hotelStartGenerationRef = useRef(0);
+  const hotelLiveStartInFlightRef = useRef(false);
+  const hotelLiveControllerRef = useRef<AbortController | null>(null);
+  const invalidResumeObservedRef = useRef(false);
   const [replayFallback, setReplayFallback] = useState<string | null>(null);
   const [replayLoading, setReplayLoading] = useState(false);
   const [replayError, setReplayError] = useState<string | null>(null);
@@ -162,6 +197,12 @@ export default function App() {
 
   const activeScenario =
     recoveryScenarios.find((scenario) => scenario.id === activeId) ?? recoveryScenarios[0];
+
+  const acceptHotelSnapshot = useCallback((snapshot: RecoverySnapshot) => {
+    if (snapshot.scenarioId !== "hotel") return;
+    writeHotelRecoveryHint(snapshot.recoveryId);
+    setHotelSnapshot(snapshot);
+  }, []);
 
   const loadReceipt = useCallback(async (recoveryId: string) => {
     if (
@@ -216,46 +257,100 @@ export default function App() {
     [quotaLoading, quotaSnapshot, startQuota],
   );
 
-  const startReplay = useCallback(async (signal?: AbortSignal, explicit = false) => {
+  const startReplay = useCallback(async (
+    signal?: AbortSignal,
+    explicit = false,
+    fromExplicitDemoChoice = false,
+  ) => {
     const generation = ++hotelStartGenerationRef.current;
     setSdkLoading(false);
     setSdkError(null);
     setReplayLoading(true);
     setReplayError(null);
+    if (fromExplicitDemoChoice) setReplayFallback(AWAITING_DEMO_NOTICE);
     try {
       const snapshot = await createRecovery("hotel", "replay_fixture", signal);
       if (hotelStartGenerationRef.current !== generation) return;
-      setHotelSnapshot(snapshot);
+      acceptHotelSnapshot(snapshot);
       if (explicit) setReplayFallback(EXPLICIT_REPLAY_NOTICE);
     } catch (error: unknown) {
       if (hotelStartGenerationRef.current !== generation) return;
       if (error instanceof DOMException && error.name === "AbortError") return;
+      if (fromExplicitDemoChoice) setReplayFallback(EXPLICIT_DEMO_NOTICE);
       setReplayError("The replay fixture could not be started. You can retry explicitly.");
     } finally {
       if (hotelStartGenerationRef.current === generation) setReplayLoading(false);
     }
-  }, []);
+  }, [acceptHotelSnapshot]);
 
   const startSdkQa = useCallback(async () => {
     if (sdkLoading) return;
+    const fromExplicitDemoChoice = replayFallback === EXPLICIT_DEMO_NOTICE;
     const generation = ++hotelStartGenerationRef.current;
     setReplayLoading(false);
     setReplayError(null);
     setSdkLoading(true);
     setSdkError(null);
+    if (fromExplicitDemoChoice) setReplayFallback(AWAITING_DEMO_NOTICE);
     try {
       const snapshot = await createRecovery("hotel", "sdk_stub");
       if (hotelStartGenerationRef.current !== generation) return;
-      setHotelSnapshot(snapshot);
+      acceptHotelSnapshot(snapshot);
       if (replayFallback !== null) setReplayFallback(SDK_QA_NOTICE);
       setEvidenceOpen(false);
     } catch {
       if (hotelStartGenerationRef.current !== generation) return;
+      if (fromExplicitDemoChoice) setReplayFallback(EXPLICIT_DEMO_NOTICE);
       setSdkError("The deterministic SDK QA trace could not be started.");
     } finally {
       if (hotelStartGenerationRef.current === generation) setSdkLoading(false);
     }
-  }, [replayFallback, sdkLoading]);
+  }, [acceptHotelSnapshot, replayFallback, sdkLoading]);
+
+  const startLive = useCallback(() => {
+    if (
+      hotelLiveStartInFlightRef.current ||
+      health?.backend !== "openai" ||
+      !health.liveReady ||
+      hotelResumeState === "checking"
+    ) {
+      return;
+    }
+    hotelLiveStartInFlightRef.current = true;
+    const generation = ++hotelStartGenerationRef.current;
+    const controller = new AbortController();
+    hotelLiveControllerRef.current = controller;
+    setHotelLiveLoading(true);
+    setHotelStartError(null);
+    setReplayError(null);
+    setReplayFallback(null);
+
+    void createRecovery("hotel", "openai_live", controller.signal)
+      .then((snapshot) => {
+        if (hotelStartGenerationRef.current !== generation) return;
+        acceptHotelSnapshot(snapshot);
+        setEvidenceOpen(false);
+      })
+      .catch((error: unknown) => {
+        if (hotelStartGenerationRef.current !== generation) return;
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        if (error instanceof LiveAdmissionError) {
+          setReplayFallback(error.message);
+          hotelLiveStartInFlightRef.current = false;
+          hotelLiveControllerRef.current = null;
+          setHotelLiveLoading(false);
+          void startReplay();
+          return;
+        }
+        setHotelStartError("The live recovery could not be started. No fallback run was created.");
+      })
+      .finally(() => {
+        if (hotelLiveControllerRef.current !== controller) return;
+        hotelLiveControllerRef.current = null;
+        hotelLiveStartInFlightRef.current = false;
+        if (hotelStartGenerationRef.current === generation) setHotelLiveLoading(false);
+      });
+  }, [acceptHotelSnapshot, health, hotelResumeState, startReplay]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -271,9 +366,64 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (health === null) return;
+    const controller = new AbortController();
+    const { hadHint, recoveryId } = readHotelRecoveryHint();
+    if (!hadHint) {
+      setHotelResumeState(invalidResumeObservedRef.current ? "invalid" : "none");
+      return () => controller.abort();
+    }
+    if (recoveryId === null) {
+      invalidResumeObservedRef.current = true;
+      setHotelResumeState("invalid");
+      return () => controller.abort();
+    }
+
+    const generation = ++hotelStartGenerationRef.current;
+    setHotelResumeState("checking");
+    void getRecovery(recoveryId, controller.signal)
+      .then((snapshot) => {
+        if (
+          controller.signal.aborted ||
+          hotelStartGenerationRef.current !== generation
+        ) {
+          return;
+        }
+        if (snapshot.scenarioId !== "hotel") {
+          invalidResumeObservedRef.current = true;
+          clearHotelRecoveryHint();
+          setHotelResumeState("invalid");
+          return;
+        }
+        acceptHotelSnapshot(snapshot);
+        setHotelResumeState("restored");
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted || hotelStartGenerationRef.current !== generation) return;
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        invalidResumeObservedRef.current = true;
+        clearHotelRecoveryHint();
+        setHotelResumeState("invalid");
+      });
+    return () => controller.abort();
+  }, [acceptHotelSnapshot]);
+
+  useEffect(() => {
+    if (
+      health === null ||
+      hotelResumeState === "checking" ||
+      hotelResumeState === "restored"
+    ) {
+      return;
+    }
     const controller = new AbortController();
     const liveAvailable = health.backend === "openai" && health.liveReady;
+    if (hotelResumeState === "invalid") {
+      setHotelSnapshot(null);
+      setReplayError(null);
+      setHotelStartError(null);
+      setReplayFallback(liveAvailable ? null : EXPLICIT_DEMO_NOTICE);
+      return () => controller.abort();
+    }
     if (!liveAvailable) {
       setHotelSnapshot(null);
       setReplayFallback(LIVE_ADMISSION_MESSAGES.live_unavailable);
@@ -284,20 +434,18 @@ export default function App() {
     setReplayFallback(null);
     setReplayError(null);
     setHotelStartError(null);
-    void createRecovery("hotel", "openai_live", controller.signal)
-      .then(setHotelSnapshot)
-      .catch((error: unknown) => {
-        if (error instanceof DOMException && error.name === "AbortError") return;
-        setHotelSnapshot(null);
-        if (error instanceof LiveAdmissionError) {
-          setReplayFallback(error.message);
-          void startReplay(controller.signal);
-          return;
-        }
-        setHotelStartError("The live recovery could not be started.");
-      });
     return () => controller.abort();
-  }, [health, startReplay]);
+  }, [health, hotelResumeState, startReplay]);
+
+  useEffect(
+    () => () => {
+      hotelStartGenerationRef.current += 1;
+      hotelLiveStartInFlightRef.current = false;
+      hotelLiveControllerRef.current?.abort();
+      hotelLiveControllerRef.current = null;
+    },
+    [],
+  );
 
   useEffect(() => {
     const terminalSnapshots = [hotelSnapshot, quotaSnapshot];
@@ -309,6 +457,15 @@ export default function App() {
   }, [hotelSnapshot, loadReceipt, quotaSnapshot]);
 
   const activeSnapshot = activeId === "hotel" ? hotelSnapshot : quotaSnapshot;
+  const hotelLifecyclePhase =
+    activeId !== "hotel" || activeSnapshot !== null
+      ? "active"
+      : hotelResumeState === "checking" ||
+          hotelLiveLoading ||
+          replayLoading ||
+          sdkLoading
+        ? "awaiting"
+        : "idle";
   const activeRecoveryId = activeSnapshot?.recoveryId ?? null;
   const eventState = useRecoveryEvents(activeRecoveryId);
   const activeEvents = useMemo(
@@ -359,7 +516,7 @@ export default function App() {
         lifecycleDetails: serverLifecycleDetails(activeSnapshot),
       };
     }
-    if (activeId !== "api-quota") return activeScenario;
+    if (activeId === "hotel") return HOTEL_IDLE_SCENARIO;
     const waiting = quotaLoading
       ? "Starting the deterministic quota SDK trace."
       : "No server quota proof is available.";
@@ -426,6 +583,28 @@ export default function App() {
           boundaryText: "Only server-returned SDK evidence can complete this scenario.",
         }
       : null;
+  const hotelEmptyState =
+    activeId === "hotel" && activeSnapshot === null
+      ? {
+          title:
+            hotelLifecyclePhase === "awaiting"
+              ? "Awaiting server evidence"
+              : "No recovery started",
+          summary:
+            hotelLifecyclePhase === "awaiting"
+              ? "Awaiting server evidence."
+              : "No server run started.",
+          boundaryTitle:
+            hotelLifecyclePhase === "awaiting"
+              ? "No execution-mode claim is available yet."
+              : "No active recovery evidence is being shown.",
+          boundaryText:
+            hotelLifecyclePhase === "awaiting"
+              ? "Waiting for an authoritative server recovery snapshot."
+              : "Start a live recovery explicitly, or use a disclosed replay or SDK QA action when available.",
+        }
+      : null;
+  const liveAvailable = health?.backend === "openai" && health.liveReady;
 
   return (
     <div className="app-frame">
@@ -442,12 +621,46 @@ export default function App() {
           <ProvenanceStrip
             presentation={presentation}
             healthError={healthError}
-            awaitingSnapshot={health !== null && activeSnapshot === null}
+            awaitingSnapshot={
+              activeId === "api-quota" && health !== null && activeSnapshot === null
+            }
+            awaitingServerEvidence={
+              activeId === "hotel" && hotelLifecyclePhase === "awaiting"
+            }
+            noRunStarted={activeId === "hotel" && hotelLifecyclePhase === "idle"}
           />
+          {activeId === "hotel" &&
+          liveAvailable &&
+          hotelResumeState !== "checking" &&
+          activeSnapshot === null &&
+          replayFallback === null ? (
+            <section className="live-start" aria-live="polite">
+              <div>
+                <p className="eyebrow">Live recovery</p>
+                <p>
+                  {hotelLiveLoading
+                    ? "Waiting for an authoritative live recovery snapshot."
+                    : "No server run starts until you explicitly request one."}
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={hotelLiveLoading}
+                onClick={startLive}
+              >
+                {hotelLiveLoading ? "Starting live recovery…" : "Start live recovery"}
+              </button>
+            </section>
+          ) : null}
           {activeId === "hotel" && replayFallback !== null ? (
             <section className="replay-fallback" aria-live="polite">
               <div>
-                <p className="eyebrow">Replay fallback</p>
+                <p className="eyebrow">
+                  {replayFallback === EXPLICIT_DEMO_NOTICE ||
+                  replayFallback === AWAITING_DEMO_NOTICE
+                    ? "Available demo modes"
+                    : "Replay fallback"}
+                </p>
                 <p>{replayFallback}</p>
                 {replayError === null ? null : <p role="alert">{replayError}</p>}
                 {sdkError === null ? null : <p role="alert">{sdkError}</p>}
@@ -457,13 +670,22 @@ export default function App() {
                   type="button"
                   aria-label="Run replay fixture"
                   disabled={replayLoading || sdkLoading}
-                  onClick={() => void startReplay(undefined, true)}
+                  onClick={() =>
+                    void startReplay(
+                      undefined,
+                      true,
+                      replayFallback === EXPLICIT_DEMO_NOTICE,
+                    )
+                  }
                 >
                   {replayLoading ? "Loading replay fixture…" : "Run replay fixture"}
                 </button>
                 <button
                   type="button"
-                  disabled={sdkLoading}
+                  disabled={
+                    sdkLoading ||
+                    (replayLoading && replayFallback === AWAITING_DEMO_NOTICE)
+                  }
                   onClick={() => void startSdkQa()}
                 >
                   {sdkLoading ? "Starting SDK QA trace…" : "Run SDK QA trace"}
@@ -488,12 +710,16 @@ export default function App() {
             >
               {activeSnapshot !== null
                 ? serverStatusLabel(activeSnapshot.status, activeSnapshot.pendingApproval !== null)
+                : activeId === "hotel"
+                  ? hotelLifecyclePhase === "awaiting"
+                    ? "Awaiting evidence"
+                    : "Not started"
                 : activeScenarioView.status === "completed"
                   ? "Completed fixture"
                   : "Awaiting boundary"}
             </span>
           </section>
-          <Lifecycle scenario={activeScenarioView} />
+          <Lifecycle phase={hotelLifecyclePhase} scenario={activeScenarioView} />
         </main>
 
         {mobile ? (
@@ -515,7 +741,7 @@ export default function App() {
           receiptLoading={activeReceiptLoading}
           receiptError={activeReceiptError}
           terminalEventObserved={terminalEvent !== undefined}
-          emptyState={quotaEmptyState}
+          emptyState={hotelEmptyState ?? quotaEmptyState}
           mobile={mobile}
           open={mobile ? evidenceOpen : true}
           onClose={() => setEvidenceOpen(false)}

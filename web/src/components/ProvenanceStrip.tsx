@@ -4,12 +4,16 @@ interface ProvenanceStripProps {
   presentation: RuntimePresentation | null;
   healthError: boolean;
   awaitingSnapshot?: boolean;
+  awaitingServerEvidence?: boolean;
+  noRunStarted?: boolean;
 }
 
 export function ProvenanceStrip({
   presentation,
   healthError,
   awaitingSnapshot = false,
+  awaitingServerEvidence = false,
+  noRunStarted = false,
 }: ProvenanceStripProps) {
   if (presentation === null) {
     return (
@@ -19,6 +23,10 @@ export function ProvenanceStrip({
           <strong>
             {healthError
               ? "Runtime unavailable"
+              : awaitingServerEvidence
+                ? "Awaiting server evidence"
+              : noRunStarted
+                ? "No server run started"
               : awaitingSnapshot
                 ? "Awaiting run evidence"
                 : "Checking runtime"}
@@ -26,6 +34,10 @@ export function ProvenanceStrip({
           <p>
             {healthError
               ? "The health endpoint could not be verified, so no runtime claim is shown."
+              : awaitingServerEvidence
+                ? "Waiting for an authoritative server snapshot before making an execution-mode claim."
+              : noRunStarted
+                ? "Start a server recovery explicitly before execution-mode provenance is shown."
               : awaitingSnapshot
                 ? "Waiting for a server recovery snapshot before making an execution-mode claim."
               : "Waiting for /health before making a runtime claim."}

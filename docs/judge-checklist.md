@@ -18,7 +18,8 @@ neither is presented as live-provider, container, deployment, or public-reachabi
 
 **0:00–0:25 — Establish the boundary.** Open the console and read the provenance strip. Point
 out `providerBoundary=demo_adapter_only`: even `openai_live` never changes a real booking,
-payment, or quota.
+payment, or quota. On a live-ready process, also point out the truthful idle state: page load
+made no model call, and only **Start live recovery** can create a live run.
 
 **0:25–0:55 — Show the protocol.** Select **Hotel booking recovery** and name the six fixed
 steps: Detect, Prove, Negotiate, Authorize, Execute, Verify & seal. Select **Run SDK QA trace**

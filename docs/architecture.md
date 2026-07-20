@@ -24,6 +24,19 @@ ordered event stream; native `EventSource` reconnects with `Last-Event-ID`, and 
 replays later rows before waiting for new commits. Terminal events close the stream, after
 which the UI fetches the authoritative snapshot and receipt.
 
+A live-ready page load is deliberately idle. **Start live recovery** is the only UI action that
+creates an `openai_live` hotel run, and an in-flight guard coalesces rapid activation before
+React can re-render the disabled control. After any validated hotel snapshot, the browser may
+store only its canonical UUID in same-tab `sessionStorage`; the signed HttpOnly cookie remains
+the access credential. Reload performs the authorized snapshot GET before any fallback or new
+start. A valid snapshot restores its SSE, consent, and receipt lifecycle. Malformed, stale,
+foreign-session, expired-session, and retention-deleted hints are cleared and leave the UI in a
+truthful no-run state. If live mode is unavailable, that state offers explicit replay and SDK QA
+actions without automatically creating a replacement. While a resume or explicit start is
+unresolved, the lifecycle remains neutral at **Awaiting server evidence** with no current step or
+execution-mode claim. React StrictMode can probe the idempotent GET effect twice in development,
+but it does not create a recovery; live creation remains explicitly initiated and one-POST.
+
 SQLite persists the pending Agents SDK state envelope, consent evidence, decision claim,
 provider execution record, event ledger, receipt, and opaque recovery-access association. A
 pending approval carries the Agents
@@ -51,6 +64,9 @@ marks the pending envelope and remedy expired, and releases the matching live ad
 `/health` exposes only `backend`, `liveReady`, and `providerBoundary=demo_adapter_only`;
 it never exposes the API key. A live UI label is allowed only when health is live-ready and
 the active snapshot or receipt independently records `executionMode=openai_live`.
+When no request is pending and no snapshot exists, the inspector, lifecycle, and provenance
+strip state that no server run has started. While a request is unresolved, they instead show
+neutral awaiting evidence; neither state presents the bundled replay fixture as active evidence.
 
 ## Production shape
 

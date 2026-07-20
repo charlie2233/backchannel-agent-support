@@ -30,6 +30,7 @@ The focused security regression is:
 uv run pytest -q tests/security/test_session_isolation.py
 uv run pytest -q tests/domain/test_pending_expiry.py tests/api/test_expiry_lifecycle.py
 npm --workspace web exec -- vitest run src/components/EvidenceInspector.test.tsx
+npm --workspace web exec -- vitest run src/App.explicitLive.test.tsx src/recoverySession.test.ts
 ```
 
 It proves foreign snapshot/SSE/receipt/approve/decline all match an absent recovery's generic
@@ -41,6 +42,15 @@ usage preservation, restart idempotence, decision-versus-expiry writer serializa
 access-check ordering, synchronous snapshot/SSE/receipt/decision truth, bounded UTC maintenance,
 stable `remedy_expired` retries, and fake-timer controls that refresh once without posting a
 stale decision or continuing after unmount.
+The explicit-live suites prove zero live POSTs on initial mount and authorized restore,
+synchronous one-POST activation coalescing under StrictMode, UUID-only storage with exception
+safety, valid consent/receipt restoration, invalid-hint clearing, truthful snapshotless UI, and
+no stale resume/start continuation after unmount. StrictMode may repeat the idempotent snapshot
+GET during its development effect probe; the gate is that it accepts one current result and
+never turns that probe into recovery creation.
+Snapshotless lifecycle coverage also distinguishes stable **Not started** from unresolved
+**Awaiting server evidence**, with no current step in either phase, and proves a failed keyless
+resume exposes explicit replay/SDK choices without an automatic replacement POST.
 
 When a Docker-compatible engine is available, run:
 
