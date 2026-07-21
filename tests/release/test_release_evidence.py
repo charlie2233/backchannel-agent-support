@@ -157,6 +157,24 @@ def test_final_build_captures_exist_at_exact_viewports() -> None:
 
 def test_ci_is_keyless_lockfile_based_and_declares_external_gates() -> None:
     workflow = _read(".github/workflows/ci.yml")
+    verify_job, container_job = workflow.split("  container-smoke:", 1)
+    approved_action_pins = (
+        "actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1",
+        "actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0",
+        "actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0",
+        "astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0",
+    )
+    for pin in approved_action_pins:
+        assert verify_job.count(pin) == 1, pin
+        assert container_job.count(pin) == 1, pin
+    for deprecated_ref in (
+        "actions/checkout@v4",
+        "actions/setup-node@v4",
+        "actions/setup-python@v5",
+        "astral-sh/setup-uv@v6",
+    ):
+        assert deprecated_ref not in workflow
+
     for phrase in (
         "npm ci",
         "uv sync --frozen --all-groups",
@@ -176,13 +194,18 @@ def test_ci_is_keyless_lockfile_based_and_declares_external_gates() -> None:
     assert '-e OPENAI_API_KEY="$BACKCHANNEL_SMOKE_CANARY"' in workflow
     assert re.search(r"sk-[A-Za-z0-9_-]{20,}", workflow) is None
 
-    verify_job, container_job = workflow.split("  container-smoke:", 1)
     assert re.search(
-        r"uses: actions/checkout@v4\n\s+with:\n\s+fetch-depth: 0",
+        r"uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd"
+        r" # v5\.0\.1\n\s+with:\n\s+fetch-depth: 0",
         verify_job,
     )
     assert "fetch-depth: 0" not in container_job
     assert "timeout-minutes: 10" in verify_job
+    assert "timeout-minutes:" not in container_job
+    for job in (verify_job, container_job):
+        assert job.count("node-version-file: .node-version") == 1
+        assert job.count("cache: npm") == 1
+        assert job.count('python-version: "3.12"') == 1
 
     validation = _read("docs/validation.md").lower()
     assert "head-ancestry file blobs" in validation
