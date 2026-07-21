@@ -8,7 +8,7 @@
 | Public demo URL | **UNVERIFIED / BLOCKED** | No deployment or public URL is available in this environment. |
 | Live OpenAI run | **UNVERIFIED / BLOCKED** | `OPENAI_API_KEY` was absent; `npm run smoke:live` made no real OpenAI request. |
 | Three-run live evidence | **UNVERIFIED / BLOCKED** | All three independent children stopped at `MissingOpenAIAPIKey`; no live trace IDs were produced. |
-| Packaged container | **VERIFIED IN GITHUB CI** | GitHub-hosted [run 29787371831](https://github.com/charlie2233/backchannel-agent-support/actions/runs/29787371831) completed the Docker build and container start/readiness. The packaged app served and validated built frontend assets (title/CSP/assets); API calls separately exercised approval, decline, receipts, and SSE resume, plus the secret canary and session boundary checks. This was not a browser UI interaction. |
+| Packaged container | **VERIFIED IN GITHUB CI** | GitHub-hosted [run 29797660785](https://github.com/charlie2233/backchannel-agent-support/actions/runs/29797660785), job `88532416451`, completed the Docker build and container start/readiness. The packaged app served and validated built frontend assets (title/CSP/assets); API calls separately exercised approval, decline, receipts, and SSE resume, plus the secret canary and session boundary checks. This was not a browser UI interaction. |
 | Local container runtime | **UNVERIFIED / BLOCKED LOCALLY** | Docker, Podman, Colima, and OrbStack remain absent from this workstation; no local image run is claimed. |
 | Release tag | **Not created** | `v0.3.0-build-week` must wait for applicable checks, external proof, and release authorization. |
 
@@ -16,6 +16,24 @@ The app remains fully judgeable through the deterministic SDK QA path and replay
 neither is presented as live-provider, deployment, or public-reachability evidence. Packaged
 container proof is limited to the separate GitHub-hosted CI run; the local container runtime and
 target deployment remain independent gates.
+
+That job also performed a planned replacement of two distinct single-worker containers. A and B
+ran sequentially with the same disposable named volume mounted at `/data` and the same
+identity-signing secret. Only the owner's signed cookie was retained in client memory, and
+container B accepted it under the same signing secret; a fresh foreign cookie remained isolated
+through the generic 404 boundary. Container A created two pending `sdk_stub` recoveries for
+approval and decline plus a terminal replay. Container B proved all three records persisted. Two
+identical approval HTTP requests were accepted idempotently, while deterministic `sdk_stub` hotel
+demo-adapter dispatch occurred once (`approvalCount=1`, `providerExecution=true`, and
+`modelCall=false`). The decline request closed without action, and demo-adapter dispatch occurred
+zero times (`approvalCount=0` and `providerExecution=false`). This deterministic demo-adapter
+execution is not real provider execution. The replay receipt content matched exactly after JSON
+decoding; replay SSE bytes matched exactly. Approval and decline then produced authoritative
+receipts and terminal SSE in B.
+
+This evidence does not prove local Docker; abrupt host loss or backup recovery; target-host
+durability or target-host networking; concurrent multi-container SQLite; public deployment or
+public reachability; or live OpenAI or real provider execution. Those remain independent gates.
 
 ## Exact three-minute demo sequence
 
@@ -67,7 +85,7 @@ showing that it explicitly says no model call or provider execution.
 | Hotel booking/payment change | **Simulated** | The hotel demo adapter records a demo result only. |
 | API quota grant, verification, and revocation | **Simulated** | SDK stub may execute the quota demo adapter; replay only replays recorded evidence. |
 | Live OpenAI success | **Unverified external gate** | Missing `OPENAI_API_KEY`; deterministic evidence is not substituted. |
-| Packaged container build/start/smoke | **Measured in GitHub-hosted CI** | [Run 29787371831](https://github.com/charlie2233/backchannel-agent-support/actions/runs/29787371831) built and started the image and waited for readiness. The packaged app served and validated built frontend assets (title/CSP/assets); API calls separately exercised approval, decline, receipts, and SSE resume, plus a masked secret canary and the signed session boundary. This was not a browser UI interaction. |
+| Packaged container build/start/smoke | **Measured in GitHub-hosted CI** | [Run 29797660785](https://github.com/charlie2233/backchannel-agent-support/actions/runs/29797660785), job `88532416451`, built and started the image and waited for readiness. The packaged app served and validated built frontend assets (title/CSP/assets); API calls separately exercised approval, decline, receipts, and SSE resume, plus a masked secret canary and the signed session boundary. This was not a browser UI interaction. The same job then verified the sequential replacement evidence scoped above. |
 | Local container reproduction | **Unverified local gate** | The local container runtime is unavailable; no workstation Docker-compatible run is claimed. |
 | Deployment and public reachability | **Unverified external gates** | No public demo deployment or target-host reachability proof is available. |
 

@@ -89,15 +89,32 @@ identity configuration, and no build-time API key. A local production smoke is u
 for the packaged application contract, but it is not container-runtime proof.
 
 The GitHub-hosted `container-smoke` job in
-[CI run 29787371831](https://github.com/charlie2233/backchannel-agent-support/actions/runs/29787371831)
-is verified packaged container evidence. It completed the Docker build, started the image and
-waited for readiness. The packaged app then served and validated its built frontend assets,
-including the HTML title, CSP headers, and emitted asset files; API calls separately exercised
-approval, decline, authoritative receipts, and SSE resume. The smoke also kept a masked secret
-canary out of responses and assets and verified the signed session boundary, secure cookie, and
-cross-session isolation. This is evidence for the packaged image in an ephemeral GitHub Actions
-runtime, not a browser UI interaction. It is not evidence of a local workstation container run,
-target-host persistence, public deployment, live OpenAI access, or public reachability.
+[CI run 29797660785](https://github.com/charlie2233/backchannel-agent-support/actions/runs/29797660785),
+job `88532416451`, is verified packaged container evidence. It completed the Docker build,
+started the image, and waited for readiness. The packaged app then served and validated its
+built frontend assets, including the HTML title, CSP headers, and emitted asset files; API calls
+separately exercised approval, decline, authoritative receipts, and SSE resume. The smoke also
+kept a masked secret canary out of responses and assets and verified the signed session boundary,
+secure cookie, and cross-session isolation. This remains an API/static packaged proof in an
+ephemeral GitHub Actions runtime, not a browser UI interaction.
+
+The same job also performed a planned replacement of two distinct single-worker containers. A
+and B ran sequentially with the same disposable named volume mounted at `/data` and the same
+identity-signing secret. Only the owner's signed cookie was retained in client memory, and
+container B accepted it under the same signing secret; a fresh foreign cookie remained isolated
+through the generic 404 boundary. Container A created two pending `sdk_stub` recoveries for
+approval and decline plus a terminal replay. Container B proved all three records persisted. Two
+identical approval HTTP requests were accepted idempotently, while deterministic `sdk_stub` hotel
+demo-adapter dispatch occurred once (`approvalCount=1`, `providerExecution=true`, and
+`modelCall=false`). The decline request closed without action, and demo-adapter dispatch occurred
+zero times (`approvalCount=0` and `providerExecution=false`). This deterministic demo-adapter
+execution is not real provider execution. The replay receipt content matched exactly after JSON
+decoding; replay SSE bytes matched exactly. Approval and decline then produced authoritative
+receipts and terminal SSE in B.
+
+This evidence does not prove local Docker; abrupt host loss or backup recovery; target-host
+durability or target-host networking; concurrent multi-container SQLite; public deployment or
+public reachability; or live OpenAI or real provider execution. Those remain independent gates.
 
 ## Browser and release artifacts
 

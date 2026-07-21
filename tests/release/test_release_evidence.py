@@ -219,15 +219,20 @@ def test_ci_is_keyless_lockfile_based_and_declares_external_gates() -> None:
 
 
 def test_release_docs_separate_hosted_container_proof_from_external_gates() -> None:
-    run_url = "https://github.com/charlie2233/backchannel-agent-support/actions/runs/29787371831"
+    run_url = "https://github.com/charlie2233/backchannel-agent-support/actions/runs/29797660785"
+    stale_run_url = (
+        "https://github.com/charlie2233/backchannel-agent-support/actions/runs/29787371831"
+    )
     documents = {
         "validation": _read("docs/validation.md"),
         "judge checklist": _read("docs/judge-checklist.md"),
     }
 
     for name, document in documents.items():
-        normalized = document.lower()
+        normalized = " ".join(document.lower().split())
         assert run_url in document, name
+        assert stale_run_url not in document, name
+        assert "88532416451" in document, name
         assert "github-hosted" in normalized, name
         assert "packaged container" in normalized, name
         assert "built frontend assets" in normalized, name
@@ -237,6 +242,46 @@ def test_release_docs_separate_hosted_container_proof_from_external_gates() -> N
         assert "not a browser ui interaction" in normalized, name
         assert "local container runtime" in normalized, name
         assert "public" in normalized and "unverified" in normalized, name
+        for restart_claim in (
+            "planned replacement of two distinct single-worker containers",
+            "same disposable named volume",
+            "`/data`",
+            "same identity-signing secret",
+            "only the owner's signed cookie was retained in client memory",
+            "container b accepted it under the same signing secret",
+            "fresh foreign cookie remained isolated",
+            "two pending `sdk_stub` recoveries",
+            "approval and decline",
+            "terminal replay",
+            "two identical approval http requests were accepted idempotently",
+            "deterministic `sdk_stub` hotel demo-adapter dispatch occurred once",
+            "decline request closed without action",
+            "demo-adapter dispatch occurred zero times",
+            "this deterministic demo-adapter execution is not real provider execution",
+            "replay receipt content matched exactly after json decoding",
+            "replay sse bytes matched exactly",
+        ):
+            assert restart_claim in normalized, (name, restart_claim)
+        for ambiguous_claim in (
+            "owner in-memory signed session continuity",
+            "exact approval retry executed once",
+            "decline executed zero times",
+            "receipt and sse persisted byte-for-byte",
+        ):
+            assert ambiguous_claim not in normalized, (name, ambiguous_claim)
+        assert "does not prove local docker" in normalized, name
+        for excluded_gate in (
+            "abrupt host loss",
+            "backup",
+            "target-host durability",
+            "target-host networking",
+            "concurrent multi-container sqlite",
+            "public deployment",
+            "public reachability",
+            "live openai",
+            "provider execution",
+        ):
+            assert excluded_gate in normalized, (name, excluded_gate)
 
     combined = "\n".join(documents.values()).lower()
     for verified_step in (
