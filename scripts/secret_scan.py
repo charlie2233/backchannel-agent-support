@@ -321,6 +321,7 @@ def _record_blob_path(
     mode: bytes,
     oid: bytes,
     path: bytes,
+    budget: _ReleaseBudget,
 ) -> None:
     zero_oid = b"0" * len(oid)
     if mode == _ZERO_MODE:
@@ -333,12 +334,26 @@ def _record_blob_path(
         raise SecretScanError
     if mode not in _BLOB_MODES:
         raise SecretScanError
-    blobs.setdefault(oid, set()).add(path)
+    paths = blobs.get(oid)
+    if paths is not None and path in paths:
+        return
+    budget.count_path()
+    if paths is None:
+        blobs[oid] = {path}
+    else:
+        paths.add(path)
 
 
-def _parse_diff_tree_output(payload: bytes, *, oid_length: int) -> dict[bytes, set[bytes]]:
-    """Map every historical blob to each raw path reported by diff-tree."""
+def _parse_diff_tree_output(
+    payload: bytes,
+    *,
+    oid_length: int,
+    budget: _ReleaseBudget | None = None,
+) -> dict[bytes, set[bytes]]:
+    """Map blobs to paths, charging each unique OID/path pair before insertion."""
 
+    if budget is None:
+        budget = _ReleaseBudget()
     if not payload:
         return {}
     fields = payload.split(b"\0")
@@ -359,8 +374,8 @@ def _parse_diff_tree_output(payload: bytes, *, oid_length: int) -> dict[bytes, s
         old_mode, new_mode, old_oid, new_oid, status = match.groups()
         if status not in _VALID_STATUSES:
             raise SecretScanError
-        _record_blob_path(blobs, mode=old_mode, oid=old_oid, path=path)
-        _record_blob_path(blobs, mode=new_mode, oid=new_oid, path=path)
+        _record_blob_path(blobs, mode=old_mode, oid=old_oid, path=path, budget=budget)
+        _record_blob_path(blobs, mode=new_mode, oid=new_oid, path=path, budget=budget)
     return blobs
 
 
@@ -522,7 +537,11 @@ def _read_git_blob_rules(
     return rules_by_oid
 
 
-def _history_blob_paths(root: Path) -> dict[bytes, set[bytes]]:
+def _history_blob_paths(
+    root: Path,
+    *,
+    budget: _ReleaseBudget,
+) -> dict[bytes, set[bytes]]:
     shallow = _run_git(root, ["rev-parse", "--is-shallow-repository"])
     if shallow != b"false\n":
         raise SecretScanError
@@ -554,7 +573,7 @@ def _history_blob_paths(root: Path) -> dict[bytes, set[bytes]]:
         ],
         input_bytes=b"\n".join(commits) + b"\n",
     )
-    return _parse_diff_tree_output(diff_output, oid_length=len(head))
+    return _parse_diff_tree_output(diff_output, oid_length=len(head), budget=budget)
 
 
 def scan_git_history(
@@ -567,10 +586,7 @@ def scan_git_history(
     if budget is None:
         budget = _ReleaseBudget()
     root = root.resolve()
-    blob_paths = _history_blob_paths(root)
-    for paths in blob_paths.values():
-        for _path in paths:
-            budget.count_path()
+    blob_paths = _history_blob_paths(root, budget=budget)
     rules_by_oid = _read_git_blob_rules(root, sorted(blob_paths), budget=budget)
     if rules_by_oid.keys() != blob_paths.keys():
         raise SecretScanError

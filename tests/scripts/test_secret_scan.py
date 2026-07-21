@@ -346,6 +346,53 @@ def test_malformed_git_payloads_fail_without_reaching_cli_output(
     assert canary not in captured.out
 
 
+def test_diff_parser_charges_unique_blob_path_associations_before_insertion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scanner = _scanner()
+    zero = b"0" * 40
+    oid = b"1" * 40
+
+    def added(path: bytes) -> bytes:
+        return b":000000 100644 " + zero + b" " + oid + b" A\0" + path + b"\0"
+
+    observed_maps: list[dict[bytes, set[bytes]]] = []
+    original_record = scanner._record_blob_path
+
+    def observe_record(
+        blobs: dict[bytes, set[bytes]],
+        **arguments: object,
+    ) -> None:
+        observed_maps.append(blobs)
+        original_record(blobs, **arguments)
+
+    monkeypatch.setattr(scanner, "_record_blob_path", observe_record)
+    monkeypatch.setattr(scanner, "_MAX_RELEASE_PATHS", 2)
+    budget = scanner._ReleaseBudget()
+
+    with pytest.raises(scanner.SecretScanError) as exit_info:
+        scanner._parse_diff_tree_output(
+            added(b"one.txt") + added(b"two.txt") + added(b"three.txt"),
+            oid_length=40,
+            budget=budget,
+        )
+
+    assert budget.path_count == 2
+    assert observed_maps
+    assert observed_maps[-1] == {oid: {b"one.txt", b"two.txt"}}
+    assert exit_info.value.__cause__ is None
+    assert exit_info.value.__context__ is None
+
+    monkeypatch.setattr(scanner, "_MAX_RELEASE_PATHS", 1)
+    dedupe_budget = scanner._ReleaseBudget()
+    assert scanner._parse_diff_tree_output(
+        added(b"same.txt") + added(b"same.txt"),
+        oid_length=40,
+        budget=dedupe_budget,
+    ) == {oid: {b"same.txt"}}
+    assert dedupe_budget.path_count == 1
+
+
 def test_clean_history_passes(tmp_path: Path) -> None:
     scanner = _scanner()
     repo = tmp_path / "repo"
