@@ -7,7 +7,10 @@
   ],
   "scripts": {
     "build": "npm --workspace web run build",
-    "check": "npm --workspace web run check && uv run ruff check server scripts tests && uv run mypy server scripts/start.py scripts/docker_smoke.py && uv run pytest -q",
+    "check": "npm --workspace web run check && uv run ruff check server scripts tests && uv run mypy server scripts/start.py scripts/docker_smoke.py scripts/export_openapi.py scripts/secret_scan.py && uv run pytest -q",
+    "openapi:export": "uv run python scripts/export_openapi.py",
+    "openapi:check": "uv run python scripts/export_openapi.py --check",
+    "secret:scan": "uv run python scripts/secret_scan.py",
     "presmoke:deployed-defaults": "npm run build",
     "presmoke:production": "npm run build",
     "smoke:container": "uv run python scripts/docker_smoke.py",

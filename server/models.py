@@ -40,6 +40,25 @@ class ScenarioId(StrEnum):
     API_QUOTA = "api-quota"
 
 
+class ReplayFallback(ApiModel):
+    kind: Literal["show_replay_fixture"]
+    scenario_id: Literal["hotel"] = Field(alias="scenarioId")
+    execution_mode: Literal["replay_fixture"] = Field(alias="executionMode")
+
+
+class PublicErrorDetail(ApiModel):
+    code: str
+    message: str
+    request_id: str = Field(alias="requestId")
+    recovery_id: str | None = Field(alias="recoveryId")
+    retry_after_seconds: int | None = Field(alias="retryAfterSeconds")
+    fallback: ReplayFallback | None
+
+
+class PublicErrorResponse(ApiModel):
+    error: PublicErrorDetail
+
+
 class RecoveryStatus(StrEnum):
     IN_PROGRESS = "in_progress"
     PENDING_APPROVAL = "pending_approval"

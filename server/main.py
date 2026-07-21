@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Annotated, NoReturn
+from typing import Annotated, Any, NoReturn
 from uuid import UUID
 
 from fastapi import FastAPI, Header, Request, Response, status
@@ -44,6 +44,7 @@ from server.models import (
     ExecutionMode,
     HealthResponse,
     ProviderBoundary,
+    PublicErrorResponse,
     ReadinessResponse,
     RecoveryReceipt,
     RecoverySnapshot,
@@ -202,6 +203,12 @@ def create_app(
         lifespan=lifespan,
         docs_url=None if runtime_settings.deployed else "/docs",
         redoc_url=None,
+        responses={
+            422: {
+                "model": PublicErrorResponse,
+                "description": "The request was rejected with a public error envelope.",
+            }
+        },
     )
     application.state.recovery_store = recovery_store
     application.state.recovery_orchestrator = recovery_orchestrator
@@ -530,7 +537,23 @@ def create_app(
                 recovery_id=recovery_key,
             )
 
-    @application.get("/api/recoveries/{recovery_id}/events")
+    public_error_response: dict[str, Any] = {
+        "model": PublicErrorResponse,
+        "description": "The request was rejected with a public error envelope.",
+    }
+
+    @application.get(
+        "/api/recoveries/{recovery_id}/events",
+        response_class=StreamingResponse,
+        responses={
+            200: {
+                "description": "Server-sent recovery event stream.",
+                "content": {"text/event-stream": {}},
+            },
+            400: public_error_response,
+            404: public_error_response,
+        },
+    )
     async def recovery_events(
         recovery_id: UUID,
         request: Request,

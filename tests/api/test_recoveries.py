@@ -224,6 +224,40 @@ def test_last_event_id_must_be_a_non_negative_integer(client: TestClient) -> Non
     )
 
 
+def test_event_openapi_matches_runtime_stream_and_public_error_envelopes(
+    client: TestClient,
+) -> None:
+    created = client.post(
+        "/api/recoveries",
+        json={"scenarioId": "api-quota", "executionMode": "replay_fixture"},
+    )
+    recovery_id = created.json()["recoveryId"]
+
+    stream = client.get(f"/api/recoveries/{recovery_id}/events")
+    invalid = client.get(
+        f"/api/recoveries/{recovery_id}/events",
+        headers={"Last-Event-ID": "invalid"},
+    )
+    responses = client.app.openapi()["paths"][
+        "/api/recoveries/{recovery_id}/events"
+    ]["get"]["responses"]
+
+    assert stream.headers["content-type"].startswith("text/event-stream")
+    assert responses["200"]["content"] == {"text/event-stream": {}}
+    assert set(invalid.json()) == {"error"}
+    assert set(invalid.json()["error"]) == {
+        "code",
+        "message",
+        "requestId",
+        "recoveryId",
+        "retryAfterSeconds",
+        "fallback",
+    }
+    assert responses["400"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/PublicErrorResponse"
+    }
+
+
 def test_terminal_transition_after_event_read_is_emitted_before_stream_end(
     tmp_path, monkeypatch
 ) -> None:

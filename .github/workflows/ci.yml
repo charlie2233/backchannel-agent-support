@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out full history
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: 3.12.12
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          version: 0.10.1
+      - name: Install JavaScript dependencies
+        run: npm ci
+      - name: Install Python dependencies
+        run: uv sync --frozen --all-groups
+      - name: Run canonical checks
+        run: npm run check
+      - name: Run deterministic stub smoke
+        run: npm run smoke:stub
+      - name: Verify OpenAPI artifact
+        run: npm run openapi:check
+      - name: Scan release surfaces for secrets
+        run: npm run secret:scan
+
+  container-smoke:
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Build packaged image
+        run: docker build --tag backchannel:ci .
+      - name: Verify runtime identity
+        run: test "$(docker image inspect --format '{{.Config.User}}' backchannel:ci)" = "10001:10001"
+      - name: Run offline packaged smoke profiles
+        run: |
+          docker run --rm --network none --entrypoint python backchannel:ci scripts/docker_smoke.py --launch
+          docker run --rm --network none --entrypoint python backchannel:ci scripts/docker_smoke.py --launch --profile deployed-readonly

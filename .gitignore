@@ -11,3 +11,7 @@ node_modules/
 web/dist/
 coverage/
 *.sqlite3
+*.log
+playwright-report/
+test-results/
+blob-report/
