@@ -11,11 +11,14 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     env:
       OPENAI_API_KEY: ""
       UV_CACHE_DIR: /tmp/backchannel-uv-cache
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version-file: .node-version

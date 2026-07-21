@@ -126,8 +126,8 @@ def test_release_commands_use_cli_first_browser_capture() -> None:
     assert "sdk_stub" in capture
     assert "replay_fixture" not in capture
     assert "@playwright/test" not in capture
-    assert "page.on(\"console\"" in capture
-    assert "page.on(\"pageerror\"" in capture
+    assert 'page.on("console"' in capture
+    assert 'page.on("pageerror"' in capture
 
 
 def test_generated_openapi_is_current_and_public() -> None:
@@ -169,19 +169,30 @@ def test_ci_is_keyless_lockfile_based_and_declares_external_gates() -> None:
         "npm run smoke:docker",
     ):
         assert phrase in workflow
-    assert "OPENAI_API_KEY: \"\"" in workflow
+    assert 'OPENAI_API_KEY: ""' in workflow
     assert "openssl rand -hex" in workflow
     assert "::add-mask::$release_canary" in workflow
     assert "BACKCHANNEL_SMOKE_CANARY=%s" in workflow
     assert '-e OPENAI_API_KEY="$BACKCHANNEL_SMOKE_CANARY"' in workflow
     assert re.search(r"sk-[A-Za-z0-9_-]{20,}", workflow) is None
 
+    verify_job, container_job = workflow.split("  container-smoke:", 1)
+    assert re.search(
+        r"uses: actions/checkout@v4\n\s+with:\n\s+fetch-depth: 0",
+        verify_job,
+    )
+    assert "fetch-depth: 0" not in container_job
+    assert "timeout-minutes: 10" in verify_job
+
+    validation = _read("docs/validation.md").lower()
+    assert "head-ancestry file blobs" in validation
+    assert "current release inputs" in validation
+    assert "shallow" in validation and "fail closed" in validation
+    assert "path or byte ceilings" in validation
+
 
 def test_release_docs_separate_hosted_container_proof_from_external_gates() -> None:
-    run_url = (
-        "https://github.com/charlie2233/backchannel-agent-support/"
-        "actions/runs/29787371831"
-    )
+    run_url = "https://github.com/charlie2233/backchannel-agent-support/actions/runs/29787371831"
     documents = {
         "validation": _read("docs/validation.md"),
         "judge checklist": _read("docs/judge-checklist.md"),

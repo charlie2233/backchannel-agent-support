@@ -118,8 +118,10 @@ PNGs under `docs/assets/final` are runtime captures; files under `docs/design` a
 never count as runtime evidence.
 
 `openapi:check` fails if `docs/openapi.json` differs from the current FastAPI schema.
-`secret:scan` checks tracked source, built assets, capture artifacts, and release inputs for
-secret-shaped content; it complements, but cannot replace, proper runtime secret management.
+`secret:scan` applies its configured rules to current release inputs and HEAD-ancestry file blobs,
+including deleted historical paths. Shallow or otherwise incomplete Git history makes the
+scan fail closed, as does exceeding its finite path or byte ceilings. This complements, but
+cannot replace, runtime secret management.
 
 ## Live OpenAI gate
 
