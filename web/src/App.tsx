@@ -45,6 +45,7 @@ const RETRYABLE_RESUME_NOTICE =
   "Saved recovery evidence is temporarily unavailable. Its same-tab recovery ID was retained, and no server state or action has been accepted.";
 
 export const SAVED_RECOVERY_RESTORE_TIMEOUT_MS = 12_000;
+export const RECEIPT_REQUEST_TIMEOUT_MS = 12_000;
 
 type HotelResumeState =
   | "checking"
@@ -59,6 +60,13 @@ interface HotelResumeRequest {
   deadlineId: ReturnType<typeof setTimeout> | null;
   generation: number;
   restoreFocusOnRetryable: boolean;
+  active: boolean;
+}
+
+interface ReceiptRequest {
+  controller: AbortController;
+  deadlineId: ReturnType<typeof setTimeout> | null;
+  restoreFocusOnFailure: boolean;
   active: boolean;
 }
 
@@ -209,8 +217,10 @@ export default function App() {
   const [receipts, setReceipts] = useState<Record<string, RecoveryReceipt>>({});
   const [receiptLoading, setReceiptLoading] = useState<Record<string, boolean>>({});
   const [receiptErrors, setReceiptErrors] = useState<Record<string, string>>({});
-  const receiptRequestsRef = useRef(new Set<string>());
+  const receiptRequestsRef = useRef(new Map<string, ReceiptRequest>());
   const completedReceiptIdsRef = useRef(new Set<string>());
+  const receiptRetryFocusRecoveryIdRef = useRef<string | null>(null);
+  const receiptRetryButtonRef = useRef<HTMLButtonElement>(null);
   const terminalRefreshesRef = useRef(new Set<string>());
   const terminalRefreshCompletedRef = useRef(new Set<string>());
   const [evidenceOpen, setEvidenceOpen] = useState(false);
@@ -354,32 +364,83 @@ export default function App() {
     hotelResumeRetryButtonRef.current?.focus();
   }, [hotelResumeState]);
 
-  const loadReceipt = useCallback(async (recoveryId: string) => {
+  const retireReceiptRequest = useCallback((
+    recoveryId: string,
+    request: ReceiptRequest,
+    abort: boolean,
+  ): boolean => {
     if (
-      receiptRequestsRef.current.has(recoveryId) ||
+      !request.active ||
+      receiptRequestsRef.current.get(recoveryId) !== request
+    ) {
+      return false;
+    }
+    request.active = false;
+    if (request.deadlineId !== null) {
+      clearTimeout(request.deadlineId);
+      request.deadlineId = null;
+    }
+    receiptRequestsRef.current.delete(recoveryId);
+    if (abort && !request.controller.signal.aborted) request.controller.abort();
+    return true;
+  }, []);
+
+  const abortReceiptRequests = useCallback(() => {
+    for (const [recoveryId, request] of receiptRequestsRef.current) {
+      retireReceiptRequest(recoveryId, request, true);
+    }
+  }, [retireReceiptRequest]);
+
+  const loadReceipt = useCallback((recoveryId: string, explicitRetry = false) => {
+    if (
+      receiptRequestsRef.current.get(recoveryId)?.active === true ||
       completedReceiptIdsRef.current.has(recoveryId)
     ) return;
-    receiptRequestsRef.current.add(recoveryId);
+    const request: ReceiptRequest = {
+      controller: new AbortController(),
+      deadlineId: null,
+      restoreFocusOnFailure: explicitRetry,
+      active: true,
+    };
+    receiptRequestsRef.current.set(recoveryId, request);
     setReceiptLoading((current) => ({ ...current, [recoveryId]: true }));
     setReceiptErrors((current) => {
       const next = { ...current };
       delete next[recoveryId];
       return next;
     });
-    try {
-      const receipt = await getReceipt(recoveryId);
-      completedReceiptIdsRef.current.add(recoveryId);
-      setReceipts((current) => ({ ...current, [recoveryId]: receipt }));
-    } catch {
+
+    request.deadlineId = setTimeout(() => {
+      if (!retireReceiptRequest(recoveryId, request, true)) return;
+      if (request.restoreFocusOnFailure) {
+        receiptRetryFocusRecoveryIdRef.current = recoveryId;
+      }
       setReceiptErrors((current) => ({
         ...current,
         [recoveryId]: "The authoritative terminal receipt could not be loaded.",
       }));
-    } finally {
-      receiptRequestsRef.current.delete(recoveryId);
       setReceiptLoading((current) => ({ ...current, [recoveryId]: false }));
-    }
-  }, []);
+    }, RECEIPT_REQUEST_TIMEOUT_MS);
+
+    void getReceipt(recoveryId, request.controller.signal)
+      .then((receipt) => {
+        if (!retireReceiptRequest(recoveryId, request, false)) return;
+        completedReceiptIdsRef.current.add(recoveryId);
+        setReceipts((current) => ({ ...current, [recoveryId]: receipt }));
+        setReceiptLoading((current) => ({ ...current, [recoveryId]: false }));
+      })
+      .catch(() => {
+        if (!retireReceiptRequest(recoveryId, request, false)) return;
+        if (request.restoreFocusOnFailure) {
+          receiptRetryFocusRecoveryIdRef.current = recoveryId;
+        }
+        setReceiptErrors((current) => ({
+          ...current,
+          [recoveryId]: "The authoritative terminal receipt could not be loaded.",
+        }));
+        setReceiptLoading((current) => ({ ...current, [recoveryId]: false }));
+      });
+  }, [retireReceiptRequest]);
 
   const startQuota = useCallback(async () => {
     if (quotaStartedRef.current) return;
@@ -561,9 +622,11 @@ export default function App() {
       hotelLiveControllerRef.current?.abort();
       hotelLiveControllerRef.current = null;
       hotelResumeFocusGenerationRef.current = null;
+      receiptRetryFocusRecoveryIdRef.current = null;
       abortHotelResumeRequest();
+      abortReceiptRequests();
     },
-    [abortHotelResumeRequest],
+    [abortHotelResumeRequest, abortReceiptRequests],
   );
 
   useEffect(() => {
@@ -685,6 +748,22 @@ export default function App() {
     activeSnapshot === null ? false : receiptLoading[activeSnapshot.recoveryId] === true;
   const activeReceiptError =
     activeSnapshot === null ? null : receiptErrors[activeSnapshot.recoveryId] ?? null;
+
+  useEffect(() => {
+    const recoveryId = receiptRetryFocusRecoveryIdRef.current;
+    if (
+      recoveryId === null ||
+      receiptLoading[recoveryId] === true ||
+      receiptErrors[recoveryId] === undefined
+    ) {
+      return;
+    }
+    receiptRetryFocusRecoveryIdRef.current = null;
+    if (activeRecoveryId !== recoveryId) return;
+    if (document.activeElement !== document.body) return;
+    receiptRetryButtonRef.current?.focus();
+  }, [activeRecoveryId, receiptErrors, receiptLoading]);
+
   const evidenceLabel =
     terminalEvent !== undefined
       ? "Review recovery receipt"
@@ -887,6 +966,7 @@ export default function App() {
           events={activeEvents}
           receiptLoading={activeReceiptLoading}
           receiptError={activeReceiptError}
+          retryReceiptButtonRef={receiptRetryButtonRef}
           terminalEventObserved={terminalEvent !== undefined}
           emptyState={hotelEmptyState ?? quotaEmptyState}
           mobile={mobile}
@@ -911,7 +991,7 @@ export default function App() {
                       }
                     })
                     .catch(() => {});
-                  void loadReceipt(recoveryId);
+                  void loadReceipt(recoveryId, true);
                 }
           }
           returnFocusRef={evidenceTriggerRef}

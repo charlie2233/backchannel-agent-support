@@ -27,6 +27,7 @@ interface EvidenceInspectorProps {
   events?: ReadonlyArray<RecoveryEvent>;
   receiptLoading?: boolean;
   receiptError?: string | null;
+  retryReceiptButtonRef?: RefObject<HTMLButtonElement | null>;
   terminalEventObserved?: boolean;
   emptyState?: {
     title: string;
@@ -120,6 +121,7 @@ export function EvidenceInspector({
   events = [],
   receiptLoading = false,
   receiptError = null,
+  retryReceiptButtonRef,
   terminalEventObserved = false,
   emptyState = null,
   mobile = false,
@@ -526,7 +528,9 @@ export function EvidenceInspector({
       <div className="receipt-error">
         <p role="alert">{receiptError}</p>
         {onRetryReceipt === undefined ? null : (
-          <button type="button" onClick={onRetryReceipt}>Retry receipt</button>
+          <button ref={retryReceiptButtonRef} type="button" onClick={onRetryReceipt}>
+            Retry receipt
+          </button>
         )}
       </div>
     );
