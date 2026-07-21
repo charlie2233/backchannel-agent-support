@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { StrictMode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import App from "./App";
+import App, { SAVED_RECOVERY_RESTORE_TIMEOUT_MS } from "./App";
 
 const HOTEL_RECOVERY_KEY = "backchannel.hotelRecoveryId";
 const LIVE_RECOVERY_ID = "11111111-2222-4333-8444-555555555555";
@@ -56,6 +56,12 @@ function expectNoSnapshotLifecycle(label: "Not started" | "Awaiting server evide
   expect(screen.queryByText("Step 1 of 6")).not.toBeInTheDocument();
 }
 
+function focusDocumentBody() {
+  document.body.tabIndex = -1;
+  document.body.focus();
+  expect(document.body).toHaveFocus();
+}
+
 afterEach(() => {
   cleanup();
   try {
@@ -65,9 +71,15 @@ afterEach(() => {
   }
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  vi.useRealTimers();
+  document.body.removeAttribute("tabindex");
 });
 
 describe("explicit, reload-safe live recovery", () => {
+  it("keeps the saved-recovery deadline above the SQLite busy timeout", () => {
+    expect(SAVED_RECOVERY_RESTORE_TIMEOUT_MS).toBe(12_000);
+  });
+
   it("keeps a live-ready StrictMode mount idle until the accessible live action is used", async () => {
     const recoveryPosts: RequestInit[] = [];
     vi.stubGlobal(
@@ -270,6 +282,7 @@ describe("explicit, reload-safe live recovery", () => {
     window.sessionStorage.setItem(HOTEL_RECOVERY_KEY, LIVE_RECOVERY_ID);
     const digest = `sha256:${"a".repeat(64)}`;
     let resumePosts = 0;
+    let resolveResume: ((response: Response) => void) | undefined;
     vi.stubGlobal(
       "fetch",
       vi.fn().mockImplementation((input: string | URL | Request, init?: RequestInit) => {
@@ -303,16 +316,9 @@ describe("explicit, reload-safe live recovery", () => {
           resumePosts += 1;
           expect(init?.method).toBe("POST");
           expect(init?.body).toBe("{}");
-          return Promise.resolve(
-            jsonResponse({
-              action: "approve",
-              recoveryId: LIVE_RECOVERY_ID,
-              remedyDigest: digest,
-              status: "completed",
-              approvedRemedyDigest: digest,
-              executionStarted: true,
-            }),
-          );
+          return new Promise<Response>((resolve) => {
+            resolveResume = resolve;
+          });
         }
         if (url === `/api/recoveries/${LIVE_RECOVERY_ID}/receipt`) {
           return Promise.resolve(
@@ -350,11 +356,25 @@ describe("explicit, reload-safe live recovery", () => {
     );
 
     const resume = await screen.findByRole("button", { name: "Resume exact approval" });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
     expect(resumePosts).toBe(0);
     fireEvent.click(resume);
     fireEvent.click(resume);
 
-    await waitFor(() => expect(resumePosts).toBe(1));
+    expect(resumePosts).toBe(1);
+    resolveResume?.(
+      jsonResponse({
+        action: "approve",
+        recoveryId: LIVE_RECOVERY_ID,
+        remedyDigest: digest,
+        status: "completed",
+        approvedRemedyDigest: digest,
+        executionStarted: true,
+      }),
+    );
     expect(await screen.findByText("Resumed execution completed.")).toBeVisible();
   });
 
@@ -530,6 +550,469 @@ describe("explicit, reload-safe live recovery", () => {
     expect(await screen.findByRole("button", { name: "Resume exact approval" })).toBeVisible();
     expect(window.sessionStorage.getItem(HOTEL_RECOVERY_KEY)).toBe(LIVE_RECOVERY_ID);
     expect(quotaScenario).toBeEnabled();
+    expect(requests.filter(({ method }) => method === "POST")).toHaveLength(0);
+  });
+
+  it("turns a never-settling saved recovery GET into a retryable state at its deadline", async () => {
+    vi.useFakeTimers();
+    window.sessionStorage.setItem(HOTEL_RECOVERY_KEY, LIVE_RECOVERY_ID);
+    const requests: Array<{ url: string; method: string }> = [];
+    let recoveryGets = 0;
+    let requestSignal: AbortSignal | undefined;
+    const abortListener = vi.fn();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? "GET";
+        requests.push({ url, method });
+        if (url === "/health") return Promise.resolve(liveHealth());
+        if (url === `/api/recoveries/${LIVE_RECOVERY_ID}` && method === "GET") {
+          recoveryGets += 1;
+          requestSignal = init?.signal ?? undefined;
+          requestSignal?.addEventListener("abort", abortListener);
+          return new Promise<Response>(() => {});
+        }
+        throw new Error(`Unexpected request: ${method} ${url}`);
+      }),
+    );
+
+    render(
+      <>
+        <button type="button">External focus sentinel</button>
+        <App />
+      </>,
+    );
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(recoveryGets).toBe(1);
+    expect(requestSignal?.aborted).toBe(false);
+    const focusSentinel = screen.getByRole("button", { name: "External focus sentinel" });
+    focusSentinel.focus();
+    expect(focusSentinel).toHaveFocus();
+
+    await act(async () => {
+      vi.advanceTimersByTime(SAVED_RECOVERY_RESTORE_TIMEOUT_MS - 1);
+      await Promise.resolve();
+    });
+    expect(screen.queryByRole("button", { name: "Retry saved recovery" })).not.toBeInTheDocument();
+
+    await act(async () => {
+      vi.advanceTimersByTime(1);
+      await Promise.resolve();
+    });
+
+    const retry = screen.getByRole("button", { name: "Retry saved recovery" });
+    expect(requestSignal?.aborted).toBe(true);
+    expect(abortListener).toHaveBeenCalledTimes(1);
+    expect(window.sessionStorage.getItem(HOTEL_RECOVERY_KEY)).toBe(LIVE_RECOVERY_ID);
+    expect(screen.getByText(RETRYABLE_RESUME_COPY)).toBeVisible();
+    expect(retry).toBeEnabled();
+    expect(focusSentinel).toHaveFocus();
+    retry.focus();
+    expect(retry).toHaveFocus();
+    expect(requests.filter(({ method }) => method === "POST")).toHaveLength(0);
+    expectNoSnapshotLifecycle("Awaiting server evidence");
+  });
+
+  it("coalesces a rapid saved-recovery retry and makes a timed-out retry usable again", async () => {
+    vi.useFakeTimers();
+    window.sessionStorage.setItem(HOTEL_RECOVERY_KEY, LIVE_RECOVERY_ID);
+    const requests: Array<{ url: string; method: string }> = [];
+    const requestSignals: AbortSignal[] = [];
+    const abortListeners: ReturnType<typeof vi.fn>[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? "GET";
+        requests.push({ url, method });
+        if (url === "/health") return Promise.resolve(liveHealth());
+        if (url === `/api/recoveries/${LIVE_RECOVERY_ID}` && method === "GET") {
+          const signal = init?.signal;
+          if (!(signal instanceof AbortSignal)) throw new Error("Saved recovery GET must be abortable");
+          const listener = vi.fn();
+          signal.addEventListener("abort", listener);
+          requestSignals.push(signal);
+          abortListeners.push(listener);
+          return new Promise<Response>(() => {});
+        }
+        throw new Error(`Unexpected request: ${method} ${url}`);
+      }),
+    );
+
+    render(<App />);
+    await act(async () => {
+      await Promise.resolve();
+      vi.advanceTimersByTime(SAVED_RECOVERY_RESTORE_TIMEOUT_MS);
+      await Promise.resolve();
+    });
+    const retry = screen.getByRole("button", { name: "Retry saved recovery" });
+    retry.focus();
+    expect(retry).toHaveFocus();
+
+    fireEvent.click(retry);
+    fireEvent.click(retry);
+
+    expect(requestSignals).toHaveLength(2);
+    expect(screen.getByRole("button", { name: "Retrying saved recovery…" })).toBeDisabled();
+    retry.blur();
+    focusDocumentBody();
+    expect(retry).not.toHaveFocus();
+    expect(requests.filter(({ method }) => method === "POST")).toHaveLength(0);
+
+    await act(async () => {
+      vi.advanceTimersByTime(SAVED_RECOVERY_RESTORE_TIMEOUT_MS);
+      await Promise.resolve();
+    });
+
+    const reusableRetry = screen.getByRole("button", { name: "Retry saved recovery" });
+    expect(requestSignals.map(({ aborted }) => aborted)).toEqual([true, true]);
+    expect(abortListeners.map((listener) => listener.mock.calls.length)).toEqual([1, 1]);
+    expect(reusableRetry).toBe(retry);
+    expect(reusableRetry).toBeEnabled();
+    expect(reusableRetry).toHaveFocus();
+    expect(window.sessionStorage.getItem(HOTEL_RECOVERY_KEY)).toBe(LIVE_RECOVERY_ID);
+    expect(requests.filter(({ method }) => method === "POST")).toHaveLength(0);
+
+    fireEvent.click(reusableRetry);
+
+    expect(requestSignals).toHaveLength(3);
+    expect(requestSignals.map(({ aborted }) => aborted)).toEqual([true, true, false]);
+    expect(screen.getByRole("button", { name: "Retrying saved recovery…" })).toBe(retry);
+    expect(requests.filter(({ method }) => method === "POST")).toHaveLength(0);
+  });
+
+  it("retires a successful saved recovery before its deadline can replace the result", async () => {
+    vi.useFakeTimers();
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
+    window.sessionStorage.setItem(HOTEL_RECOVERY_KEY, LIVE_RECOVERY_ID);
+    let settleResume: ((response: Response) => void) | undefined;
+    let requestSignal: AbortSignal | undefined;
+    const abortListener = vi.fn();
+    const requests: Array<{ url: string; method: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? "GET";
+        requests.push({ url, method });
+        if (url === "/health") return Promise.resolve(liveHealth());
+        if (url === `/api/recoveries/${LIVE_RECOVERY_ID}` && method === "GET") {
+          requestSignal = init?.signal ?? undefined;
+          requestSignal?.addEventListener("abort", abortListener);
+          return new Promise<Response>((resolve) => {
+            settleResume = resolve;
+          });
+        }
+        throw new Error(`Unexpected request: ${method} ${url}`);
+      }),
+    );
+
+    render(<App />);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const deadlineCallIndex = setTimeoutSpy.mock.calls.findIndex(
+      ([, delay]) => delay === SAVED_RECOVERY_RESTORE_TIMEOUT_MS,
+    );
+    expect(deadlineCallIndex).toBeGreaterThanOrEqual(0);
+    const deadlineHandle = setTimeoutSpy.mock.results[deadlineCallIndex]?.value;
+
+    await act(async () => {
+      vi.advanceTimersByTime(SAVED_RECOVERY_RESTORE_TIMEOUT_MS - 1);
+      settleResume?.(
+        jsonResponse(liveSnapshot({ currentStepSummary: "Restored before deadline." })),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.getAllByText("Restored before deadline.")[0]).toBeVisible();
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(deadlineHandle);
+    expect(requestSignal?.aborted).toBe(false);
+
+    await act(async () => {
+      vi.advanceTimersByTime(SAVED_RECOVERY_RESTORE_TIMEOUT_MS);
+      await Promise.resolve();
+    });
+
+    expect(requestSignal?.aborted).toBe(false);
+    expect(abortListener).not.toHaveBeenCalled();
+    expect(screen.getAllByText("Restored before deadline.")[0]).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Retry saved recovery" })).not.toBeInTheDocument();
+    expect(requests.filter(({ method }) => method === "POST")).toHaveLength(0);
+  });
+
+  it("makes a current initial restoration AbortError retryable", async () => {
+    window.sessionStorage.setItem(HOTEL_RECOVERY_KEY, LIVE_RECOVERY_ID);
+    const requests: Array<{ url: string; method: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? "GET";
+        requests.push({ url, method });
+        if (url === "/health") return Promise.resolve(liveHealth());
+        if (url === `/api/recoveries/${LIVE_RECOVERY_ID}` && method === "GET") {
+          return Promise.reject(new DOMException("current transport abort", "AbortError"));
+        }
+        throw new Error(`Unexpected request: ${method} ${url}`);
+      }),
+    );
+
+    render(<App />);
+
+    const retry = await screen.findByRole("button", { name: "Retry saved recovery" });
+    expect(retry).toBeEnabled();
+    expect(window.sessionStorage.getItem(HOTEL_RECOVERY_KEY)).toBe(LIVE_RECOVERY_ID);
+    expect(requests.filter(({ method }) => method === "POST")).toHaveLength(0);
+  });
+
+  it("makes a current explicit-retry AbortError retryable again", async () => {
+    window.sessionStorage.setItem(HOTEL_RECOVERY_KEY, LIVE_RECOVERY_ID);
+    let recoveryGets = 0;
+    let rejectRetry: ((reason: unknown) => void) | undefined;
+    const requests: Array<{ url: string; method: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? "GET";
+        requests.push({ url, method });
+        if (url === "/health") return Promise.resolve(liveHealth());
+        if (url === `/api/recoveries/${LIVE_RECOVERY_ID}` && method === "GET") {
+          recoveryGets += 1;
+          return recoveryGets === 1
+            ? Promise.resolve(new Response(null, { status: 503 }))
+            : new Promise<Response>((_resolve, reject) => {
+                rejectRetry = reject;
+              });
+        }
+        throw new Error(`Unexpected request: ${method} ${url}`);
+      }),
+    );
+
+    render(<App />);
+    const retry = await screen.findByRole("button", { name: "Retry saved recovery" });
+    retry.focus();
+    expect(retry).toHaveFocus();
+
+    fireEvent.click(retry);
+
+    expect(screen.getByRole("button", { name: "Retrying saved recovery…" })).toBe(retry);
+    retry.blur();
+    focusDocumentBody();
+    expect(retry).not.toHaveFocus();
+    await act(async () => {
+      rejectRetry?.(new DOMException("current retry abort", "AbortError"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const reusableRetry = screen.getByRole("button", { name: "Retry saved recovery" });
+    expect(reusableRetry).toBe(retry);
+    expect(reusableRetry).toBeEnabled();
+    expect(reusableRetry).toHaveFocus();
+    expect(recoveryGets).toBe(2);
+    expect(window.sessionStorage.getItem(HOTEL_RECOVERY_KEY)).toBe(LIVE_RECOVERY_ID);
+    expect(requests.filter(({ method }) => method === "POST")).toHaveLength(0);
+  });
+
+  it.each(["timeout", "AbortError"] as const)(
+    "preserves deliberate focus during an explicit retry %s",
+    async (failure) => {
+      window.sessionStorage.setItem(HOTEL_RECOVERY_KEY, LIVE_RECOVERY_ID);
+      let recoveryGets = 0;
+      let rejectRetry: ((reason: unknown) => void) | undefined;
+      const requests: Array<{ url: string; method: string }> = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockImplementation((input: string | URL | Request, init?: RequestInit) => {
+          const url = String(input);
+          const method = init?.method ?? "GET";
+          requests.push({ url, method });
+          if (url === "/health") return Promise.resolve(liveHealth());
+          if (url === `/api/recoveries/${LIVE_RECOVERY_ID}` && method === "GET") {
+            recoveryGets += 1;
+            if (recoveryGets === 1) {
+              return Promise.resolve(new Response(null, { status: 503 }));
+            }
+            return new Promise<Response>((_resolve, reject) => {
+              rejectRetry = reject;
+            });
+          }
+          throw new Error(`Unexpected request: ${method} ${url}`);
+        }),
+      );
+
+      render(
+        <>
+          <button type="button">Deliberate request focus</button>
+          <App />
+        </>,
+      );
+      const retry = await screen.findByRole("button", { name: "Retry saved recovery" });
+      if (failure === "timeout") vi.useFakeTimers();
+      retry.focus();
+      fireEvent.click(retry);
+      expect(screen.getByRole("button", { name: "Retrying saved recovery…" })).toBe(retry);
+      retry.blur();
+      const deliberateTarget = screen.getByRole("button", { name: "Deliberate request focus" });
+      deliberateTarget.focus();
+      expect(deliberateTarget).toHaveFocus();
+
+      await act(async () => {
+        if (failure === "timeout") {
+          vi.advanceTimersByTime(SAVED_RECOVERY_RESTORE_TIMEOUT_MS);
+        } else {
+          rejectRetry?.(new DOMException("current retry abort", "AbortError"));
+        }
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      const reusableRetry = screen.getByRole("button", { name: "Retry saved recovery" });
+      expect(reusableRetry).toBe(retry);
+      expect(reusableRetry).toBeEnabled();
+      expect(deliberateTarget).toHaveFocus();
+      expect(recoveryGets).toBe(2);
+      expect(window.sessionStorage.getItem(HOTEL_RECOVERY_KEY)).toBe(LIVE_RECOVERY_ID);
+      expect(requests.filter(({ method }) => method === "POST")).toHaveLength(0);
+    },
+  );
+
+  it.each(["resolve", "reject"] as const)(
+    "ignores a late %s from a timed-out restoration after a newer retry succeeds",
+    async (lateOutcome) => {
+      vi.useFakeTimers();
+      window.sessionStorage.setItem(HOTEL_RECOVERY_KEY, LIVE_RECOVERY_ID);
+      let recoveryGets = 0;
+      let resolveFirst: ((response: Response) => void) | undefined;
+      let rejectFirst: ((reason: unknown) => void) | undefined;
+      const requests: Array<{ url: string; method: string }> = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockImplementation((input: string | URL | Request, init?: RequestInit) => {
+          const url = String(input);
+          const method = init?.method ?? "GET";
+          requests.push({ url, method });
+          if (url === "/health") return Promise.resolve(liveHealth());
+          if (url === `/api/recoveries/${LIVE_RECOVERY_ID}` && method === "GET") {
+            recoveryGets += 1;
+            if (recoveryGets === 1) {
+              return new Promise<Response>((resolve, reject) => {
+                resolveFirst = resolve;
+                rejectFirst = reject;
+              });
+            }
+            return Promise.resolve(
+              jsonResponse(
+                liveSnapshot({ currentStepSummary: "Newer saved recovery evidence restored." }),
+              ),
+            );
+          }
+          throw new Error(`Unexpected request: ${method} ${url}`);
+        }),
+      );
+
+      render(<App />);
+      await act(async () => {
+        await Promise.resolve();
+        vi.advanceTimersByTime(SAVED_RECOVERY_RESTORE_TIMEOUT_MS);
+        await Promise.resolve();
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Retry saved recovery" }));
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(screen.getAllByText("Newer saved recovery evidence restored.")[0]).toBeVisible();
+
+      await act(async () => {
+        if (lateOutcome === "resolve") {
+          resolveFirst?.(
+            jsonResponse(liveSnapshot({ currentStepSummary: "Stale restoration accepted." })),
+          );
+        } else {
+          rejectFirst?.(new Error("late private transport failure"));
+        }
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(screen.getAllByText("Newer saved recovery evidence restored.")[0]).toBeVisible();
+      expect(screen.queryByText("Stale restoration accepted.")).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Retry saved recovery" })).not.toBeInTheDocument();
+      expect(window.sessionStorage.getItem(HOTEL_RECOVERY_KEY)).toBe(LIVE_RECOVERY_ID);
+      expect(requests.filter(({ method }) => method === "POST")).toHaveLength(0);
+    },
+  );
+
+  it("clears the restoration deadline and aborts once on unmount without accepting a late result", async () => {
+    vi.useFakeTimers();
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
+    window.sessionStorage.setItem(HOTEL_RECOVERY_KEY, LIVE_RECOVERY_ID);
+    let settleResume: ((response: Response) => void) | undefined;
+    let requestSignal: AbortSignal | undefined;
+    const abortListener = vi.fn();
+    const requests: Array<{ url: string; method: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? "GET";
+        requests.push({ url, method });
+        if (url === "/health") return Promise.resolve(liveHealth());
+        if (url === `/api/recoveries/${LIVE_RECOVERY_ID}` && method === "GET") {
+          requestSignal = init?.signal ?? undefined;
+          requestSignal?.addEventListener("abort", abortListener);
+          return new Promise<Response>((resolve) => {
+            settleResume = resolve;
+          });
+        }
+        throw new Error(`Unexpected request: ${method} ${url}`);
+      }),
+    );
+
+    const view = render(<App />);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(requestSignal?.aborted).toBe(false);
+    const deadlineCallIndex = setTimeoutSpy.mock.calls.findIndex(
+      ([, delay]) => delay === SAVED_RECOVERY_RESTORE_TIMEOUT_MS,
+    );
+    expect(deadlineCallIndex).toBeGreaterThanOrEqual(0);
+    const deadlineHandle = setTimeoutSpy.mock.results[deadlineCallIndex]?.value;
+
+    view.unmount();
+
+    expect(requestSignal?.aborted).toBe(true);
+    expect(abortListener).toHaveBeenCalledTimes(1);
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(deadlineHandle);
+    window.sessionStorage.setItem(
+      HOTEL_RECOVERY_KEY,
+      "22222222-2222-4222-8222-222222222222",
+    );
+    await act(async () => {
+      settleResume?.(
+        jsonResponse(liveSnapshot({ currentStepSummary: "Late unmounted restoration." })),
+      );
+      vi.advanceTimersByTime(SAVED_RECOVERY_RESTORE_TIMEOUT_MS * 2);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(abortListener).toHaveBeenCalledTimes(1);
+    expect(window.sessionStorage.getItem(HOTEL_RECOVERY_KEY)).toBe(
+      "22222222-2222-4222-8222-222222222222",
+    );
     expect(requests.filter(({ method }) => method === "POST")).toHaveLength(0);
   });
 

@@ -44,6 +44,8 @@ const AWAITING_DEMO_NOTICE =
 const RETRYABLE_RESUME_NOTICE =
   "Saved recovery evidence is temporarily unavailable. Its same-tab recovery ID was retained, and no server state or action has been accepted.";
 
+export const SAVED_RECOVERY_RESTORE_TIMEOUT_MS = 12_000;
+
 type HotelResumeState =
   | "checking"
   | "none"
@@ -51,6 +53,14 @@ type HotelResumeState =
   | "retryable"
   | "retrying"
   | "restored";
+
+interface HotelResumeRequest {
+  controller: AbortController;
+  deadlineId: ReturnType<typeof setTimeout> | null;
+  generation: number;
+  restoreFocusOnRetryable: boolean;
+  active: boolean;
+}
 
 const HOTEL_IDLE_SCENARIO: RecoveryScenario = {
   id: "hotel",
@@ -185,9 +195,10 @@ export default function App() {
   const hotelStartGenerationRef = useRef(0);
   const hotelLiveStartInFlightRef = useRef(false);
   const hotelLiveControllerRef = useRef<AbortController | null>(null);
-  const hotelResumeInFlightRef = useRef(false);
-  const hotelResumeControllerRef = useRef<AbortController | null>(null);
+  const hotelResumeRequestRef = useRef<HotelResumeRequest | null>(null);
   const hotelResumeRecoveryIdRef = useRef<string | null>(null);
+  const hotelResumeFocusGenerationRef = useRef<number | null>(null);
+  const hotelResumeRetryButtonRef = useRef<HTMLButtonElement>(null);
   const invalidResumeObservedRef = useRef(false);
   const [replayFallback, setReplayFallback] = useState<string | null>(null);
   const [replayLoading, setReplayLoading] = useState(false);
@@ -218,16 +229,58 @@ export default function App() {
     setHotelSnapshot(snapshot);
   }, []);
 
+  const hotelResumeRequestIsCurrent = useCallback((request: HotelResumeRequest): boolean => (
+    request.active &&
+    hotelResumeRequestRef.current === request &&
+    hotelStartGenerationRef.current === request.generation
+  ), []);
+
+  const retireHotelResumeRequest = useCallback((
+    request: HotelResumeRequest,
+    abort: boolean,
+  ): boolean => {
+    if (!request.active || hotelResumeRequestRef.current !== request) return false;
+    request.active = false;
+    if (request.deadlineId !== null) {
+      clearTimeout(request.deadlineId);
+      request.deadlineId = null;
+    }
+    hotelResumeRequestRef.current = null;
+    if (abort && !request.controller.signal.aborted) request.controller.abort();
+    return true;
+  }, []);
+
+  const abortHotelResumeRequest = useCallback(() => {
+    const request = hotelResumeRequestRef.current;
+    if (request === null) return;
+    retireHotelResumeRequest(request, true);
+  }, [retireHotelResumeRequest]);
+
+  const makeHotelResumeRequestRetryable = useCallback((request: HotelResumeRequest) => {
+    hotelResumeFocusGenerationRef.current = request.restoreFocusOnRetryable
+      ? request.generation
+      : null;
+    setHotelSnapshot(null);
+    setHotelResumeState("retryable");
+  }, []);
+
   const restoreSavedHotelRecovery = useCallback((
     recoveryId: string,
     retry = false,
-  ): AbortController | null => {
-    if (hotelResumeInFlightRef.current) return null;
+  ): HotelResumeRequest | null => {
+    if (hotelResumeRequestRef.current?.active === true) return null;
     const controller = new AbortController();
-    hotelResumeInFlightRef.current = true;
-    hotelResumeControllerRef.current = controller;
     hotelResumeRecoveryIdRef.current = recoveryId;
     const generation = ++hotelStartGenerationRef.current;
+    const request: HotelResumeRequest = {
+      controller,
+      deadlineId: null,
+      generation,
+      restoreFocusOnRetryable: retry,
+      active: true,
+    };
+    hotelResumeRequestRef.current = request;
+    hotelResumeFocusGenerationRef.current = null;
     setHotelSnapshot(null);
     setHotelResumeState(retry ? "retrying" : "checking");
     setReplayFallback(null);
@@ -235,55 +288,71 @@ export default function App() {
     setSdkError(null);
     setHotelStartError(null);
 
+    request.deadlineId = setTimeout(() => {
+      if (
+        !hotelResumeRequestIsCurrent(request) ||
+        !retireHotelResumeRequest(request, true)
+      ) {
+        return;
+      }
+      makeHotelResumeRequestRetryable(request);
+    }, SAVED_RECOVERY_RESTORE_TIMEOUT_MS);
+
     void getRecovery(recoveryId, controller.signal)
       .then((snapshot) => {
-        if (
-          controller.signal.aborted ||
-          hotelStartGenerationRef.current !== generation ||
-          hotelResumeControllerRef.current !== controller
-        ) {
-          return;
-        }
+        if (!hotelResumeRequestIsCurrent(request)) return;
         if (snapshot.scenarioId !== "hotel") {
+          hotelResumeFocusGenerationRef.current = null;
           invalidResumeObservedRef.current = true;
           hotelResumeRecoveryIdRef.current = null;
           clearHotelRecoveryHint();
           setHotelResumeState("invalid");
           return;
         }
+        hotelResumeFocusGenerationRef.current = null;
         acceptHotelSnapshot(snapshot);
         setHotelResumeState("restored");
       })
       .catch((error: unknown) => {
-        if (
-          controller.signal.aborted ||
-          hotelStartGenerationRef.current !== generation ||
-          hotelResumeControllerRef.current !== controller
-        ) {
+        if (!hotelResumeRequestIsCurrent(request)) return;
+        if (error instanceof DOMException && error.name === "AbortError") {
+          makeHotelResumeRequestRetryable(request);
           return;
         }
-        if (error instanceof DOMException && error.name === "AbortError") return;
         if (
           error instanceof RecoveryLookupError &&
           error.disposition === "terminal"
         ) {
+          hotelResumeFocusGenerationRef.current = null;
           invalidResumeObservedRef.current = true;
           hotelResumeRecoveryIdRef.current = null;
           clearHotelRecoveryHint();
           setHotelResumeState("invalid");
           return;
         }
-        setHotelSnapshot(null);
-        setHotelResumeState("retryable");
+        makeHotelResumeRequestRetryable(request);
       })
       .finally(() => {
-        if (hotelResumeControllerRef.current !== controller) return;
-        hotelResumeControllerRef.current = null;
-        hotelResumeInFlightRef.current = false;
+        retireHotelResumeRequest(request, false);
       });
 
-    return controller;
-  }, [acceptHotelSnapshot]);
+    return request;
+  }, [
+    acceptHotelSnapshot,
+    hotelResumeRequestIsCurrent,
+    makeHotelResumeRequestRetryable,
+    retireHotelResumeRequest,
+  ]);
+
+  useEffect(() => {
+    if (hotelResumeState !== "retryable") return;
+    const focusGeneration = hotelResumeFocusGenerationRef.current;
+    if (focusGeneration === null) return;
+    hotelResumeFocusGenerationRef.current = null;
+    if (hotelStartGenerationRef.current !== focusGeneration) return;
+    if (document.activeElement !== document.body) return;
+    hotelResumeRetryButtonRef.current?.focus();
+  }, [hotelResumeState]);
 
   const loadReceipt = useCallback(async (recoveryId: string) => {
     if (
@@ -438,23 +507,22 @@ export default function App() {
   useEffect(() => {
     const { hadHint, recoveryId } = readHotelRecoveryHint();
     if (!hadHint) {
+      hotelResumeFocusGenerationRef.current = null;
       setHotelResumeState(invalidResumeObservedRef.current ? "invalid" : "none");
       return;
     }
     if (recoveryId === null) {
+      hotelResumeFocusGenerationRef.current = null;
       invalidResumeObservedRef.current = true;
       setHotelResumeState("invalid");
       return;
     }
 
-    const controller = restoreSavedHotelRecovery(recoveryId);
+    const request = restoreSavedHotelRecovery(recoveryId);
     return () => {
-      controller?.abort();
-      if (hotelResumeControllerRef.current !== controller) return;
-      hotelResumeControllerRef.current = null;
-      hotelResumeInFlightRef.current = false;
+      if (request !== null) retireHotelResumeRequest(request, true);
     };
-  }, [restoreSavedHotelRecovery]);
+  }, [restoreSavedHotelRecovery, retireHotelResumeRequest]);
 
   useEffect(() => {
     if (
@@ -492,11 +560,10 @@ export default function App() {
       hotelLiveStartInFlightRef.current = false;
       hotelLiveControllerRef.current?.abort();
       hotelLiveControllerRef.current = null;
-      hotelResumeControllerRef.current?.abort();
-      hotelResumeControllerRef.current = null;
-      hotelResumeInFlightRef.current = false;
+      hotelResumeFocusGenerationRef.current = null;
+      abortHotelResumeRequest();
     },
-    [],
+    [abortHotelResumeRequest],
   );
 
   useEffect(() => {
@@ -718,6 +785,7 @@ export default function App() {
                 <p>{RETRYABLE_RESUME_NOTICE}</p>
               </div>
               <button
+                ref={hotelResumeRetryButtonRef}
                 type="button"
                 disabled={hotelResumeState === "retrying"}
                 onClick={() => {
