@@ -14,6 +14,7 @@
     "smoke:live": "uv run python scripts/smoke_live.py",
     "smoke:live:3": "uv run python scripts/smoke_live_three.py",
     "smoke:container": "uv run python scripts/docker_smoke.py",
+    "smoke:container:restart": "uv run python scripts/docker_restart_smoke.py",
     "smoke:docker": "uv run python scripts/docker_smoke.py",
     "smoke:production": "uv run python scripts/docker_smoke.py --launch",
     "smoke:stub": "node scripts/smoke-stub.mjs",

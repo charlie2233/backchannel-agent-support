@@ -37,6 +37,7 @@ jobs:
 
   container-smoke:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: verify
     env:
       OPENAI_API_KEY: ""
@@ -75,5 +76,6 @@ jobs:
           done
           exit 1
       - run: npm run smoke:docker
+      - run: npm run smoke:container:restart
       - if: always()
         run: docker stop backchannel-ci || true

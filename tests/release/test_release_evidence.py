@@ -74,6 +74,9 @@ def test_release_commands_use_cli_first_browser_capture() -> None:
     assert scripts["secret:scan"] == "uv run python scripts/secret_scan.py"
     assert scripts["openapi:export"] == "uv run python scripts/export_openapi.py"
     assert scripts["openapi:check"] == "uv run python scripts/export_openapi.py --check"
+    assert scripts["smoke:container:restart"] == (
+        "uv run python scripts/docker_restart_smoke.py"
+    )
 
     orchestration = _read("scripts/capture_release.sh")
     assert "npm run build" in orchestration
@@ -185,6 +188,7 @@ def test_ci_is_keyless_lockfile_based_and_declares_external_gates() -> None:
         "npm run openapi:check",
         "docker build",
         "npm run smoke:docker",
+        "npm run smoke:container:restart",
     ):
         assert phrase in workflow
     assert 'OPENAI_API_KEY: ""' in workflow
@@ -201,7 +205,7 @@ def test_ci_is_keyless_lockfile_based_and_declares_external_gates() -> None:
     )
     assert "fetch-depth: 0" not in container_job
     assert "timeout-minutes: 10" in verify_job
-    assert "timeout-minutes:" not in container_job
+    assert "timeout-minutes: 15" in container_job
     for job in (verify_job, container_job):
         assert job.count("node-version-file: .node-version") == 1
         assert job.count("cache: npm") == 1
