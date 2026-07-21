@@ -7,6 +7,7 @@ import {
   LiveAdmissionError,
   RecoveryLookupError,
   createRecovery,
+  getHealth,
   getRecovery,
   getReceipt,
   isRecoverySnapshot,
@@ -27,6 +28,33 @@ const expectedMessages = {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe("getHealth cancellation", () => {
+  it("forwards the caller's exact AbortSignal to the health request", async () => {
+    const controller = new AbortController();
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          backend: "stub",
+          liveReady: false,
+          providerBoundary: "demo_adapter_only",
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getHealth(controller.signal)).resolves.toEqual({
+      backend: "stub",
+      liveReady: false,
+      providerBoundary: "demo_adapter_only",
+    });
+    expect(fetchMock).toHaveBeenCalledWith("/health", {
+      headers: { Accept: "application/json" },
+      signal: controller.signal,
+    });
+  });
 });
 
 describe("createRecovery public errors", () => {

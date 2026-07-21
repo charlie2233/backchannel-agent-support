@@ -1,8 +1,10 @@
 import type { RuntimePresentation } from "../domain/runtime";
+import type { RuntimeHealthPhase } from "../hooks/useRuntimeHealth";
 
 interface ProvenanceStripProps {
   presentation: RuntimePresentation | null;
-  healthError: boolean;
+  healthPhase: RuntimeHealthPhase;
+  onRetryRuntime?: () => void;
   awaitingSnapshot?: boolean;
   awaitingServerEvidence?: boolean;
   noRunStarted?: boolean;
@@ -10,39 +12,59 @@ interface ProvenanceStripProps {
 
 export function ProvenanceStrip({
   presentation,
-  healthError,
+  healthPhase,
+  onRetryRuntime,
   awaitingSnapshot = false,
   awaitingServerEvidence = false,
   noRunStarted = false,
 }: ProvenanceStripProps) {
   if (presentation === null) {
-    return (
-      <section className="provenance-strip provenance-strip--pending" aria-live="polite">
-        <span className="provenance-dot" aria-hidden="true" />
-        <div>
-          <strong>
-            {healthError
-              ? "Runtime unavailable"
-              : awaitingServerEvidence
-                ? "Awaiting server evidence"
+    const title =
+      healthPhase === "unavailable"
+        ? "Runtime unavailable"
+        : healthPhase === "retrying"
+          ? "Retrying runtime check"
+          : healthPhase === "checking"
+            ? "Checking runtime"
+            : awaitingServerEvidence
+              ? "Awaiting server evidence"
               : noRunStarted
                 ? "No server run started"
-              : awaitingSnapshot
-                ? "Awaiting run evidence"
-                : "Checking runtime"}
-          </strong>
-          <p>
-            {healthError
-              ? "The health endpoint could not be verified, so no runtime claim is shown."
-              : awaitingServerEvidence
-                ? "Waiting for an authoritative server snapshot before making an execution-mode claim."
+                : awaitingSnapshot
+                  ? "Awaiting run evidence"
+                  : "Checking runtime";
+    const explanation =
+      healthPhase === "unavailable"
+        ? "The health endpoint could not be verified after repeated checks, so no runtime claim is shown."
+        : healthPhase === "retrying"
+          ? "The health endpoint could not be verified. Retrying before making any runtime claim."
+          : healthPhase === "checking"
+            ? "Waiting for /health before making a runtime claim."
+            : awaitingServerEvidence
+              ? "Waiting for an authoritative server snapshot before making an execution-mode claim."
               : noRunStarted
                 ? "Start a server recovery explicitly before execution-mode provenance is shown."
-              : awaitingSnapshot
-                ? "Waiting for a server recovery snapshot before making an execution-mode claim."
-              : "Waiting for /health before making a runtime claim."}
-          </p>
+                : awaitingSnapshot
+                  ? "Waiting for a server recovery snapshot before making an execution-mode claim."
+                  : "Waiting for /health before making a runtime claim.";
+
+    return (
+      <section
+        className="provenance-strip provenance-strip--pending"
+        aria-atomic="true"
+        aria-busy={healthPhase === "checking" || healthPhase === "retrying"}
+        aria-live="polite"
+      >
+        <span className="provenance-dot" aria-hidden="true" />
+        <div className="provenance-copy">
+          <strong>{title}</strong>
+          <p>{explanation}</p>
         </div>
+        {healthPhase === "unavailable" && onRetryRuntime !== undefined ? (
+          <button className="provenance-retry" type="button" onClick={onRetryRuntime}>
+            Retry runtime check
+          </button>
+        ) : null}
       </section>
     );
   }

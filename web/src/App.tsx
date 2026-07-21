@@ -5,7 +5,6 @@ import {
   LiveAdmissionError,
   RecoveryLookupError,
   createRecovery,
-  getHealth,
   getReceipt,
   getRecovery,
 } from "./api/client";
@@ -15,7 +14,6 @@ import { EvidenceInspector } from "./components/EvidenceInspector";
 import { Lifecycle } from "./components/Lifecycle";
 import { ProvenanceStrip } from "./components/ProvenanceStrip";
 import { ScenarioRail } from "./components/ScenarioRail";
-import type { HealthStatus } from "./domain/runtime";
 import { deriveRuntimePresentation } from "./domain/runtime";
 import type {
   RecoveryReceipt,
@@ -27,6 +25,7 @@ import type {
 import { isTerminalRecoveryStatus } from "./domain/recovery";
 import { recoveryScenarios } from "./fixtures/recoveries";
 import { useRecoveryEvents } from "./hooks/useRecovery";
+import { useRuntimeHealth } from "./hooks/useRuntimeHealth";
 import {
   clearHotelRecoveryHint,
   readHotelRecoveryHint,
@@ -175,8 +174,7 @@ function serverLifecycleDetails(snapshot: RecoverySnapshot): RecoveryScenario["l
 export default function App() {
   const mobile = useMobileLayout();
   const [activeId, setActiveId] = useState<ScenarioId>("hotel");
-  const [health, setHealth] = useState<HealthStatus | null>(null);
-  const [healthError, setHealthError] = useState(false);
+  const { health, phase: healthPhase, retry: retryRuntimeHealth } = useRuntimeHealth();
   const [hotelSnapshot, setHotelSnapshot] = useState<RecoverySnapshot | null>(null);
   const [hotelResumeState, setHotelResumeState] = useState<HotelResumeState>("checking");
   const [hotelLiveLoading, setHotelLiveLoading] = useState(false);
@@ -438,19 +436,6 @@ export default function App() {
   }, [acceptHotelSnapshot, health, hotelRestorationUnresolved, startReplay]);
 
   useEffect(() => {
-    const controller = new AbortController();
-    setHealthError(false);
-    void getHealth(controller.signal)
-      .then(setHealth)
-      .catch((error: unknown) => {
-        if (error instanceof DOMException && error.name === "AbortError") return;
-        setHealth(null);
-        setHealthError(true);
-      });
-    return () => controller.abort();
-  }, []);
-
-  useEffect(() => {
     const { hadHint, recoveryId } = readHotelRecoveryHint();
     if (!hadHint) {
       setHotelResumeState(invalidResumeObservedRef.current ? "invalid" : "none");
@@ -688,7 +673,8 @@ export default function App() {
         <main className="workspace">
           <ProvenanceStrip
             presentation={presentation}
-            healthError={healthError}
+            healthPhase={healthPhase}
+            onRetryRuntime={retryRuntimeHealth}
             awaitingSnapshot={
               activeId === "api-quota" && health !== null && activeSnapshot === null
             }
