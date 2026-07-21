@@ -301,7 +301,7 @@ def test_first_container_creates_two_pending_sdk_recoveries_and_terminal_replay(
 
     replay = {
         "recoveryId": "replay-id",
-        "status": "simulated_completed",
+        "status": "completed",
         "executionMode": "replay_fixture",
     }
     replay_receipt = {"recoveryId": "replay-id", "status": "simulated_completed"}
@@ -353,7 +353,7 @@ def test_replacement_reads_all_isolates_foreign_and_replays_exact_approval(
     approval_digest = "sha256:" + "1" * 64
     approval_snapshot = {"recoveryId": "approval-id", "status": "pending_approval"}
     decline_snapshot = {"recoveryId": "decline-id", "status": "pending_approval"}
-    replay_snapshot = {"recoveryId": "replay-id", "status": "simulated_completed"}
+    replay_snapshot = {"recoveryId": "replay-id", "status": "completed"}
     replay_receipt = {"recoveryId": "replay-id", "status": "simulated_completed"}
     replay_stream = b'id: 1\ndata: {"terminal":true}\n\n'
     approval_payload = {

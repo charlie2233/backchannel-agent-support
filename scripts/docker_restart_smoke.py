@@ -182,7 +182,7 @@ def _create_restart_fixture(client: SmokeClient) -> RestartFixture:
         "/api/recoveries",
         {"scenarioId": "api-quota", "executionMode": "replay_fixture"},
     ).json()
-    replay_id = _recovery_id(replay_snapshot, status="simulated_completed")
+    replay_id = _recovery_id(replay_snapshot, status="completed")
     _require(
         replay_snapshot.get("executionMode") == "replay_fixture",
         "Replay provenance drifted",
@@ -282,7 +282,7 @@ def _verify_restart_fixture(
 ) -> None:
     approval_id = _recovery_id(fixture.approval_snapshot, status="pending_approval")
     decline_id = _recovery_id(fixture.decline_snapshot, status="pending_approval")
-    replay_id = _recovery_id(fixture.replay_snapshot, status="simulated_completed")
+    replay_id = _recovery_id(fixture.replay_snapshot, status="completed")
     snapshots = (
         (approval_id, fixture.approval_snapshot),
         (decline_id, fixture.decline_snapshot),
