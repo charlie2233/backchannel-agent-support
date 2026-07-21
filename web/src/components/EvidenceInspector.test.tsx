@@ -1,4 +1,4 @@
-import { StrictMode } from "react";
+import { StrictMode, Suspense, startTransition, useLayoutEffect, useState } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -64,6 +64,19 @@ function claimedSnapshot(
       expiry,
     },
   } as RecoverySnapshot;
+}
+
+function ActivateDecisionInLayoutEffect({ buttonName }: { buttonName: string }) {
+  useLayoutEffect(() => {
+    screen.getByRole("button", { name: buttonName }).click();
+  }, [buttonName]);
+  return null;
+}
+
+const suspendedForever = new Promise<never>(() => {});
+
+function AlwaysSuspend(): never {
+  throw suspendedForever;
 }
 
 beforeEach(() => {
@@ -183,8 +196,51 @@ describe("EvidenceInspector exact consent", () => {
     await waitFor(() => expect(onServerSuccess).toHaveBeenCalledTimes(1));
   });
 
-  it("retains the exact resume affordance after network failure", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
+  it("keeps a successful claimed resume latched before the accepted render commits", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          action: "approve",
+          recoveryId: "11111111-2222-4333-8444-555555555555",
+          remedyDigest: fullDigest,
+          status: "completed",
+          approvedRemedyDigest: fullDigest,
+          executionStarted: true,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    let capturedButton: HTMLButtonElement | null = null;
+    const onServerSuccess = vi.fn(() => {
+      if (capturedButton === null) return;
+      capturedButton.disabled = false;
+      fireEvent.click(capturedButton);
+    });
+    render(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={claimedSnapshot()}
+        onServerSuccess={onServerSuccess}
+      />,
+    );
+    const button = screen.getByRole<HTMLButtonElement>("button", {
+      name: "Resume exact approval",
+    });
+    const observedActivations = vi.fn();
+    button.addEventListener("click", observedActivations);
+    capturedButton = button;
+
+    fireEvent.click(button);
+
+    await waitFor(() => expect(onServerSuccess).toHaveBeenCalledTimes(1));
+    expect(observedActivations).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("retains and retries the exact resume affordance after network failure", async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new Error("offline"));
+    vi.stubGlobal("fetch", fetchMock);
     render(
       <EvidenceInspector
         scenario={recoveryScenarios[0]}
@@ -199,6 +255,8 @@ describe("EvidenceInspector exact consent", () => {
     );
     expect(screen.getByRole("button", { name: "Resume exact decline" })).toBeEnabled();
     expect(screen.queryByRole("button", { name: "Resume exact approval" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Resume exact decline" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
   });
 
   it("disables an expired claimed decision and refreshes evidence without posting", async () => {
@@ -239,6 +297,109 @@ describe("EvidenceInspector exact consent", () => {
     fireEvent.click(button);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a successful fresh decision latched before the accepted render commits", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          action: "approve",
+          clientDecisionId: "decision-success-latch",
+          recoveryId: "11111111-2222-4333-8444-555555555555",
+          status: "completed",
+          approvedRemedyDigest: fullDigest,
+          executionStarted: true,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    let capturedButton: HTMLButtonElement | null = null;
+    const onServerSuccess = vi.fn(() => {
+      if (capturedButton === null) return;
+      capturedButton.disabled = false;
+      fireEvent.click(capturedButton);
+    });
+    render(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={pendingSnapshot()}
+        clientDecisionIdFactory={() => "decision-success-latch"}
+        onServerSuccess={onServerSuccess}
+      />,
+    );
+    const button = screen.getByRole<HTMLButtonElement>("button", { name: "Approve remedy" });
+    const observedActivations = vi.fn();
+    button.addEventListener("click", observedActivations);
+    capturedButton = button;
+
+    fireEvent.click(button);
+
+    await waitFor(() => expect(onServerSuccess).toHaveBeenCalledTimes(1));
+    expect(observedActivations).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("scopes an accepted decision latch to its committed recovery context", async () => {
+    const snapshotB: RecoverySnapshot = {
+      ...pendingSnapshot(),
+      recoveryId: "bbbbbbbb-2222-4333-8444-555555555555",
+      pendingApproval: {
+        ...pendingSnapshot().pendingApproval!,
+        remedyId: "remedy-server-b",
+        toolCallId: "call-server-b",
+      },
+    };
+    const idFactory = vi
+      .fn<() => string>()
+      .mockReturnValueOnce("decision-accepted-a")
+      .mockReturnValueOnce("decision-new-b");
+    const fetchMock = vi.fn().mockImplementation(
+      (input: string | URL | Request, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body)) as {
+          action: "approve" | "decline";
+          clientDecisionId: string;
+          remedyDigest: string;
+        };
+        const recoveryId = String(input).split("/").at(-2);
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              action: body.action,
+              clientDecisionId: body.clientDecisionId,
+              recoveryId,
+              status: "completed",
+              approvedRemedyDigest: body.remedyDigest,
+              executionStarted: true,
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+        );
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const { rerender } = render(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={pendingSnapshot()}
+        clientDecisionIdFactory={idFactory}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Approve remedy" }));
+    expect(await screen.findByText(/Approval accepted by the server/)).toBeVisible();
+
+    rerender(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={snapshotB}
+        clientDecisionIdFactory={idFactory}
+      />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Approve remedy" }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(idFactory).toHaveBeenCalledTimes(2);
   });
 
   it("aborts a timed-out approval once, releases the mobile sheet, and ignores a late success", async () => {
@@ -552,6 +713,147 @@ describe("EvidenceInspector exact consent", () => {
     });
     expect(firstAbortListener).toHaveBeenCalledTimes(1);
     expect(secondAbortListener).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not let a late context-reset effect abort or unlock the new context request", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-20T12:00:00.000Z"));
+    const requestSignals: AbortSignal[] = [];
+    const postedBodies: Array<{ action: string; clientDecisionId: string }> = [];
+    const fetchMock = vi.fn().mockImplementation(
+      (_input: string | URL | Request, init?: RequestInit) => {
+        if (init?.signal !== undefined && init.signal !== null) requestSignals.push(init.signal);
+        postedBodies.push(JSON.parse(String(init?.body)) as {
+          action: string;
+          clientDecisionId: string;
+        });
+        return new Promise<Response>(() => {});
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const idFactory = vi
+      .fn<() => string>()
+      .mockReturnValueOnce("decision-new-context")
+      .mockReturnValueOnce("decision-unexpected-replacement");
+    const snapshotB: RecoverySnapshot = {
+      ...pendingSnapshot(),
+      recoveryId: "bbbbbbbb-2222-4333-8444-555555555555",
+      pendingApproval: {
+        ...pendingSnapshot().pendingApproval!,
+        remedyId: "remedy-server-b",
+        toolCallId: "call-server-b",
+      },
+    };
+    const { rerender } = render(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={pendingSnapshot()}
+      />,
+    );
+
+    rerender(
+      <>
+        <EvidenceInspector
+          scenario={recoveryScenarios[0]}
+          snapshot={snapshotB}
+          clientDecisionIdFactory={idFactory}
+        />
+        <ActivateDecisionInLayoutEffect buttonName="Approve remedy" />
+      </>,
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(requestSignals).toHaveLength(1);
+    expect(requestSignals[0]?.aborted).toBe(false);
+    fireEvent.click(
+      screen.getByRole("button", { name: /approve remedy|submitting approval/i }),
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      vi.advanceTimersByTime(DECISION_REQUEST_TIMEOUT_MS);
+      await Promise.resolve();
+    });
+
+    expect(screen.getByRole("button", { name: "Decline" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Approve remedy" }));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(idFactory).toHaveBeenCalledTimes(1);
+    expect(postedBodies).toEqual([
+      expect.objectContaining({ action: "approve", clientDecisionId: "decision-new-context" }),
+      expect.objectContaining({ action: "approve", clientDecisionId: "decision-new-context" }),
+    ]);
+  });
+
+  it("does not let an abandoned context render corrupt the committed decision lock", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-20T12:00:00.000Z"));
+    const postedBodies: Array<{ action: string; clientDecisionId: string }> = [];
+    const fetchMock = vi.fn().mockImplementation(
+      (_input: string | URL | Request, init?: RequestInit) => {
+        postedBodies.push(JSON.parse(String(init?.body)) as {
+          action: string;
+          clientDecisionId: string;
+        });
+        return new Promise<Response>(() => {});
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const idFactory = vi
+      .fn<() => string>()
+      .mockReturnValueOnce("decision-committed-a")
+      .mockReturnValueOnce("decision-corrupted-a");
+    const snapshotB: RecoverySnapshot = {
+      ...pendingSnapshot(),
+      recoveryId: "bbbbbbbb-2222-4333-8444-555555555555",
+      pendingApproval: {
+        ...pendingSnapshot().pendingApproval!,
+        remedyId: "remedy-server-b",
+        toolCallId: "call-server-b",
+      },
+    };
+    function SuspendedContextHarness() {
+      const [renderB, setRenderB] = useState(false);
+      return (
+        <>
+          <button
+            type="button"
+            onClick={() => startTransition(() => setRenderB(true))}
+          >
+            Attempt suspended context
+          </button>
+          <Suspense fallback={<p>Suspended context fallback</p>}>
+            <EvidenceInspector
+              scenario={recoveryScenarios[0]}
+              snapshot={renderB ? snapshotB : pendingSnapshot()}
+              clientDecisionIdFactory={idFactory}
+            />
+            {renderB ? <AlwaysSuspend /> : null}
+          </Suspense>
+        </>
+      );
+    }
+    render(<SuspendedContextHarness />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Approve remedy" }));
+    await act(async () => {
+      vi.advanceTimersByTime(DECISION_REQUEST_TIMEOUT_MS);
+      await Promise.resolve();
+    });
+    expect(screen.getByRole("button", { name: "Decline" })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Attempt suspended context" }));
+    expect(screen.queryByText("Suspended context fallback")).not.toBeInTheDocument();
+    expect(screen.getByText("11111111-2222-4333-8444-555555555555")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Approve remedy" }));
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(idFactory).toHaveBeenCalledTimes(1);
+    expect(postedBodies).toEqual([
+      expect.objectContaining({ action: "approve", clientDecisionId: "decision-committed-a" }),
+      expect.objectContaining({ action: "approve", clientDecisionId: "decision-committed-a" }),
+    ]);
+    expect(screen.getByRole("button", { name: "Decline" })).toBeDisabled();
   });
 
   it("keeps the pending tool-call ID visible before collapsed mobile technical evidence", () => {

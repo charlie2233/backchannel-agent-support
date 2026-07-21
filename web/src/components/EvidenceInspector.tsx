@@ -1,4 +1,11 @@
-import { useEffect, useRef, useState, type RefObject } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type FormEvent,
+  type RefObject,
+} from "react";
 
 import { DecisionCapacityError, postDecision, postDecisionResume } from "../api/client";
 import type { RecoveryEvent } from "../api/events";
@@ -49,6 +56,11 @@ interface DecisionActionLock {
   key: string;
   generation: number;
   action: DecisionAction;
+}
+
+interface AcceptedDecisionContext {
+  key: string;
+  generation: number;
 }
 
 export const DECISION_REQUEST_TIMEOUT_MS = 60_000;
@@ -126,6 +138,7 @@ export function EvidenceInspector({
   const decisionIds = useRef<Partial<Record<DecisionAction, string>>>({});
   const decisionRequestInFlight = useRef<DecisionRequestAttempt | null>(null);
   const decisionActionLock = useRef<DecisionActionLock | null>(null);
+  const acceptedDecisionContext = useRef<AcceptedDecisionContext | null>(null);
   const serverRefreshes = useRef(new Set<string>());
   const fallbackReturnFocusRef = useRef<HTMLElement | null>(null);
   const approval = snapshot?.pendingApproval ?? null;
@@ -141,12 +154,6 @@ export function EvidenceInspector({
     claimedDecision?.expiry ?? "no-claimed-expiry",
   ].join(":");
   const decisionContextRef = useRef({ key: decisionContextKey, generation: 0 });
-  if (decisionContextRef.current.key !== decisionContextKey) {
-    decisionContextRef.current = {
-      key: decisionContextKey,
-      generation: decisionContextRef.current.generation + 1,
-    };
-  }
   const currentDecisionRequest =
     decisionRequestInFlight.current?.key === decisionContextKey &&
     decisionRequestInFlight.current.generation === decisionContextRef.current.generation
@@ -181,9 +188,8 @@ export function EvidenceInspector({
     return true;
   };
 
-  const abortAnyDecisionRequest = () => {
-    const request = decisionRequestInFlight.current;
-    if (request === null || !request.active) return;
+  const abortDecisionRequest = (request: DecisionRequestAttempt): boolean => {
+    if (decisionRequestInFlight.current !== request || !request.active) return false;
     request.active = false;
     if (request.deadlineId !== null) {
       clearTimeout(request.deadlineId);
@@ -191,6 +197,13 @@ export function EvidenceInspector({
     }
     decisionRequestInFlight.current = null;
     if (!request.controller.signal.aborted) request.controller.abort();
+    return true;
+  };
+
+  const abortAnyDecisionRequest = () => {
+    const request = decisionRequestInFlight.current;
+    if (request === null) return;
+    abortDecisionRequest(request);
   };
 
   const beginDecisionRequest = (
@@ -226,10 +239,24 @@ export function EvidenceInspector({
     [],
   );
 
-  useEffect(() => {
-    abortAnyDecisionRequest();
+  useLayoutEffect(() => {
+    const previousContext = decisionContextRef.current;
+    if (previousContext.key === decisionContextKey) return;
+    const nextContext = {
+      key: decisionContextKey,
+      generation: previousContext.generation + 1,
+    };
+    decisionContextRef.current = nextContext;
+    const request = decisionRequestInFlight.current;
+    if (
+      request !== null &&
+      (request.key !== nextContext.key || request.generation !== nextContext.generation)
+    ) {
+      abortDecisionRequest(request);
+    }
     decisionIds.current = {};
     decisionActionLock.current = null;
+    acceptedDecisionContext.current = null;
     setError(null);
     setStatusMessage(null);
     setSubmittingAction(null);
@@ -315,7 +342,9 @@ export function EvidenceInspector({
   };
 
   const submitDecision = async (action: DecisionAction) => {
+    const submittedContext = decisionContextRef.current;
     const actionLock = decisionActionLock.current;
+    const acceptedContext = acceptedDecisionContext.current;
     const activeRequest = decisionRequestInFlight.current;
     const matchingActiveRequest =
       activeRequest?.active === true &&
@@ -324,6 +353,10 @@ export function EvidenceInspector({
     if (
       snapshot === null ||
       approval === null ||
+      submittedContext.key !== decisionContextKey ||
+      (acceptedContext !== null &&
+        acceptedContext.key === decisionContextKey &&
+        acceptedContext.generation === submittedContext.generation) ||
       matchingActiveRequest ||
       (actionLock !== null &&
         actionLock.key === decisionContextKey &&
@@ -336,7 +369,7 @@ export function EvidenceInspector({
     }
     if (activeRequest?.active === true) abortAnyDecisionRequest();
     const stableDecisionId = decisionIds.current[action] ?? clientDecisionIdFactory();
-    const submittedGeneration = decisionContextRef.current.generation;
+    const submittedGeneration = submittedContext.generation;
     const lockedAction = currentDecisionActionLock ?? {
       key: decisionContextKey,
       generation: submittedGeneration,
@@ -367,6 +400,10 @@ export function EvidenceInspector({
         inFlight.controller.signal,
       );
       if (!retireDecisionRequest(inFlight, false)) return;
+      acceptedDecisionContext.current = {
+        key: inFlight.key,
+        generation: inFlight.generation,
+      };
       setSubmittingAction(null);
       setDecisionAccepted(true);
       setStatusMessage(
@@ -397,6 +434,8 @@ export function EvidenceInspector({
   };
 
   const resumeDecision = async () => {
+    const submittedContext = decisionContextRef.current;
+    const acceptedContext = acceptedDecisionContext.current;
     const activeRequest = decisionRequestInFlight.current;
     const matchingActiveRequest =
       activeRequest?.active === true &&
@@ -405,6 +444,10 @@ export function EvidenceInspector({
     if (
       snapshot === null ||
       claimedDecision === null ||
+      submittedContext.key !== decisionContextKey ||
+      (acceptedContext !== null &&
+        acceptedContext.key === decisionContextKey &&
+        acceptedContext.generation === submittedContext.generation) ||
       matchingActiveRequest ||
       decisionExpired ||
       Date.now() >= Date.parse(claimedDecision.expiry)
@@ -412,7 +455,7 @@ export function EvidenceInspector({
       return;
     }
     if (activeRequest?.active === true) abortAnyDecisionRequest();
-    const submittedGeneration = decisionContextRef.current.generation;
+    const submittedGeneration = submittedContext.generation;
     decisionActionLock.current = currentDecisionActionLock ?? {
       key: decisionContextKey,
       generation: submittedGeneration,
@@ -432,6 +475,10 @@ export function EvidenceInspector({
         inFlight.controller.signal,
       );
       if (!retireDecisionRequest(inFlight, false)) return;
+      acceptedDecisionContext.current = {
+        key: inFlight.key,
+        generation: inFlight.generation,
+      };
       setSubmittingAction(null);
       setDecisionAccepted(true);
       setStatusMessage(
@@ -457,6 +504,14 @@ export function EvidenceInspector({
           : `Exact ${claimedDecision.action} could not be resumed. Try the same resume action again.`,
       );
     }
+  };
+
+  const submitDecisionForm = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const submitter = (event.nativeEvent as SubmitEvent).submitter;
+    if (!(submitter instanceof HTMLButtonElement)) return;
+    if (submitter.value !== "approve" && submitter.value !== "decline") return;
+    void submitDecision(submitter.value);
   };
 
   let content;
@@ -540,32 +595,32 @@ export function EvidenceInspector({
       </>
     );
     footer = (
-      <div className="consent-actions">
+      <form className="consent-actions" onSubmit={submitDecisionForm}>
         <button
           className="consent-action consent-action--decline"
-          type="button"
+          type="submit"
+          value="decline"
           disabled={
             contextSubmittingAction !== null ||
             decisionExpired ||
             (lockedDecisionAction !== null && lockedDecisionAction !== "decline")
           }
-          onClick={() => void submitDecision("decline")}
         >
           {contextSubmittingAction === "decline" ? "Submitting decline…" : "Decline"}
         </button>
         <button
           className="consent-action consent-action--approve"
-          type="button"
+          type="submit"
+          value="approve"
           disabled={
             contextSubmittingAction !== null ||
             decisionExpired ||
             (lockedDecisionAction !== null && lockedDecisionAction !== "approve")
           }
-          onClick={() => void submitDecision("approve")}
         >
           {contextSubmittingAction === "approve" ? "Submitting approval…" : "Approve remedy"}
         </button>
-      </div>
+      </form>
     );
   } else if (snapshot !== null && claimedDecision !== null) {
     content = (
@@ -601,16 +656,21 @@ export function EvidenceInspector({
       ? "Resume exact approval"
       : "Resume exact decline";
     footer = (
-      <div className="consent-actions">
+      <form
+        className="consent-actions"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void resumeDecision();
+        }}
+      >
         <button
           className={`consent-action consent-action--${claimedDecision.action}`}
-          type="button"
+          type="submit"
           disabled={contextSubmittingAction !== null || decisionExpired}
-          onClick={() => void resumeDecision()}
         >
           {contextSubmittingAction === claimedDecision.action ? "Resuming exact decision…" : resumeLabel}
         </button>
-      </div>
+      </form>
     );
   } else if (snapshot !== null && snapshot.status === "pending_approval") {
     content = (
