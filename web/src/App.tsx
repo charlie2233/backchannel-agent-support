@@ -34,6 +34,8 @@ import {
 } from "./domain/session";
 import {
   hotelReplayCompletedPresentation,
+  hotelSdkClosedPresentation,
+  hotelSdkCompletedPresentation,
   quotaReplayCompletedPresentation,
   quotaSdkCompletedPresentation,
   recoveryScenarios,
@@ -510,7 +512,13 @@ export default function App() {
             ...(recovery.snapshot.executionMode === "replay_fixture" &&
             recovery.snapshot.status === "completed"
               ? hotelReplayCompletedPresentation
-              : {}),
+              : recovery.snapshot.executionMode === "sdk_stub" &&
+                  recovery.snapshot.status === "completed"
+                ? hotelSdkCompletedPresentation
+                : recovery.snapshot.executionMode === "sdk_stub" &&
+                    recovery.snapshot.status === "closed_without_action"
+                  ? hotelSdkClosedPresentation
+                  : {}),
           },
     [hotelScenario, recovery.snapshot],
   );

@@ -70,6 +70,34 @@ export const hotelReplayCompletedPresentation = {
   ],
 } as const satisfies Pick<RecoveryScenario, "summary" | "lifecycleDetails" | "evidence">;
 
+export const hotelSdkCompletedPresentation = {
+  summary:
+    "Exact approval completed one local demo-provider action and sealed authoritative evidence.",
+  lifecycleDetails: {
+    Detect: "The deterministic SDK recovery detected the booking conflict.",
+    Prove: "Consumer and demo-provider records were verified.",
+    Negotiate: "One exact replacement remedy was prepared.",
+    Authorize: "The operator approved the exact digest-bound SDK interruption.",
+    Execute: "One local demo-provider dispatch completed after exact approval.",
+    "Verify & seal":
+      "Execution verified; receipt sealed, permission revoked, and scope closed.",
+  },
+} as const satisfies Pick<RecoveryScenario, "summary" | "lifecycleDetails">;
+
+export const hotelSdkClosedPresentation = {
+  summary:
+    "The exact remedy was declined and closed without local provider action.",
+  lifecycleDetails: {
+    Detect: "The deterministic SDK recovery detected the booking conflict.",
+    Prove: "Consumer and demo-provider records were verified.",
+    Negotiate: "One exact replacement remedy was prepared.",
+    Authorize: "The operator declined the exact remedy and rejected its interruption.",
+    Execute: "No provider action executed; dispatch did not begin.",
+    "Verify & seal":
+      "Cancellation receipt sealed; permission revoked and scope closed.",
+  },
+} as const satisfies Pick<RecoveryScenario, "summary" | "lifecycleDetails">;
+
 export const quotaSdkCompletedPresentation = {
   summary: "One local deterministic SDK trace verified a temporary quota grant.",
   lifecycleDetails: {

@@ -20,7 +20,9 @@ export function Lifecycle({ scenario }: LifecycleProps) {
       <ol className="lifecycle" aria-label="Recovery lifecycle">
         {lifecycleSteps.map((step, index) => {
           const state =
-            scenario.status === "completed" || index < scenario.currentStep
+            scenario.status === "completed" ||
+            scenario.status === "closed_without_action" ||
+            index < scenario.currentStep
               ? "complete"
               : index === scenario.currentStep
                 ? "current"

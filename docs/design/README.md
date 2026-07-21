@@ -104,8 +104,31 @@ Use Inter when available and the system sans stack otherwise. IDs, digests, and 
 
 ## Final-build fidelity ledger
 
-Before release, compare the final desktop and mobile captures with these concepts and record:
+The concepts above and runtime captures are different artifacts. Concepts establish
+the intended hierarchy; the final paths below are produced only by the running local
+final build after API/DOM provenance checks.
 
-- what matched (layout, density, provenance strip, lifecycle, evidence hierarchy);
-- what intentionally changed to reflect real API data or accessibility constraints;
-- what remains different and whether it affects judging or trust.
+### Pairing
+
+- `docs/assets/final/desktop-consent.png` ↔ `docs/design/desktop-consent.png`
+- `docs/assets/final/desktop-completed.png` ↔ `docs/design/desktop-completed.png`
+- `docs/assets/final/desktop-declined.png` ↔ `docs/design/desktop-cancelled.png`
+- `docs/assets/final/mobile-consent.png` ↔ `docs/design/mobile-consent.png`
+- `docs/assets/final/mobile-completed.png` — no concept counterpart
+- `docs/assets/final/mobile-declined.png` — no concept counterpart
+
+The source dimensions differ: the desktop completed/cancelled concepts are 1536×1024,
+the desktop consent concept is 1506×1044, and final desktop captures are 1440×1024.
+The mobile concept is 853×1844 while the final mobile viewport is 390×844. Compare
+hierarchy and behavior rather than treating pixel scaling as proof.
+
+| Classification | Recorded fidelity decision |
+| --- | --- |
+| **Matched** | Restrained operational-console density, scenario context, truthful provenance strip, six-step lifecycle, consent evidence hierarchy, and clear terminal receipts. |
+| **Intentional** | The final build uses a light top bar instead of the concept's navy bar. It uses a vertical lifecycle instead of the concept's horizontal treatment so all six labels and evidence summaries remain legible at the runtime width. Final receipts are richer receipts because they expose authoritative decision, dispatch, version, and revocation fields. |
+| **Accessibility** | Mobile uses an accessible portal dialog with focus containment, a semantic heading, inert background, and sticky named actions instead of the combined concept surface. This preserves the concept hierarchy while making the consent boundary operable for keyboard and assistive technology. |
+| **Remaining judge-impacting variance** | Mobile completed and declined views have no generated concept counterpart. Their judgment target is the same receipt hierarchy and truthful boundary as desktop. No known variance changes consent meaning or runtime provenance; visual comparison must be repeated after every recapture. |
+
+The final images prove a keyless local final build running the SDK stub. They are not live OpenAI
+evidence, not a public deployment, not container proof, not a release, and
+not real-provider execution. The design concepts never count as runtime evidence.

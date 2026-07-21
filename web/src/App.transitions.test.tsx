@@ -82,6 +82,21 @@ function completedReceipt(): RecoveryReceipt {
   };
 }
 
+function closedReceipt(): RecoveryReceipt {
+  return {
+    ...completedReceipt(),
+    status: "closed_without_action",
+    providerExecution: false,
+    providerResult: "Provider dispatch did not begin.",
+    authorizationSource: "Explicit operator decline.",
+    decision: "declined",
+    executionCount: 0,
+    providerDispatchStarted: false,
+    exactInterruptionRejected: true,
+    approvedRemedyDigest: null,
+  };
+}
+
 function state(snapshot: RecoverySnapshot, receipt: RecoveryReceipt | null): RecoveryState {
   return {
     snapshot,
@@ -190,6 +205,58 @@ describe("consent surface focus transitions", () => {
         screen.getByRole("status", { name: "Recovery status updates" }),
       ).not.toHaveTextContent("dialog opened");
       expect(screen.getByRole("heading", { name: "Completed receipt" })).toBeVisible();
+      const lifecycle = screen.getByRole("list", { name: "Recovery lifecycle" });
+      expect(
+        screen.getByRole("heading", { name: "Execute" }).closest("li"),
+      ).toHaveTextContent(
+        "One local demo-provider dispatch completed after exact approval.",
+      );
+      expect(
+        screen.getByRole("heading", { name: "Verify & seal" }).closest("li"),
+      ).toHaveTextContent(
+        "Execution verified; receipt sealed, permission revoked, and scope closed.",
+      );
+      expect(lifecycle).not.toHaveTextContent("Not started.");
+      expect(lifecycle).not.toHaveTextContent("Waiting for an execution outcome.");
+    },
+    15_000,
+  );
+
+  it(
+    "replaces pending lifecycle copy with authoritative closed-without-action evidence",
+    async () => {
+      installControllableMatchMedia(false);
+      const view = render(<App />);
+      const terminalSnapshot: RecoverySnapshot = {
+        ...pendingSnapshot(),
+        status: "closed_without_action",
+        currentStep: 5,
+        currentStepSummary: "Cancellation receipt sealed.",
+        pendingApproval: null,
+      };
+      hotelState = state(terminalSnapshot, closedReceipt());
+      view.rerender(<App />);
+
+      expect(
+        screen.getByRole("heading", { name: "Closed without action" }),
+      ).toBeVisible();
+      const lifecycle = screen.getByRole("list", { name: "Recovery lifecycle" });
+      expect(
+        screen.getByRole("heading", { name: "Execute" }).closest("li"),
+      ).toHaveTextContent("No provider action executed; dispatch did not begin.");
+      expect(
+        screen.getByRole("heading", { name: "Verify & seal" }).closest("li"),
+      ).toHaveTextContent(
+        "Cancellation receipt sealed; permission revoked and scope closed.",
+      );
+      expect(
+        screen.getByRole("heading", { name: "Verify & seal" }).closest("li"),
+      ).toHaveTextContent("Recorded");
+      expect(
+        screen.getByRole("heading", { name: "Verify & seal" }).closest("li"),
+      ).not.toHaveTextContent("current");
+      expect(lifecycle).not.toHaveTextContent("Not started.");
+      expect(lifecycle).not.toHaveTextContent("Waiting for an execution outcome.");
     },
     15_000,
   );

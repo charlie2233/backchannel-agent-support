@@ -7,9 +7,11 @@
   ],
   "scripts": {
     "build": "npm --workspace web run build",
-    "check": "npm --workspace web run check && uv run ruff check server scripts tests && uv run mypy server scripts/start.py scripts/docker_smoke.py scripts/export_openapi.py scripts/secret_scan.py && uv run pytest -q",
+    "check": "npm run test:capture-contract && npm --workspace web run check && uv run ruff check server scripts tests && uv run mypy server scripts/start.py scripts/docker_smoke.py scripts/export_openapi.py scripts/secret_scan.py && uv run pytest -q",
+    "capture:judge": "npm run test:e2e",
     "openapi:export": "uv run python scripts/export_openapi.py",
     "openapi:check": "uv run python scripts/export_openapi.py --check",
+    "pretest:e2e": "npm run build",
     "secret:scan": "uv run python scripts/secret_scan.py",
     "presmoke:deployed-defaults": "npm run build",
     "presmoke:production": "npm run build",
@@ -21,9 +23,14 @@
     "smoke:live:3": "uv run python -m scripts.smoke_live_three",
     "smoke:production": "uv run python scripts/docker_smoke.py --launch",
     "start": "uv run python scripts/start.py",
-    "test": "npm --workspace web test -- --run"
+    "test": "npm --workspace web test -- --run",
+    "test:capture-contract": "node --test e2e/judge-flow.test.mjs",
+    "test:e2e": "npm run test:capture-contract && node e2e/judge-flow.mjs"
   },
   "engines": {
     "node": ">=22.13 <23"
+  },
+  "devDependencies": {
+    "playwright-core": "1.61.1"
   }
 }
