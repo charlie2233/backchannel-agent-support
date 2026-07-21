@@ -17,8 +17,8 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from typing import Any
-from urllib.error import HTTPError, URLError
+from http.client import HTTPException
+from typing import Any, Literal
 from urllib.request import urlopen
 
 if __package__:
@@ -45,6 +45,34 @@ READINESS_POLL_SECONDS = 0.2
 _CONTAINER_PORT = 8000
 _DATABASE_PATH = "/data/backchannel.sqlite3"
 _GENERIC_NOT_FOUND = b'{"detail":"Not found"}'
+_READINESS_TIMEOUT_MESSAGES = {
+    "first_container": "First container readiness timed out",
+    "replacement_container": "Replacement container readiness timed out",
+}
+_PHASE_FAILURE_MESSAGES = {
+    "initialization": "Packaged restart smoke failed during initialization",
+    "volume_setup": "Packaged restart smoke failed during volume setup",
+    "first_container_start": "Packaged restart smoke failed during first container start",
+    "first_container_readiness": (
+        "Packaged restart smoke failed during first container readiness"
+    ),
+    "first_container_api_setup": (
+        "Packaged restart smoke failed during first container API setup"
+    ),
+    "first_container_shutdown": (
+        "Packaged restart smoke failed during first container shutdown"
+    ),
+    "replacement_container_start": (
+        "Packaged restart smoke failed during replacement container start"
+    ),
+    "replacement_container_readiness": (
+        "Packaged restart smoke failed during replacement container readiness"
+    ),
+    "replacement_api_verification": (
+        "Packaged restart smoke failed during replacement API verification"
+    ),
+}
+ReadinessPhase = Literal["first_container", "replacement_container"]
 
 
 class ContainerRestartFailure(RuntimeError):
@@ -78,7 +106,7 @@ def _docker(
     *,
     environment: dict[str, str] | None = None,
     allow_failure: bool = False,
-) -> str:
+) -> str | None:
     try:
         completed = subprocess.run(
             ["docker", *arguments],
@@ -90,26 +118,26 @@ def _docker(
         )
     except (OSError, subprocess.TimeoutExpired):
         if allow_failure:
-            return ""
+            return None
         raise ContainerRestartFailure("A bounded Docker operation failed") from None
     if completed.returncode != 0:
         if allow_failure:
-            return ""
+            return None
         raise ContainerRestartFailure("A bounded Docker operation failed") from None
     try:
         output = completed.stdout.decode("ascii").strip()
     except UnicodeDecodeError:
         if allow_failure:
-            return ""
+            return None
         raise ContainerRestartFailure("Docker returned an invalid opaque identifier") from None
     if len(output) > 128:
         if allow_failure:
-            return ""
+            return None
         raise ContainerRestartFailure("Docker returned an invalid opaque identifier")
     return output
 
 
-def _wait_for_ready(base_url: str) -> None:
+def _wait_for_ready(base_url: str, *, phase: ReadinessPhase) -> None:
     deadline = time.monotonic() + READINESS_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         request_timeout = min(
@@ -121,10 +149,10 @@ def _wait_for_ready(base_url: str) -> None:
                 body = response.read(256)
                 if response.status == 200 and body == b'{"status":"ready"}':
                     return
-        except (HTTPError, URLError, TimeoutError):
+        except (OSError, HTTPException):
             pass
         time.sleep(READINESS_POLL_SECONDS)
-    raise ContainerRestartFailure("Replacement container readiness timed out")
+    raise ContainerRestartFailure(_READINESS_TIMEOUT_MESSAGES[phase])
 
 
 def _validate_terminal_stream(stream: bytes, *, message: str) -> None:
@@ -387,9 +415,11 @@ def _start_container(
         environment=environment,
     )
     _require(
-        re.fullmatch(r"[0-9a-f]{12,64}", container_id) is not None,
+        isinstance(container_id, str)
+        and re.fullmatch(r"[0-9a-f]{12,64}", container_id) is not None,
         "Docker did not return a valid container identity",
     )
+    assert isinstance(container_id, str)
     return container_id
 
 
@@ -398,31 +428,107 @@ def _stop_and_remove_container(name: str) -> None:
     _docker(["rm", "-f", name])
 
 
+def _try_cleanup_docker(arguments: list[str]) -> str | None:
+    try:
+        return _docker(arguments, allow_failure=True)
+    except Exception:
+        return None
+
+
+def _cleanup_named_resource(
+    *,
+    expected_name: str,
+    list_arguments: list[str],
+    remove_arguments: list[str],
+) -> bool:
+    listed = _try_cleanup_docker(list_arguments)
+    if listed is None:
+        return False
+    listed_names = listed.splitlines()
+    if not listed_names:
+        return True
+    if listed_names != [expected_name]:
+        return False
+    removed = _try_cleanup_docker(remove_arguments)
+    return removed == expected_name
+
+
+def _cleanup_resources(
+    *,
+    first_name: str | None,
+    second_name: str | None,
+    volume: str | None,
+) -> bool:
+    results: list[bool] = []
+    for container_name in (first_name, second_name):
+        if container_name is None:
+            continue
+        results.append(
+            _cleanup_named_resource(
+                expected_name=container_name,
+                list_arguments=[
+                    "container",
+                    "ls",
+                    "--all",
+                    "--filter",
+                    f"name={container_name}",
+                    "--format",
+                    "{{.Names}}",
+                ],
+                remove_arguments=["rm", "-f", container_name],
+            )
+        )
+    if volume is not None:
+        results.append(
+            _cleanup_named_resource(
+                expected_name=volume,
+                list_arguments=[
+                    "volume",
+                    "ls",
+                    "--filter",
+                    f"name={volume}",
+                    "--format",
+                    "{{.Name}}",
+                ],
+                remove_arguments=["volume", "rm", "-f", volume],
+            )
+        )
+    return all(results)
+
+
 def run_container_restart_smoke(*, image: str, canary: str) -> dict[str, object]:
     _require(bool(image.strip()), "A packaged image name is required")
     _require(bool(canary), "A non-empty BACKCHANNEL_SMOKE_CANARY is required")
-    suffix = secrets.token_hex(6)
-    first_name = f"backchannel-restart-{suffix}-a"
-    second_name = f"backchannel-restart-{suffix}-b"
-    volume = f"backchannel-restart-{suffix}-data"
-    identity_secret = secrets.token_urlsafe(48)
-    port = _available_port()
-    base_url = f"http://127.0.0.1:{port}"
-    environment = dict(os.environ)
-    environment.update(
-        {
-            "BACKCHANNEL_CORS_ORIGINS": "https://judge.example",
-            "BACKCHANNEL_DEMO_RESET_ENABLED": "true",
-            "BACKCHANNEL_DEPLOYED_MODE": "true",
-            "BACKCHANNEL_DB_PATH": _DATABASE_PATH,
-            "BACKCHANNEL_IDENTITY_HASH_SECRET": identity_secret,
-            "BACKCHANNEL_SMOKE_CANARY": canary,
-            "OPENAI_API_KEY": canary,
-        }
-    )
-
+    phase = "initialization"
+    first_name: str | None = None
+    second_name: str | None = None
+    volume: str | None = None
+    primary_failure: ContainerRestartFailure | None = None
+    unexpected_failure_message: str | None = None
     try:
+        suffix = secrets.token_hex(6)
+        first_name = f"backchannel-restart-{suffix}-a"
+        second_name = f"backchannel-restart-{suffix}-b"
+        volume = f"backchannel-restart-{suffix}-data"
+        identity_secret = secrets.token_urlsafe(48)
+        port = _available_port()
+        base_url = f"http://127.0.0.1:{port}"
+        environment = dict(os.environ)
+        environment.update(
+            {
+                "BACKCHANNEL_CORS_ORIGINS": "https://judge.example",
+                "BACKCHANNEL_DEMO_RESET_ENABLED": "true",
+                "BACKCHANNEL_DEPLOYED_MODE": "true",
+                "BACKCHANNEL_DB_PATH": _DATABASE_PATH,
+                "BACKCHANNEL_IDENTITY_HASH_SECRET": identity_secret,
+                "BACKCHANNEL_SMOKE_CANARY": canary,
+                "OPENAI_API_KEY": canary,
+            }
+        )
+
+        phase = "volume_setup"
         _docker(["volume", "create", volume])
+        phase = "first_container_start"
         first_id = _start_container(
             image=image,
             name=first_name,
@@ -430,11 +536,15 @@ def run_container_restart_smoke(*, image: str, canary: str) -> dict[str, object]
             port=port,
             environment=environment,
         )
-        _wait_for_ready(base_url)
+        phase = "first_container_readiness"
+        _wait_for_ready(base_url, phase="first_container")
+        phase = "first_container_api_setup"
         owner = SmokeClient(base_url, canary)
         fixture = _create_restart_fixture(owner)
 
+        phase = "first_container_shutdown"
         _stop_and_remove_container(first_name)
+        phase = "replacement_container_start"
         second_id = _start_container(
             image=image,
             name=second_name,
@@ -443,19 +553,29 @@ def run_container_restart_smoke(*, image: str, canary: str) -> dict[str, object]
             environment=environment,
         )
         _require(first_id != second_id, "Docker reused the first container identity")
-        _wait_for_ready(base_url)
+        phase = "replacement_container_readiness"
+        _wait_for_ready(base_url, phase="replacement_container")
+        phase = "replacement_api_verification"
         foreign = SmokeClient(base_url, canary)
         _verify_restart_fixture(owner, foreign, fixture)
-    except ContainerRestartFailure:
-        raise
-    except SmokeFailure:
-        raise ContainerRestartFailure("Packaged restart HTTP proof failed") from None
-    except (KeyError, TypeError, ValueError):
-        raise ContainerRestartFailure("Packaged restart contract parsing failed") from None
-    finally:
-        _docker(["rm", "-f", first_name], allow_failure=True)
-        _docker(["rm", "-f", second_name], allow_failure=True)
-        _docker(["volume", "rm", "-f", volume], allow_failure=True)
+    except ContainerRestartFailure as error:
+        primary_failure = error
+    except Exception:
+        unexpected_failure_message = _PHASE_FAILURE_MESSAGES[phase]
+
+    cleanup_succeeded = _cleanup_resources(
+        first_name=first_name,
+        second_name=second_name,
+        volume=volume,
+    )
+    if primary_failure is not None:
+        raise primary_failure from None
+    if unexpected_failure_message is not None:
+        raise ContainerRestartFailure(unexpected_failure_message) from None
+    if not cleanup_succeeded:
+        raise ContainerRestartFailure(
+            "Packaged restart smoke failed during cleanup"
+        ) from None
 
     return {
         "approval": "completed_once_after_replacement",

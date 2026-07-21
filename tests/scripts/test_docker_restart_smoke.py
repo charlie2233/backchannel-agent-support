@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from http.client import BadStatusLine, HTTPException, IncompleteRead, RemoteDisconnected
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -49,19 +50,49 @@ def test_replacement_uses_distinct_containers_one_volume_and_memory_only_cookie(
 ) -> None:
     calls: list[tuple[tuple[str, ...], dict[str, str] | None, bool]] = []
     container_ids = iter(("a" * 64, "b" * 64))
+    containers: set[str] = set()
+    volumes: set[str] = set()
 
     def fake_docker(
         arguments: list[str],
         *,
         environment: dict[str, str] | None = None,
         allow_failure: bool = False,
-    ) -> str:
+    ) -> str | None:
         calls.append((tuple(arguments), environment, allow_failure))
         if arguments[0] == "run":
+            containers.add(arguments[arguments.index("--name") + 1])
             return next(container_ids)
+        if arguments[:2] == ["volume", "create"]:
+            volumes.add(arguments[-1])
+            return arguments[-1]
+        if arguments[0] == "stop":
+            return arguments[-1]
+        if arguments[:2] == ["container", "ls"]:
+            name = arguments[arguments.index("--filter") + 1].removeprefix("name=")
+            return name if name in containers else ""
+        if arguments[:2] == ["volume", "ls"]:
+            name = arguments[arguments.index("--filter") + 1].removeprefix("name=")
+            return name if name in volumes else ""
+        if arguments[0] == "rm":
+            name = arguments[-1]
+            if name not in containers:
+                return None
+            containers.remove(name)
+            return name
+        if arguments[:3] == ["volume", "rm", "-f"]:
+            name = arguments[-1]
+            if name not in volumes:
+                return None
+            volumes.remove(name)
+            return name
         return ""
 
-    readiness: list[str] = []
+    readiness: list[tuple[str, str]] = []
+
+    def fake_readiness(base_url: str, *, phase: str) -> None:
+        readiness.append((base_url, phase))
+
     clients = [
         type("Client", (), {"secure_cookie_validated": True})(),
         type("Client", (), {"secure_cookie_validated": True})(),
@@ -70,7 +101,7 @@ def test_replacement_uses_distinct_containers_one_volume_and_memory_only_cookie(
     verify_calls: list[tuple[object, object, object]] = []
     monkeypatch.setattr(restart_smoke, "_docker", fake_docker)
     monkeypatch.setattr(restart_smoke, "_available_port", lambda: 43127)
-    monkeypatch.setattr(restart_smoke, "_wait_for_ready", readiness.append)
+    monkeypatch.setattr(restart_smoke, "_wait_for_ready", fake_readiness)
     monkeypatch.setattr(restart_smoke.secrets, "token_hex", lambda _size: "unit123")
     monkeypatch.setattr(
         restart_smoke.secrets,
@@ -108,7 +139,10 @@ def test_replacement_uses_distinct_containers_one_volume_and_memory_only_cookie(
     assert first_mount == second_mount
     assert "type=volume" in first_mount
     assert "target=/data" in first_mount
-    assert readiness == ["http://127.0.0.1:43127", "http://127.0.0.1:43127"]
+    assert readiness == [
+        ("http://127.0.0.1:43127", "first_container"),
+        ("http://127.0.0.1:43127", "replacement_container"),
+    ]
     assert verify_calls == [(ANY, ANY, fixture)]
     owner, foreign, _ = verify_calls[0]
     assert owner is not foreign
@@ -141,9 +175,20 @@ def test_replacement_uses_distinct_containers_one_volume_and_memory_only_cookie(
     )
     assert stop_index < second_run_index
     cleanup = [arguments for arguments, _, allow_failure in calls if allow_failure]
-    assert ("rm", "-f", first_name) in cleanup
+    assert any(
+        arguments[:2] == ("container", "ls")
+        and any(first_name in argument for argument in arguments)
+        for arguments in cleanup
+    )
+    assert any(
+        arguments[:2] == ("container", "ls")
+        and any(second_name in argument for argument in arguments)
+        for arguments in cleanup
+    )
     assert ("rm", "-f", second_name) in cleanup
     assert any(arguments[:3] == ("volume", "rm", "-f") for arguments in cleanup)
+    assert not containers
+    assert not volumes
     assert result == {
         "approval": "completed_once_after_replacement",
         "containerReplacement": "passed",
@@ -165,20 +210,46 @@ def test_cleanup_is_attempted_when_first_container_api_proof_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[tuple[str, ...], bool]] = []
+    containers: set[str] = set()
+    volumes: set[str] = set()
 
     def fake_docker(
         arguments: list[str],
         *,
         environment: dict[str, str] | None = None,
         allow_failure: bool = False,
-    ) -> str:
+    ) -> str | None:
         del environment
         calls.append((tuple(arguments), allow_failure))
-        return "c" * 64 if arguments[0] == "run" else ""
+        if arguments[0] == "run":
+            containers.add(arguments[arguments.index("--name") + 1])
+            return "c" * 64
+        if arguments[:2] == ["volume", "create"]:
+            volumes.add(arguments[-1])
+            return arguments[-1]
+        if arguments[:2] == ["container", "ls"]:
+            name = arguments[arguments.index("--filter") + 1].removeprefix("name=")
+            return name if name in containers else ""
+        if arguments[:2] == ["volume", "ls"]:
+            name = arguments[arguments.index("--filter") + 1].removeprefix("name=")
+            return name if name in volumes else ""
+        if arguments[0] == "rm":
+            name = arguments[-1]
+            containers.remove(name)
+            return name
+        if arguments[:3] == ["volume", "rm", "-f"]:
+            name = arguments[-1]
+            volumes.remove(name)
+            return name
+        return ""
 
     monkeypatch.setattr(restart_smoke, "_docker", fake_docker)
     monkeypatch.setattr(restart_smoke, "_available_port", lambda: 43128)
-    monkeypatch.setattr(restart_smoke, "_wait_for_ready", lambda _url: None)
+    monkeypatch.setattr(
+        restart_smoke,
+        "_wait_for_ready",
+        lambda _url, *, phase: None,
+    )
     monkeypatch.setattr(restart_smoke, "SmokeClient", lambda _url, _canary: object())
     monkeypatch.setattr(
         restart_smoke,
@@ -193,10 +264,14 @@ def test_cleanup_is_attempted_when_first_container_api_proof_fails(
         )
 
     cleanup = [arguments for arguments, allow_failure in calls if allow_failure]
-    assert len([arguments for arguments in cleanup if arguments[:2] == ("rm", "-f")]) == 2
     assert len(
-        [arguments for arguments in cleanup if arguments[:3] == ("volume", "rm", "-f")]
-    ) == 1
+        [arguments for arguments in cleanup if arguments[:2] == ("container", "ls")]
+    ) == 2
+    assert len([arguments for arguments in cleanup if arguments[:2] == ("rm", "-f")]) == 1
+    assert len([arguments for arguments in cleanup if arguments[:2] == ("volume", "ls")]) == 1
+    assert len([arguments for arguments in cleanup if arguments[:3] == ("volume", "rm", "-f")]) == 1
+    assert not containers
+    assert not volumes
 
 
 def test_first_container_creates_two_pending_sdk_recoveries_and_terminal_replay(
@@ -498,3 +573,432 @@ def test_docker_inherits_secret_values_outside_argv_and_bounds_cleanup(
         call["timeout"] == restart_smoke.DOCKER_TIMEOUT_SECONDS for call in calls
     )
     assert all(call["stderr"] is restart_smoke.subprocess.DEVNULL for call in calls)
+
+
+def test_readiness_retries_transient_resets_before_success(
+    restart_smoke: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ReadyResponse:
+        status = 200
+
+        def __enter__(self) -> ReadyResponse:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self, _limit: int) -> bytes:
+            return b'{"status":"ready"}'
+
+    attempts: list[float] = []
+    outcomes: list[BaseException | ReadyResponse] = [
+        ConnectionResetError("canary-reset-detail"),
+        RemoteDisconnected("canary-disconnect-detail"),
+        ReadyResponse(),
+    ]
+
+    def fake_urlopen(_url: str, *, timeout: float) -> ReadyResponse:
+        attempts.append(timeout)
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(restart_smoke, "urlopen", fake_urlopen)
+    monkeypatch.setattr(restart_smoke.time, "sleep", lambda _seconds: None)
+
+    restart_smoke._wait_for_ready(
+        "http://127.0.0.1:43129",
+        phase="first_container",
+    )
+
+    assert len(attempts) == 3
+    assert all(0 < timeout <= restart_smoke.HTTP_TIMEOUT_SECONDS for timeout in attempts)
+
+
+def test_readiness_oserror_retries_stop_at_finite_deadline(
+    restart_smoke: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = {"now": 0.0}
+    attempts: list[float] = []
+
+    def fake_urlopen(_url: str, *, timeout: float) -> None:
+        attempts.append(timeout)
+        raise OSError("canary-reset-detail /private/path")
+
+    def fake_sleep(seconds: float) -> None:
+        clock["now"] += seconds
+
+    monkeypatch.setattr(restart_smoke, "READINESS_TIMEOUT_SECONDS", 0.3)
+    monkeypatch.setattr(restart_smoke, "READINESS_POLL_SECONDS", 0.1)
+    monkeypatch.setattr(restart_smoke, "urlopen", fake_urlopen)
+    monkeypatch.setattr(restart_smoke.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(restart_smoke.time, "sleep", fake_sleep)
+
+    with pytest.raises(
+        restart_smoke.ContainerRestartFailure,
+        match="^Replacement container readiness timed out$",
+    ) as captured:
+        restart_smoke._wait_for_ready(
+            "http://127.0.0.1:43130",
+            phase="replacement_container",
+        )
+
+    assert 1 <= len(attempts) <= 4
+    assert clock["now"] <= 0.4
+    assert all(0 < timeout <= restart_smoke.HTTP_TIMEOUT_SECONDS for timeout in attempts)
+    assert "canary" not in str(captured.value)
+    assert "path" not in str(captured.value)
+
+
+@pytest.mark.parametrize(
+    ("failure_phase", "expected_message"),
+    [
+        (
+            "first_readiness",
+            "Packaged restart smoke failed during first container readiness",
+        ),
+        (
+            "replacement_verification",
+            "Packaged restart smoke failed during replacement API verification",
+        ),
+    ],
+)
+def test_unexpected_orchestration_failures_map_to_fixed_secret_safe_phase(
+    restart_smoke: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_phase: str,
+    expected_message: str,
+) -> None:
+    container_ids = iter(("a" * 64, "b" * 64))
+
+    def fake_docker(
+        arguments: list[str],
+        *,
+        environment: dict[str, str] | None = None,
+        allow_failure: bool = False,
+    ) -> str:
+        del environment, allow_failure
+        return next(container_ids) if arguments[0] == "run" else ""
+
+    readiness_calls = 0
+
+    def fake_readiness(_base_url: str, *, phase: str) -> None:
+        nonlocal readiness_calls
+        readiness_calls += 1
+        assert phase in {"first_container", "replacement_container"}
+        if failure_phase == "first_readiness" and readiness_calls == 1:
+            raise RuntimeError("canary-secret /private/database.sqlite3")
+
+    clients = [object(), object()]
+    monkeypatch.setattr(restart_smoke, "_docker", fake_docker)
+    monkeypatch.setattr(restart_smoke, "_available_port", lambda: 43131)
+    monkeypatch.setattr(restart_smoke, "_wait_for_ready", fake_readiness)
+    monkeypatch.setattr(restart_smoke, "SmokeClient", lambda _url, _canary: clients.pop(0))
+    monkeypatch.setattr(restart_smoke, "_create_restart_fixture", lambda _owner: object())
+
+    def fake_verify(_owner: object, _foreign: object, _fixture: object) -> None:
+        if failure_phase == "replacement_verification":
+            raise RuntimeError("canary-secret /private/database.sqlite3")
+
+    monkeypatch.setattr(restart_smoke, "_verify_restart_fixture", fake_verify)
+
+    with pytest.raises(
+        restart_smoke.ContainerRestartFailure,
+        match=f"^{expected_message}$",
+    ) as captured:
+        restart_smoke.run_container_restart_smoke(
+            image="backchannel:test",
+            canary="canary-kept-out-of-output",
+        )
+
+    rendered = str(captured.value)
+    assert rendered == expected_message
+    assert "canary" not in rendered
+    assert "private" not in rendered
+    assert "sqlite" not in rendered
+
+
+@pytest.mark.parametrize(
+    ("phase", "expected_message"),
+    [
+        ("first_container", "First container readiness timed out"),
+        ("replacement_container", "Replacement container readiness timed out"),
+    ],
+)
+def test_readiness_timeout_is_fixed_and_phase_accurate(
+    restart_smoke: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    expected_message: str,
+) -> None:
+    clock = {"now": 0.0}
+
+    def fail_network(_url: str, *, timeout: float) -> None:
+        assert 0 < timeout <= restart_smoke.HTTP_TIMEOUT_SECONDS
+        raise ConnectionResetError("canary-timeout-detail /private/path")
+
+    def advance(seconds: float) -> None:
+        clock["now"] += seconds
+
+    monkeypatch.setattr(restart_smoke, "READINESS_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(restart_smoke, "READINESS_POLL_SECONDS", 0.1)
+    monkeypatch.setattr(restart_smoke, "urlopen", fail_network)
+    monkeypatch.setattr(restart_smoke.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(restart_smoke.time, "sleep", advance)
+
+    with pytest.raises(
+        restart_smoke.ContainerRestartFailure,
+        match=f"^{expected_message}$",
+    ) as captured:
+        restart_smoke._wait_for_ready(
+            "http://127.0.0.1:43132",
+            phase=phase,
+        )
+
+    assert str(captured.value) == expected_message
+    assert "canary" not in str(captured.value)
+    assert "private" not in str(captured.value)
+
+
+def test_readiness_retries_transient_http_protocol_failures(
+    restart_smoke: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ReadyResponse:
+        status = 200
+
+        def __enter__(self) -> ReadyResponse:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self, _limit: int) -> bytes:
+            return b'{"status":"ready"}'
+
+    outcomes: list[HTTPException | ReadyResponse] = [
+        BadStatusLine("canary-bad-status"),
+        IncompleteRead(b"canary-partial", 64),
+        HTTPException("canary-http-detail"),
+        ReadyResponse(),
+    ]
+    attempts: list[float] = []
+
+    def fake_urlopen(_url: str, *, timeout: float) -> ReadyResponse:
+        attempts.append(timeout)
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, HTTPException):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(restart_smoke, "urlopen", fake_urlopen)
+    monkeypatch.setattr(restart_smoke.time, "sleep", lambda _seconds: None)
+
+    restart_smoke._wait_for_ready(
+        "http://127.0.0.1:43133",
+        phase="first_container",
+    )
+
+    assert len(attempts) == 4
+    assert all(0 < timeout <= restart_smoke.HTTP_TIMEOUT_SECONDS for timeout in attempts)
+
+
+def test_readiness_does_not_swallow_non_network_programming_errors(
+    restart_smoke: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_programming(_url: str, *, timeout: float) -> None:
+        del timeout
+        raise RuntimeError("programming failure")
+
+    monkeypatch.setattr(restart_smoke, "urlopen", fail_programming)
+
+    with pytest.raises(RuntimeError, match="^programming failure$"):
+        restart_smoke._wait_for_ready(
+            "http://127.0.0.1:43134",
+            phase="first_container",
+        )
+
+
+@pytest.mark.parametrize("failure_kind", ["known", "unexpected"])
+def test_cleanup_failure_attempts_every_resource_and_fails_closed(
+    restart_smoke: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_kind: str,
+) -> None:
+    calls: list[tuple[tuple[str, ...], int]] = []
+    container_ids = iter(("a" * 64, "b" * 64))
+    run_count = 0
+    cleanup_failure_injected = False
+    containers: set[str] = set()
+    volumes: set[str] = set()
+
+    def fake_docker(
+        arguments: list[str],
+        *,
+        environment: dict[str, str] | None = None,
+        allow_failure: bool = False,
+    ) -> str | None:
+        nonlocal cleanup_failure_injected, run_count
+        del environment
+        if arguments[0] == "run":
+            run_count += 1
+            calls.append((tuple(arguments), run_count))
+            containers.add(arguments[arguments.index("--name") + 1])
+            return next(container_ids)
+        calls.append((tuple(arguments), run_count))
+        if arguments[:2] == ["volume", "create"]:
+            volumes.add(arguments[-1])
+            return arguments[-1]
+        if arguments[0] == "stop":
+            return arguments[-1]
+        if arguments[:2] == ["container", "ls"]:
+            name = arguments[arguments.index("--filter") + 1].removeprefix("name=")
+            return name if name in containers else ""
+        if arguments[:2] == ["volume", "ls"]:
+            name = arguments[arguments.index("--filter") + 1].removeprefix("name=")
+            return name if name in volumes else ""
+        if arguments[0] == "rm":
+            name = arguments[-1]
+            if run_count == 2 and name.endswith("-b") and not cleanup_failure_injected:
+                assert allow_failure is True
+                cleanup_failure_injected = True
+                if failure_kind == "known":
+                    return None
+                raise RuntimeError("canary cleanup /private/path")
+            containers.remove(name)
+            return name
+        if arguments[:3] == ["volume", "rm", "-f"]:
+            name = arguments[-1]
+            volumes.remove(name)
+            return name
+        return ""
+
+    monkeypatch.setattr(restart_smoke, "_docker", fake_docker)
+    monkeypatch.setattr(restart_smoke, "_available_port", lambda: 43135)
+    monkeypatch.setattr(
+        restart_smoke,
+        "_wait_for_ready",
+        lambda _url, *, phase: None,
+    )
+    monkeypatch.setattr(restart_smoke, "SmokeClient", lambda _url, _canary: object())
+    monkeypatch.setattr(restart_smoke, "_create_restart_fixture", lambda _owner: object())
+    monkeypatch.setattr(
+        restart_smoke,
+        "_verify_restart_fixture",
+        lambda _owner, _foreign, _fixture: None,
+    )
+
+    with pytest.raises(
+        restart_smoke.ContainerRestartFailure,
+        match="^Packaged restart smoke failed during cleanup$",
+    ) as captured:
+        restart_smoke.run_container_restart_smoke(
+            image="backchannel:test",
+            canary="canary-kept-out-of-output",
+        )
+
+    cleanup_calls = [
+        arguments
+        for arguments, observed_runs in calls
+        if observed_runs == 2 and arguments[0] != "run"
+    ]
+    assert len(cleanup_calls) == 5
+    assert cleanup_calls[0][:2] == ("container", "ls")
+    assert cleanup_calls[1][:2] == ("container", "ls")
+    assert cleanup_calls[2][:2] == ("rm", "-f")
+    assert cleanup_calls[3][:2] == ("volume", "ls")
+    assert cleanup_calls[4][:3] == ("volume", "rm", "-f")
+    assert "secret" not in str(captured.value)
+    assert "canary" not in str(captured.value)
+    assert "private" not in str(captured.value)
+
+
+def test_cleanup_failure_preserves_primary_failure_and_attempts_every_resource(
+    restart_smoke: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[tuple[str, ...], int]] = []
+    container_ids = iter(("a" * 64, "b" * 64))
+    run_count = 0
+    cleanup_failure_injected = False
+    containers: set[str] = set()
+    volumes: set[str] = set()
+
+    def fake_docker(
+        arguments: list[str],
+        *,
+        environment: dict[str, str] | None = None,
+        allow_failure: bool = False,
+    ) -> str | None:
+        nonlocal cleanup_failure_injected, run_count
+        del environment
+        if arguments[0] == "run":
+            run_count += 1
+            calls.append((tuple(arguments), run_count))
+            containers.add(arguments[arguments.index("--name") + 1])
+            return next(container_ids)
+        calls.append((tuple(arguments), run_count))
+        if arguments[:2] == ["volume", "create"]:
+            volumes.add(arguments[-1])
+            return arguments[-1]
+        if arguments[0] == "stop":
+            return arguments[-1]
+        if arguments[:2] == ["container", "ls"]:
+            name = arguments[arguments.index("--filter") + 1].removeprefix("name=")
+            return name if name in containers else ""
+        if arguments[:2] == ["volume", "ls"]:
+            name = arguments[arguments.index("--filter") + 1].removeprefix("name=")
+            return name if name in volumes else ""
+        if arguments[0] == "rm":
+            name = arguments[-1]
+            if run_count == 2 and name.endswith("-b") and not cleanup_failure_injected:
+                assert allow_failure is True
+                cleanup_failure_injected = True
+                raise RuntimeError("cleanup canary /private/path")
+            containers.remove(name)
+            return name
+        if arguments[:3] == ["volume", "rm", "-f"]:
+            name = arguments[-1]
+            volumes.remove(name)
+            return name
+        return ""
+
+    monkeypatch.setattr(restart_smoke, "_docker", fake_docker)
+    monkeypatch.setattr(restart_smoke, "_available_port", lambda: 43136)
+    monkeypatch.setattr(
+        restart_smoke,
+        "_wait_for_ready",
+        lambda _url, *, phase: None,
+    )
+    monkeypatch.setattr(restart_smoke, "SmokeClient", lambda _url, _canary: object())
+    monkeypatch.setattr(restart_smoke, "_create_restart_fixture", lambda _owner: object())
+    monkeypatch.setattr(
+        restart_smoke,
+        "_verify_restart_fixture",
+        lambda _owner, _foreign, _fixture: (_ for _ in ()).throw(
+            RuntimeError("primary canary /private/database.sqlite3")
+        ),
+    )
+
+    with pytest.raises(
+        restart_smoke.ContainerRestartFailure,
+        match="^Packaged restart smoke failed during replacement API verification$",
+    ) as captured:
+        restart_smoke.run_container_restart_smoke(
+            image="backchannel:test",
+            canary="canary-kept-out-of-output",
+        )
+
+    cleanup_calls = [
+        arguments
+        for arguments, observed_runs in calls
+        if observed_runs == 2 and arguments[0] != "run"
+    ]
+    assert len(cleanup_calls) == 5
+    assert "cleanup" not in str(captured.value).lower()
+    assert "canary" not in str(captured.value)
+    assert "private" not in str(captured.value)
