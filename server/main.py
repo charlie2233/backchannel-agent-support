@@ -820,6 +820,9 @@ def create_app(
                         identity.session_key,
                     ):
                         raise RuntimeError("Recovery access binding was not persisted")
+                except asyncio.CancelledError:
+                    public_controls.release_live(recovery_id)
+                    raise
                 except Exception:
                     public_controls.release_live(recovery_id)
                     raise

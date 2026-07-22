@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from scripts import docker_restart_smoke, start
 from scripts.start import bind_host
 from scripts.start import main as start_main
 from server.config import RuntimeSettings
@@ -168,3 +169,10 @@ def test_production_launcher_uses_one_process_for_process_local_stream_limits(
 
     assert captured["app"] == "server.main:app"
     assert captured["workers"] == 1
+    assert captured["timeout_graceful_shutdown"] == 3
+    assert start.GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS == 3
+    assert (
+        docker_restart_smoke.CONTAINER_STOP_TIMEOUT_SECONDS
+        - start.GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS
+        >= 2
+    )

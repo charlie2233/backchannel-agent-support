@@ -31,6 +31,41 @@ class FakeResponse:
         return self._payload
 
 
+def _active_sse_fixture() -> SimpleNamespace:
+    return SimpleNamespace(
+        approval_snapshot={"recoveryId": "approval-id", "status": "pending_approval"}
+    )
+
+
+class FakeActiveSseOwner:
+    secure_cookie_validated = True
+
+    def __init__(self) -> None:
+        self.close_calls = 0
+
+    def open_event_stream(self, *_args: object, **_kwargs: object) -> object:
+        owner = self
+
+        class Held:
+            def close(self) -> None:
+                owner.close_calls += 1
+
+        return Held()
+
+    def get(self, _path: str) -> FakeResponse:
+        request_id = "f" * 32
+        return FakeResponse(
+            body=(
+                "retry: 5000\n"
+                "event: stream.capacity\n"
+                'data: {"code":"event_stream_capacity","message":'
+                '"Event streaming is temporarily at capacity; retry is automatic.",'
+                f'"requestId":"{request_id}"}}\n\n'
+            ).encode(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+
 @pytest.fixture
 def restart_smoke() -> ModuleType:
     if not SCRIPT.is_file():
@@ -49,6 +84,7 @@ def test_replacement_uses_distinct_containers_one_volume_and_memory_only_cookie(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[tuple[str, ...], dict[str, str] | None, bool]] = []
+    lifecycle: list[str] = []
     container_ids = iter(("a" * 64, "b" * 64))
     containers: set[str] = set()
     volumes: set[str] = set()
@@ -61,13 +97,22 @@ def test_replacement_uses_distinct_containers_one_volume_and_memory_only_cookie(
     ) -> str | None:
         calls.append((tuple(arguments), environment, allow_failure))
         if arguments[0] == "run":
+            lifecycle.append(
+                "run_a" if arguments[arguments.index("--name") + 1].endswith("-a") else "run_b"
+            )
             containers.add(arguments[arguments.index("--name") + 1])
             return next(container_ids)
         if arguments[:2] == ["volume", "create"]:
             volumes.add(arguments[-1])
             return arguments[-1]
         if arguments[0] == "stop":
+            assert held_stream.is_open
+            lifecycle.append("stop_a")
             return arguments[-1]
+        if arguments[0] == "inspect":
+            assert held_stream.is_open
+            lifecycle.append("inspect_a")
+            return "143"
         if arguments[:2] == ["container", "ls"]:
             name = arguments[arguments.index("--filter") + 1].removeprefix("name=")
             return name if name in containers else ""
@@ -93,11 +138,56 @@ def test_replacement_uses_distinct_containers_one_volume_and_memory_only_cookie(
     def fake_readiness(base_url: str, *, phase: str) -> None:
         readiness.append((base_url, phase))
 
-    clients = [
-        type("Client", (), {"secure_cookie_validated": True})(),
-        type("Client", (), {"secure_cookie_validated": True})(),
-    ]
-    fixture = object()
+    class FakeHeldStream:
+        def __init__(self) -> None:
+            self.is_open = True
+            self.close_calls = 0
+
+        def close(self) -> None:
+            assert self.is_open
+            self.is_open = False
+            self.close_calls += 1
+            lifecycle.append("close_a_stream")
+
+    held_stream = FakeHeldStream()
+    request_id = "f" * 32
+    capacity_body = (
+        "retry: 5000\n"
+        "event: stream.capacity\n"
+        'data: {"code":"event_stream_capacity","message":'
+        '"Event streaming is temporarily at capacity; retry is automatic.",'
+        f'"requestId":"{request_id}"}}\n\n'
+    ).encode()
+
+    class OwnerClient:
+        secure_cookie_validated = True
+
+        def open_event_stream(
+            self,
+            path: str,
+            *,
+            expected_recovery_id: str,
+        ) -> FakeHeldStream:
+            assert path == "/api/recoveries/approval-id/events"
+            assert expected_recovery_id == "approval-id"
+            lifecycle.append("open_a_stream")
+            return held_stream
+
+        def get(self, path: str) -> FakeResponse:
+            assert path == "/api/recoveries/approval-id/events"
+            assert held_stream.is_open
+            lifecycle.append("capacity_probe")
+            return FakeResponse(
+                body=capacity_body,
+                headers={"content-type": "text/event-stream"},
+            )
+
+    owner_client = OwnerClient()
+    foreign_client = type("Client", (), {"secure_cookie_validated": True})()
+    clients = [owner_client, foreign_client]
+    fixture = SimpleNamespace(
+        approval_snapshot={"recoveryId": "approval-id", "status": "pending_approval"}
+    )
     verify_calls: list[tuple[object, object, object]] = []
     monkeypatch.setattr(restart_smoke, "_docker", fake_docker)
     monkeypatch.setattr(restart_smoke, "_available_port", lambda: 43127)
@@ -157,6 +247,8 @@ def test_replacement_uses_distinct_containers_one_volume_and_memory_only_cookie(
     ):
         assert first_environment[key] == second_environment[key]
     assert first_environment["BACKCHANNEL_DB_PATH"] == "/data/backchannel.sqlite3"
+    assert first_environment["BACKCHANNEL_MAX_CONCURRENT_EVENT_STREAMS"] == "1"
+    assert first_environment["BACKCHANNEL_MAX_EVENT_STREAMS_PER_RECOVERY"] == "1"
     serialized_arguments = json.dumps([arguments for arguments, _, _ in calls])
     for secret_value in (
         "identity-secret-kept-out-of-argv",
@@ -174,6 +266,16 @@ def test_replacement_uses_distinct_containers_one_volume_and_memory_only_cookie(
         if arguments == second_arguments
     )
     assert stop_index < second_run_index
+    assert lifecycle == [
+        "run_a",
+        "open_a_stream",
+        "capacity_probe",
+        "stop_a",
+        "inspect_a",
+        "close_a_stream",
+        "run_b",
+    ]
+    assert held_stream.close_calls == 1
     cleanup = [arguments for arguments, _, allow_failure in calls if allow_failure]
     assert any(
         arguments[:2] == ("container", "ls")
@@ -194,6 +296,7 @@ def test_replacement_uses_distinct_containers_one_volume_and_memory_only_cookie(
         "containerReplacement": "passed",
         "containers": "distinct",
         "decline": "closed_without_action_after_replacement",
+        "gracefulActiveSseShutdown": "passed",
         "pendingRecoveryResume": "passed",
         "proofLane": "packaged_replacement_container",
         "receiptPersistence": "passed",
@@ -203,6 +306,373 @@ def test_replacement_uses_distinct_containers_one_volume_and_memory_only_cookie(
         "terminalReplayPersistence": "passed",
         "volumePersistence": "passed",
     }
+
+
+@pytest.mark.parametrize("exit_code", ["0", "143"])
+def test_stop_inspects_graceful_exit_before_removal_with_strict_budget(
+    restart_smoke: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    exit_code: str,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+    clock = iter((100.0, 104.999))
+
+    def fake_docker(arguments: list[str], **_kwargs: object) -> str:
+        calls.append(tuple(arguments))
+        return exit_code if arguments[0] == "inspect" else "restart-a"
+
+    monkeypatch.setattr(restart_smoke, "_docker", fake_docker)
+    monkeypatch.setattr(restart_smoke.time, "monotonic", lambda: next(clock))
+
+    restart_smoke._stop_and_remove_container("restart-a")
+
+    assert restart_smoke.CONTAINER_STOP_TIMEOUT_SECONDS == 5
+    assert calls == [
+        ("stop", "--time", "5", "restart-a"),
+        ("inspect", "--format", "{{.State.ExitCode}}", "restart-a"),
+        ("rm", "-f", "restart-a"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "exit_code",
+    ["137", "1", "-1", "+0", "0 extra", "", None],
+)
+def test_stop_rejects_forced_malformed_missing_or_other_exit_before_removal(
+    restart_smoke: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    exit_code: str | None,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_docker(arguments: list[str], **_kwargs: object) -> str | None:
+        calls.append(tuple(arguments))
+        return exit_code if arguments[0] == "inspect" else "restart-a"
+
+    monkeypatch.setattr(restart_smoke, "_docker", fake_docker)
+    monkeypatch.setattr(restart_smoke.time, "monotonic", iter((10.0, 11.0)).__next__)
+
+    with pytest.raises(
+        restart_smoke.ContainerRestartFailure,
+        match="^First container did not exit gracefully$",
+    ):
+        restart_smoke._stop_and_remove_container("restart-a")
+
+    assert calls == [
+        ("stop", "--time", "5", "restart-a"),
+        ("inspect", "--format", "{{.State.ExitCode}}", "restart-a"),
+    ]
+
+
+def test_stop_rejects_elapsed_time_at_fixed_boundary_before_inspect_or_remove(
+    restart_smoke: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_docker(arguments: list[str], **_kwargs: object) -> str:
+        calls.append(tuple(arguments))
+        return "restart-a"
+
+    monkeypatch.setattr(restart_smoke, "_docker", fake_docker)
+    monkeypatch.setattr(restart_smoke.time, "monotonic", iter((10.0, 15.0)).__next__)
+
+    with pytest.raises(
+        restart_smoke.ContainerRestartFailure,
+        match="^First container exceeded its graceful stop budget$",
+    ):
+        restart_smoke._stop_and_remove_container("restart-a")
+
+    assert calls == [("stop", "--time", "5", "restart-a")]
+
+
+@pytest.mark.parametrize(
+    "drift",
+    [
+        "wrong_code",
+        "malformed_request_id",
+        "extra_frame",
+        "recovery_leak",
+        "wrong_content_type",
+        "prefix_confusable_content_type",
+    ],
+)
+def test_capacity_probe_rejects_any_nonexact_finite_control_frame(
+    restart_smoke: ModuleType,
+    drift: str,
+) -> None:
+    recovery_id = "11111111-2222-4333-8444-555555555555"
+    request_id = "f" * 32
+    payload = {
+        "code": "event_stream_capacity",
+        "message": ("Event streaming is temporarily at capacity; retry is automatic."),
+        "requestId": request_id,
+    }
+    if drift == "wrong_code":
+        payload["code"] = "capacity"
+    if drift == "malformed_request_id":
+        payload["requestId"] = "not-a-request-id"
+    if drift == "recovery_leak":
+        payload["recoveryId"] = recovery_id
+    body = (
+        "retry: 5000\n"
+        "event: stream.capacity\n"
+        f"data: {json.dumps(payload, separators=(',', ':'))}\n\n"
+    )
+    if drift == "extra_frame":
+        body += "event: extra\ndata: {}\n\n"
+    if drift == "wrong_content_type":
+        content_type = "application/json"
+    elif drift == "prefix_confusable_content_type":
+        content_type = "text/event-stream-evil; charset=utf-8"
+    else:
+        content_type = "text/event-stream"
+
+    with pytest.raises(
+        restart_smoke.ContainerRestartFailure,
+        match="^Active event stream capacity proof drifted$",
+    ):
+        restart_smoke._validate_stream_capacity_response(
+            FakeResponse(
+                body=body.encode(),
+                headers={"content-type": content_type},
+            ),
+            recovery_id=recovery_id,
+        )
+
+
+def test_capacity_probe_accepts_case_insensitive_parameterized_sse_media_type(
+    restart_smoke: ModuleType,
+) -> None:
+    request_id = "f" * 32
+    response = FakeResponse(
+        body=(
+            "retry: 5000\n"
+            "event: stream.capacity\n"
+            'data: {"code":"event_stream_capacity","message":'
+            '"Event streaming is temporarily at capacity; retry is automatic.",'
+            f'"requestId":"{request_id}"}}\n\n'
+        ).encode(),
+        headers={"content-type": " Text/Event-Stream ; charset=utf-8"},
+    )
+
+    restart_smoke._validate_stream_capacity_response(
+        response,
+        recovery_id="11111111-2222-4333-8444-555555555555",
+    )
+
+
+def test_held_stream_close_error_does_not_mask_primary_stop_failure(
+    restart_smoke: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class CloseFailingHeldStream:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+            raise RuntimeError("close-canary-private-detail")
+
+    held = CloseFailingHeldStream()
+
+    class OwnerClient:
+        def open_event_stream(self, *_args: object, **_kwargs: object) -> object:
+            return held
+
+        def get(self, _path: str) -> FakeResponse:
+            return FakeResponse(body=b"capacity", headers={})
+
+    starts: list[str] = []
+
+    def fake_start_container(**kwargs: object) -> str:
+        name = str(kwargs["name"])
+        starts.append(name)
+        return "a" * 64
+
+    monkeypatch.setattr(restart_smoke, "_docker", lambda *_args, **_kwargs: "volume")
+    monkeypatch.setattr(restart_smoke, "_available_port", lambda: 43140)
+    monkeypatch.setattr(restart_smoke, "_start_container", fake_start_container)
+    monkeypatch.setattr(restart_smoke, "_wait_for_ready", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(restart_smoke, "SmokeClient", lambda *_args, **_kwargs: OwnerClient())
+    monkeypatch.setattr(
+        restart_smoke,
+        "_create_restart_fixture",
+        lambda _owner: SimpleNamespace(
+            approval_snapshot={
+                "recoveryId": "approval-id",
+                "status": "pending_approval",
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        restart_smoke,
+        "_validate_stream_capacity_response",
+        lambda *_args, **_kwargs: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        restart_smoke,
+        "_stop_and_remove_container",
+        lambda _name: (_ for _ in ()).throw(
+            restart_smoke.ContainerRestartFailure("primary stop proof failed")
+        ),
+    )
+    monkeypatch.setattr(restart_smoke, "_cleanup_resources", lambda **_kwargs: True)
+
+    with pytest.raises(
+        restart_smoke.ContainerRestartFailure,
+        match="^primary stop proof failed$",
+    ) as captured:
+        restart_smoke.run_container_restart_smoke(
+            image="backchannel:test",
+            canary="canary-kept-out-of-output",
+        )
+
+    assert starts and len(starts) == 1
+    assert held.close_calls == 1
+    assert "close-canary" not in str(captured.value)
+
+
+def test_smoke_client_opens_private_bounded_nonterminal_stream_on_dedicated_opener(
+    restart_smoke: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import docker_smoke
+
+    recovery_id = "11111111-2222-4333-8444-555555555555"
+    frame = (
+        "id: 1\n"
+        "data: "
+        + json.dumps(
+            {
+                "recoveryId": recovery_id,
+                "seq": 1,
+                "type": "recovery.started",
+                "terminal": False,
+                "data": {"summary": "started"},
+                "createdAt": "2026-07-20T00:00:00Z",
+            },
+            separators=(",", ":"),
+        )
+        + "\n\n"
+    ).encode("utf-8")
+
+    class RawStream:
+        status = 200
+        headers = {"content-type": " Text/Event-Stream ; charset=utf-8"}
+
+        def __init__(self) -> None:
+            self._lines = iter(frame.splitlines(keepends=True))
+            self.readline_limits: list[int] = []
+            self.close_calls = 0
+
+        def readline(self, limit: int) -> bytes:
+            self.readline_limits.append(limit)
+            return next(self._lines, b"")
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    raw_stream = RawStream()
+    opened_requests: list[tuple[object, float]] = []
+
+    class DedicatedOpener:
+        def open(self, request: object, *, timeout: float) -> RawStream:
+            opened_requests.append((request, timeout))
+            return raw_stream
+
+    dedicated_opener = DedicatedOpener()
+    monkeypatch.setattr(
+        docker_smoke,
+        "build_opener",
+        lambda *_handlers: dedicated_opener,
+    )
+    client = restart_smoke.SmokeClient(
+        "http://127.0.0.1:43141",
+        "canary-not-in-frame",
+    )
+    client._loopback_session_cookie = "private-loopback-cookie"  # type: ignore[attr-defined]
+
+    held = client.open_event_stream(
+        f"/api/recoveries/{recovery_id}/events",
+        expected_recovery_id=recovery_id,
+    )
+
+    assert len(opened_requests) == 1
+    request, timeout = opened_requests[0]
+    assert timeout == docker_smoke.HTTP_TIMEOUT_SECONDS
+    assert request.get_header("Cookie") == (  # type: ignore[union-attr]
+        "backchannel_demo_session=private-loopback-cookie"
+    )
+    assert raw_stream.readline_limits
+    assert all(
+        0 < limit <= docker_smoke.INITIAL_SSE_FRAME_MAX_BYTES + 1
+        for limit in raw_stream.readline_limits
+    )
+    assert held.is_open
+    assert raw_stream.close_calls == 0
+
+    held.close()
+    held.close()
+
+    assert not held.is_open
+    assert raw_stream.close_calls == 1
+
+
+def test_smoke_client_rejects_prefix_confusable_sse_media_type_and_closes_response(
+    restart_smoke: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import docker_smoke
+
+    recovery_id = "11111111-2222-4333-8444-555555555555"
+    frame = (
+        f'id: 1\ndata: {{"recoveryId":"{recovery_id}","terminal":false}}\n\n'
+    ).encode()
+
+    class PrefixConfusableStream:
+        status = 200
+        headers = {"content-type": "text/event-stream-evil; charset=utf-8"}
+
+        def __init__(self) -> None:
+            self._lines = iter(frame.splitlines(keepends=True))
+            self.close_calls = 0
+
+        def readline(self, _limit: int) -> bytes:
+            return next(self._lines, b"")
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    raw_stream = PrefixConfusableStream()
+
+    class DedicatedOpener:
+        def open(self, _request: object, *, timeout: float) -> PrefixConfusableStream:
+            assert timeout == docker_smoke.HTTP_TIMEOUT_SECONDS
+            return raw_stream
+
+    monkeypatch.setattr(
+        docker_smoke,
+        "build_opener",
+        lambda *_handlers: DedicatedOpener(),
+    )
+    client = restart_smoke.SmokeClient(
+        "http://127.0.0.1:43142",
+        "canary-not-in-frame",
+    )
+    client._loopback_session_cookie = "private-loopback-cookie"  # type: ignore[attr-defined]
+
+    with pytest.raises(
+        restart_smoke.SmokeFailure,
+        match="retained event stream was not SSE",
+    ):
+        client.open_event_stream(
+            f"/api/recoveries/{recovery_id}/events",
+            expected_recovery_id=recovery_id,
+        )
+
+    assert raw_stream.close_calls == 1
 
 
 def test_cleanup_is_attempted_when_first_container_api_proof_fails(
@@ -681,7 +1151,11 @@ def test_unexpected_orchestration_failures_map_to_fixed_secret_safe_phase(
         allow_failure: bool = False,
     ) -> str:
         del environment, allow_failure
-        return next(container_ids) if arguments[0] == "run" else ""
+        if arguments[0] == "run":
+            return next(container_ids)
+        if arguments[0] == "inspect":
+            return "143"
+        return ""
 
     readiness_calls = 0
 
@@ -692,12 +1166,16 @@ def test_unexpected_orchestration_failures_map_to_fixed_secret_safe_phase(
         if failure_phase == "first_readiness" and readiness_calls == 1:
             raise RuntimeError("canary-secret /private/database.sqlite3")
 
-    clients = [object(), object()]
+    clients = [FakeActiveSseOwner(), object()]
     monkeypatch.setattr(restart_smoke, "_docker", fake_docker)
     monkeypatch.setattr(restart_smoke, "_available_port", lambda: 43131)
     monkeypatch.setattr(restart_smoke, "_wait_for_ready", fake_readiness)
     monkeypatch.setattr(restart_smoke, "SmokeClient", lambda _url, _canary: clients.pop(0))
-    monkeypatch.setattr(restart_smoke, "_create_restart_fixture", lambda _owner: object())
+    monkeypatch.setattr(
+        restart_smoke,
+        "_create_restart_fixture",
+        lambda _owner: _active_sse_fixture(),
+    )
 
     def fake_verify(_owner: object, _foreign: object, _fixture: object) -> None:
         if failure_phase == "replacement_verification":
@@ -855,6 +1333,8 @@ def test_cleanup_failure_attempts_every_resource_and_fails_closed(
             return arguments[-1]
         if arguments[0] == "stop":
             return arguments[-1]
+        if arguments[0] == "inspect":
+            return "143"
         if arguments[:2] == ["container", "ls"]:
             name = arguments[arguments.index("--filter") + 1].removeprefix("name=")
             return name if name in containers else ""
@@ -884,8 +1364,17 @@ def test_cleanup_failure_attempts_every_resource_and_fails_closed(
         "_wait_for_ready",
         lambda _url, *, phase: None,
     )
-    monkeypatch.setattr(restart_smoke, "SmokeClient", lambda _url, _canary: object())
-    monkeypatch.setattr(restart_smoke, "_create_restart_fixture", lambda _owner: object())
+    clients = [FakeActiveSseOwner(), object()]
+    monkeypatch.setattr(
+        restart_smoke,
+        "SmokeClient",
+        lambda _url, _canary: clients.pop(0),
+    )
+    monkeypatch.setattr(
+        restart_smoke,
+        "_create_restart_fixture",
+        lambda _owner: _active_sse_fixture(),
+    )
     monkeypatch.setattr(
         restart_smoke,
         "_verify_restart_fixture",
@@ -947,6 +1436,8 @@ def test_cleanup_failure_preserves_primary_failure_and_attempts_every_resource(
             return arguments[-1]
         if arguments[0] == "stop":
             return arguments[-1]
+        if arguments[0] == "inspect":
+            return "143"
         if arguments[:2] == ["container", "ls"]:
             name = arguments[arguments.index("--filter") + 1].removeprefix("name=")
             return name if name in containers else ""
@@ -974,8 +1465,17 @@ def test_cleanup_failure_preserves_primary_failure_and_attempts_every_resource(
         "_wait_for_ready",
         lambda _url, *, phase: None,
     )
-    monkeypatch.setattr(restart_smoke, "SmokeClient", lambda _url, _canary: object())
-    monkeypatch.setattr(restart_smoke, "_create_restart_fixture", lambda _owner: object())
+    clients = [FakeActiveSseOwner(), object()]
+    monkeypatch.setattr(
+        restart_smoke,
+        "SmokeClient",
+        lambda _url, _canary: clients.pop(0),
+    )
+    monkeypatch.setattr(
+        restart_smoke,
+        "_create_restart_fixture",
+        lambda _owner: _active_sse_fixture(),
+    )
     monkeypatch.setattr(
         restart_smoke,
         "_verify_restart_fixture",

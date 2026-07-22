@@ -42,9 +42,11 @@ DOCKER_TIMEOUT_SECONDS = 60
 HTTP_TIMEOUT_SECONDS = 10
 READINESS_TIMEOUT_SECONDS = 60
 READINESS_POLL_SECONDS = 0.2
+CONTAINER_STOP_TIMEOUT_SECONDS = 5
 _CONTAINER_PORT = 8000
 _DATABASE_PATH = "/data/backchannel.sqlite3"
 _GENERIC_NOT_FOUND = b'{"detail":"Not found"}'
+_STREAM_CAPACITY_MESSAGE = "Event streaming is temporarily at capacity; retry is automatic."
 _READINESS_TIMEOUT_MESSAGES = {
     "first_container": "First container readiness timed out",
     "replacement_container": "Replacement container readiness timed out",
@@ -163,6 +165,37 @@ def _validate_terminal_stream(stream: bytes, *, message: str) -> None:
     _require(bool(identifiers), message)
     _require(identifiers == sorted(set(identifiers)), message)
     _require(bool(payloads) and payloads[-1].get("terminal") is True, message)
+
+
+def _validate_stream_capacity_response(response: Any, *, recovery_id: str) -> None:
+    message = "Active event stream capacity proof drifted"
+    content_type = response.headers.get("content-type", "")
+    _require(
+        content_type.partition(";")[0].strip().lower() == "text/event-stream",
+        message,
+    )
+    try:
+        body = response.body.decode("utf-8")
+        prefix = "retry: 5000\nevent: stream.capacity\ndata: "
+        _require(body.startswith(prefix) and body.endswith("\n\n"), message)
+        payload = json.loads(body[len(prefix) : -2])
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise ContainerRestartFailure(message) from None
+    _require(isinstance(payload, dict), message)
+    request_id = payload.get("requestId")
+    _require(
+        isinstance(request_id, str) and re.fullmatch(r"[0-9a-f]{32}", request_id) is not None,
+        message,
+    )
+    expected_payload = {
+        "code": "event_stream_capacity",
+        "message": _STREAM_CAPACITY_MESSAGE,
+        "requestId": request_id,
+    }
+    _require(payload == expected_payload, message)
+    expected_body = prefix + json.dumps(expected_payload, separators=(",", ":")) + "\n\n"
+    _require(body == expected_body, message)
+    _require(recovery_id not in body, message)
 
 
 def _recovery_id(snapshot: dict[str, Any], *, status: str) -> str:
@@ -395,6 +428,10 @@ def _container_arguments(
         "-e",
         "BACKCHANNEL_IDENTITY_HASH_SECRET",
         "-e",
+        "BACKCHANNEL_MAX_CONCURRENT_EVENT_STREAMS",
+        "-e",
+        "BACKCHANNEL_MAX_EVENT_STREAMS_PER_RECOVERY",
+        "-e",
         "BACKCHANNEL_SMOKE_CANARY",
         "-e",
         "OPENAI_API_KEY",
@@ -424,7 +461,18 @@ def _start_container(
 
 
 def _stop_and_remove_container(name: str) -> None:
-    _docker(["stop", "--time", "5", name])
+    started_at = time.monotonic()
+    _docker(["stop", "--time", str(CONTAINER_STOP_TIMEOUT_SECONDS), name])
+    elapsed = time.monotonic() - started_at
+    _require(
+        elapsed < CONTAINER_STOP_TIMEOUT_SECONDS,
+        "First container exceeded its graceful stop budget",
+    )
+    exit_code = _docker(["inspect", "--format", "{{.State.ExitCode}}", name])
+    _require(
+        exit_code in {"0", "143"},
+        "First container did not exit gracefully",
+    )
     _docker(["rm", "-f", name])
 
 
@@ -521,6 +569,8 @@ def run_container_restart_smoke(*, image: str, canary: str) -> dict[str, object]
                 "BACKCHANNEL_DEPLOYED_MODE": "true",
                 "BACKCHANNEL_DB_PATH": _DATABASE_PATH,
                 "BACKCHANNEL_IDENTITY_HASH_SECRET": identity_secret,
+                "BACKCHANNEL_MAX_CONCURRENT_EVENT_STREAMS": "1",
+                "BACKCHANNEL_MAX_EVENT_STREAMS_PER_RECOVERY": "1",
                 "BACKCHANNEL_SMOKE_CANARY": canary,
                 "OPENAI_API_KEY": canary,
             }
@@ -542,8 +592,29 @@ def run_container_restart_smoke(*, image: str, canary: str) -> dict[str, object]
         owner = SmokeClient(base_url, canary)
         fixture = _create_restart_fixture(owner)
 
-        phase = "first_container_shutdown"
-        _stop_and_remove_container(first_name)
+        approval_id = _recovery_id(
+            fixture.approval_snapshot,
+            status="pending_approval",
+        )
+        held_stream = owner.open_event_stream(
+            f"/api/recoveries/{approval_id}/events",
+            expected_recovery_id=approval_id,
+        )
+        try:
+            capacity_response = owner.get(f"/api/recoveries/{approval_id}/events")
+            _validate_stream_capacity_response(
+                capacity_response,
+                recovery_id=approval_id,
+            )
+            phase = "first_container_shutdown"
+            _stop_and_remove_container(first_name)
+        finally:
+            failure_in_progress = sys.exc_info()[0] is not None
+            try:
+                held_stream.close()
+            except Exception:
+                if not failure_in_progress:
+                    raise ContainerRestartFailure("Retained event stream cleanup failed") from None
         phase = "replacement_container_start"
         second_id = _start_container(
             image=image,
@@ -582,6 +653,7 @@ def run_container_restart_smoke(*, image: str, canary: str) -> dict[str, object]
         "containerReplacement": "passed",
         "containers": "distinct",
         "decline": "closed_without_action_after_replacement",
+        "gracefulActiveSseShutdown": "passed",
         "pendingRecoveryResume": "passed",
         "proofLane": "packaged_replacement_container",
         "receiptPersistence": "passed",

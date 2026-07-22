@@ -7,6 +7,8 @@ from collections.abc import Mapping
 
 import uvicorn
 
+GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS = 3
+
 
 def bind_host(environment: Mapping[str, str]) -> str:
     """Keep local development loopback-only unless deployment is explicit."""
@@ -34,6 +36,7 @@ def main() -> None:
         workers=1,
         proxy_headers=False,
         server_header=False,
+        timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS,
     )
 
 

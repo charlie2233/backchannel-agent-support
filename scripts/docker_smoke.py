@@ -16,6 +16,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from http.client import HTTPException
 from http.cookiejar import CookieJar
 from http.cookies import SimpleCookie
 from pathlib import Path
@@ -29,6 +30,9 @@ from urllib.request import (
     build_opener,
     urlopen,
 )
+
+HTTP_TIMEOUT_SECONDS = 10
+INITIAL_SSE_FRAME_MAX_BYTES = 65_536
 
 HTML_CSP = (
     "default-src 'none'; script-src 'self'; style-src 'self'; "
@@ -87,6 +91,25 @@ class SmokeResponse:
         if not isinstance(parsed, dict):
             raise SmokeFailure("Expected a JSON object response")
         return parsed
+
+
+class HeldEventStream:
+    """Own one dedicated streaming response and close it at most once."""
+
+    def __init__(self, response: Any, opener: Any) -> None:
+        self._response = response
+        self._opener = opener
+        self._closed = False
+
+    @property
+    def is_open(self) -> bool:
+        return not self._closed
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._response.close()
 
 
 class SmokeClient:
@@ -154,7 +177,7 @@ class SmokeClient:
             method=method,
         )
         try:
-            with self._opener.open(request, timeout=10) as response:
+            with self._opener.open(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
                 status_code = response.status
                 response_headers = {
                     name.lower(): value for name, value in response.headers.items()
@@ -199,6 +222,89 @@ class SmokeClient:
 
     def post(self, path: str, payload: dict[str, Any]) -> SmokeResponse:
         return self.request("POST", path, payload=payload, expected_status=201)
+
+    def open_event_stream(
+        self,
+        path: str,
+        *,
+        expected_recovery_id: str,
+    ) -> HeldEventStream:
+        """Open and validate one bounded frame while retaining the live response."""
+
+        if not self._loopback_http or self._loopback_session_cookie is None:
+            raise SmokeFailure("The owner session cookie was unavailable for streaming")
+        opener = build_opener(HTTPCookieProcessor(CookieJar()))
+        request = Request(
+            f"{self._base_url}{path}",
+            headers={
+                "Accept": "text/event-stream",
+                "Cookie": ("backchannel_demo_session=" + self._loopback_session_cookie),
+            },
+            method="GET",
+        )
+        try:
+            response = opener.open(request, timeout=HTTP_TIMEOUT_SECONDS)
+        except HTTPError as error:
+            error.close()
+            raise SmokeFailure("The retained event stream returned an error") from None
+        except (HTTPException, OSError, URLError):
+            raise SmokeFailure("The retained event stream could not be opened") from None
+
+        try:
+            status_code = response.status
+            response_headers = {name.lower(): value for name, value in response.headers.items()}
+            if status_code != 200:
+                raise SmokeFailure("The retained event stream returned an invalid status")
+            content_type = response_headers.get("content-type", "")
+            if content_type.partition(";")[0].strip().lower() != "text/event-stream":
+                raise SmokeFailure("The retained event stream was not SSE")
+
+            frame_parts: list[bytes] = []
+            frame_size = 0
+            while True:
+                remaining = INITIAL_SSE_FRAME_MAX_BYTES - frame_size
+                if remaining <= 0:
+                    raise SmokeFailure("The retained event stream frame was too large")
+                line = response.readline(remaining + 1)
+                if not line:
+                    raise SmokeFailure("The retained event stream ended before one frame")
+                if len(line) > remaining:
+                    raise SmokeFailure("The retained event stream frame was too large")
+                frame_parts.append(line)
+                frame_size += len(line)
+                if line in {b"\n", b"\r\n"}:
+                    break
+
+            frame = b"".join(frame_parts)
+            serialized_headers = json.dumps(
+                response_headers,
+                sort_keys=True,
+            ).encode("utf-8")
+            if self._canary and (self._canary in frame or self._canary in serialized_headers):
+                raise SmokeFailure("A canary secret appeared in a public response")
+            identifiers, payloads = _sse_ids_and_payloads(frame)
+            if len(identifiers) != 1 or len(payloads) != 1:
+                raise SmokeFailure("The retained event stream initial frame drifted")
+            payload = payloads[0]
+            if (
+                payload.get("recoveryId") != expected_recovery_id
+                or payload.get("terminal") is not False
+            ):
+                raise SmokeFailure("The retained event stream initial frame drifted")
+        except (
+            HTTPException,
+            OSError,
+            UnicodeDecodeError,
+            ValueError,
+            json.JSONDecodeError,
+        ):
+            response.close()
+            raise SmokeFailure("The retained event stream initial frame drifted") from None
+        except Exception:
+            response.close()
+            raise
+
+        return HeldEventStream(response, opener)
 
 
 def _require(condition: bool, message: str) -> None:

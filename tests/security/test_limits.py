@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from starlette.requests import Request
@@ -704,6 +706,123 @@ def test_live_create_postcondition_failure_releases_reserved_admission(tmp_path)
             "SELECT COUNT(*) FROM recovery_access WHERE recovery_id = ?",
             (admission[0],),
         ).fetchone() == (0,)
+
+
+def test_direct_asgi_cancel_before_live_persistence_releases_only_admission(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Direct-ASGI cancellation proof; no socket/server-process behavior is claimed."""
+
+    cancellation_marker = "private-cancel-before-live-persistence"
+    database_path = tmp_path / "cancelled-live-admission.sqlite3"
+    store = SQLiteStore(database_path)
+    entered = asyncio.Event()
+
+    class WaitingOneCallOrchestrator:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def start(
+            self,
+            _scenario_id: str,
+            *,
+            execution_mode: ExecutionMode,
+            recovery_id: str | None = None,
+            session_key: str | None = None,
+        ) -> Any:
+            del session_key
+            assert execution_mode is ExecutionMode.OPENAI_LIVE
+            assert recovery_id is not None
+            self.calls.append(recovery_id)
+            entered.set()
+            await asyncio.Event().wait()
+            raise AssertionError("the waiting orchestrator must be cancelled")
+
+    orchestrator = WaitingOneCallOrchestrator()
+    app = create_app(
+        RuntimeSettings(
+            live_ready=True,
+            max_concurrent_live_recoveries=1,
+            live_ip_cooldown_seconds=60,
+            live_session_cooldown_seconds=60,
+            daily_demo_budget_units=10,
+        ),
+        store=store,
+        orchestrator=orchestrator,  # type: ignore[arg-type]
+    )
+    controls = app.state.public_demo_controls
+    original_heartbeat = controls._heartbeat_live_lease
+    heartbeat_tasks: list[asyncio.Task[None]] = []
+
+    async def recording_heartbeat(recovery_id: str, stop: asyncio.Event) -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        heartbeat_tasks.append(task)
+        await original_heartbeat(recovery_id, stop)
+
+    monkeypatch.setattr(controls, "_heartbeat_live_lease", recording_heartbeat)
+    caplog.set_level(logging.ERROR)
+
+    async def cancel_waiting_request() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            request_task = asyncio.create_task(
+                client.post(
+                    "/api/recoveries",
+                    json={"scenarioId": "hotel", "executionMode": "openai_live"},
+                )
+            )
+            await asyncio.wait_for(entered.wait(), timeout=1)
+            assert len(orchestrator.calls) == 1
+            recovery_id = orchestrator.calls[0]
+            with sqlite3.connect(database_path) as connection:
+                assert connection.execute(
+                    "SELECT recovery_id, released_at FROM live_admissions"
+                ).fetchone() == (recovery_id, None)
+                assert connection.execute(
+                    "SELECT COALESCE(SUM(amount), 0) FROM usage_ledger"
+                ).fetchone() == (1,)
+                for table in (
+                    "recoveries",
+                    "pending_approvals",
+                    "approval_decisions",
+                    "recovery_access",
+                ):
+                    assert connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone() == (0,)
+
+            request_task.cancel(cancellation_marker)
+            with pytest.raises(asyncio.CancelledError) as raised:
+                await request_task
+            assert raised.value.args == (cancellation_marker,)
+
+            with sqlite3.connect(database_path) as connection:
+                admission = connection.execute(
+                    "SELECT recovery_id, released_at FROM live_admissions"
+                ).fetchone()
+                assert admission is not None
+                assert admission[0] == recovery_id
+                assert admission[1] is not None
+                assert connection.execute(
+                    "SELECT COALESCE(SUM(amount), 0) FROM usage_ledger"
+                ).fetchone() == (1,)
+                for table in (
+                    "recoveries",
+                    "pending_approvals",
+                    "approval_decisions",
+                    "recovery_access",
+                ):
+                    assert connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone() == (0,)
+
+            assert len(heartbeat_tasks) == 1
+            assert heartbeat_tasks[0].done()
+
+    asyncio.run(cancel_waiting_request())
+    assert cancellation_marker not in caplog.text
 
 
 def test_foreign_live_decision_cannot_renew_or_reacquire_owner_lease(tmp_path) -> None:
