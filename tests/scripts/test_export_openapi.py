@@ -146,6 +146,23 @@ def test_generated_schema_matches_the_implemented_public_http_contract() -> None
     assert event_responses["422"]["content"]["application/json"]["schema"] == {
         "$ref": "#/components/schemas/PublicErrorResponse"
     }
+    creation_responses = paths["/api/recoveries"]["post"]["responses"]
+    assert creation_responses["429"]["description"] == (
+        "The request exceeded the public creation budget or a live-only capacity, "
+        "cooldown, or daily-budget admission limit."
+    )
+    assert creation_responses["429"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/PublicErrorResponse"
+    }
+    assert creation_responses["429"]["headers"]["Retry-After"]["description"] == (
+        "Retry delay in seconds when provided. Creation-budget exhaustion uses "
+        "1..86400 seconds until the next UTC midnight; live-only outcomes may use "
+        "a longer or otherwise different delay."
+    )
+    assert creation_responses["429"]["headers"]["Retry-After"]["schema"] == {
+        "minimum": 1,
+        "type": "integer",
+    }
     assert "HTTPValidationError" not in schema["components"]["schemas"]
 
     serialized = json.dumps(schema, sort_keys=True)

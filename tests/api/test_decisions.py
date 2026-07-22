@@ -355,7 +355,12 @@ def test_two_processes_race_twenty_times_with_one_durable_winner(tmp_path) -> No
     creator_store = SQLiteStore(database_path)
     creator_provider = HotelSimulator(store=creator_store)
     creator_app = create_app(
-        RuntimeSettings(live_ready=False),
+        RuntimeSettings(
+            live_ready=False,
+            creation_session_daily_budget=100,
+            creation_ip_daily_budget=100,
+            creation_global_daily_budget=100,
+        ),
         store=creator_store,
         hotel_provider=creator_provider,
     )

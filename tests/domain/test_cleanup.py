@@ -231,6 +231,182 @@ def test_cleanup_service_owns_one_task_and_joins_it_on_shutdown(tmp_path) -> Non
     assert calls >= 1
 
 
+def test_creation_usage_cleanup_is_retained_bounded_and_graph_independent(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "creation-usage-cleanup.sqlite3"
+    store = SQLiteStore(database_path)
+    now = datetime(2026, 7, 21, 12, tzinfo=UTC)
+    session_hash = "hmac-sha256:" + "c" * 64
+    ip_hash = "hmac-sha256:" + "d" * 64
+    for admitted_at in (
+        datetime(2026, 7, 11, 12, tzinfo=UTC),
+        datetime(2026, 7, 12, 12, tzinfo=UTC),
+        datetime(2026, 7, 13, 12, tzinfo=UTC),
+        now,
+    ):
+        store.claim_public_creation_admission(
+            session_hash=session_hash,
+            ip_hash=ip_hash,
+            session_daily_budget=20,
+            ip_daily_budget=20,
+            global_daily_budget=20,
+            now=admitted_at,
+        )
+    _recovery(store, "current-graph", status=RecoveryStatus.COMPLETED)
+
+    service = RecoveryCleanupService(
+        store=store,
+        ttl=timedelta(days=7),
+        interval=timedelta(hours=1),
+        batch_size=3,
+        creation_usage_retention=timedelta(days=8),
+        clock=lambda: now,
+    )
+
+    assert service.run_once() == 3
+    assert store.count_public_creation_usage_rows() == 9
+    assert store.public_creation_usage(
+        identity_kind="session",
+        identity_hash=session_hash,
+        usage_day="2026-07-13",
+    ) == 1
+    assert store.public_creation_usage(
+        identity_kind="session",
+        identity_hash=session_hash,
+        usage_day="2026-07-21",
+    ) == 1
+
+    store.reset()
+    assert store.count_recoveries() == 0
+    assert store.count_public_creation_usage_rows() == 9
+    assert service.run_once() == 3
+    assert store.count_public_creation_usage_rows() == 6
+    assert service.run_once() == 0
+    assert store.count_public_creation_usage_rows() == 6
+
+
+def test_creation_usage_survives_session_reset_terminal_deletion_and_reopen(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "creation-usage-persistence.sqlite3"
+    store = SQLiteStore(database_path)
+    session_hash = "hmac-sha256:" + "e" * 64
+    ip_hash = "hmac-sha256:" + "f" * 64
+    now = datetime(2026, 7, 21, 12, tzinfo=UTC)
+    store.claim_public_creation_admission(
+        session_hash=session_hash,
+        ip_hash=ip_hash,
+        session_daily_budget=5,
+        ip_daily_budget=5,
+        global_daily_budget=5,
+        now=now,
+    )
+    store.create_recovery(
+        recovery_id="session-owned-creation-graph",
+        scenario_id=ScenarioId.HOTEL,
+        execution_mode=ExecutionMode.REPLAY_FIXTURE,
+        current_step=0,
+        current_step_summary="Owned graph for creation usage persistence.",
+        session_hash=session_hash,
+    )
+    store.record_transition(
+        "session-owned-creation-graph",
+        status=RecoveryStatus.COMPLETED,
+        current_step=5,
+        current_step_summary="Terminal graph for deletion.",
+        event_type="recovery.completed",
+        event_data={"status": "completed"},
+    )
+    _age_recovery(
+        database_path,
+        "session-owned-creation-graph",
+        now - timedelta(days=9),
+    )
+
+    store.reset_for_session(session_hash)
+    assert store.count_recoveries() == 0
+    assert store.count_public_creation_usage_rows() == 3
+    _recovery(store, "terminal-cleanup-graph", status=RecoveryStatus.COMPLETED)
+    _age_recovery(
+        database_path,
+        "terminal-cleanup-graph",
+        now - timedelta(days=9),
+    )
+    assert store.cleanup_terminal_recoveries(
+        cutoff=now - timedelta(days=7),
+        batch_size=1,
+    ) == 1
+    assert store.count_recoveries() == 0
+    assert store.count_public_creation_usage_rows() == 3
+    store.close()
+
+    reopened = SQLiteStore(database_path)
+    assert reopened.count_public_creation_usage_rows() == 3
+    assert reopened.public_creation_usage(
+        identity_kind="session",
+        identity_hash=session_hash,
+        usage_day="2026-07-21",
+    ) == 1
+
+
+def test_creation_usage_cleanup_uses_strict_canonical_cutoff_day(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "creation-cutoff-contract.sqlite3")
+    session_hash = "hmac-sha256:" + "6" * 64
+    ip_hash = "hmac-sha256:" + "7" * 64
+    for admitted_at in (
+        datetime(2026, 7, 12, 12, tzinfo=UTC),
+        datetime(2026, 7, 13, 12, tzinfo=UTC),
+    ):
+        store.claim_public_creation_admission(
+            session_hash=session_hash,
+            ip_hash=ip_hash,
+            session_daily_budget=5,
+            ip_daily_budget=5,
+            global_daily_budget=5,
+            now=admitted_at,
+        )
+
+    assert store.cleanup_public_creation_usage(
+        cutoff_day="2026-07-13",
+        batch_size=10,
+    ) == 3
+    assert store.count_public_creation_usage_rows() == 3
+    for invalid in ("20260713", "2026-7-13", "not-a-day"):
+        with pytest.raises(ValueError, match="canonical ISO date"):
+            store.cleanup_public_creation_usage(
+                cutoff_day=invalid,
+                batch_size=10,
+            )
+    with pytest.raises(ValueError, match="batch size"):
+        store.cleanup_public_creation_usage(
+            cutoff_day="2026-07-13",
+            batch_size=0,
+        )
+
+
+def test_creation_usage_cleanup_never_deletes_the_current_utc_day(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "creation-current-day-protection.sqlite3")
+    today = datetime.now(UTC).date()
+    now = datetime(today.year, today.month, today.day, 12, tzinfo=UTC)
+    session_hash = "hmac-sha256:" + "8" * 64
+    ip_hash = "hmac-sha256:" + "9" * 64
+    store.claim_public_creation_admission(
+        session_hash=session_hash,
+        ip_hash=ip_hash,
+        session_daily_budget=5,
+        ip_daily_budget=5,
+        global_daily_budget=5,
+        now=now,
+    )
+
+    assert store.cleanup_public_creation_usage(
+        cutoff_day=(today + timedelta(days=1)).isoformat(),
+        batch_size=10,
+    ) == 0
+    assert store.count_public_creation_usage_rows() == 3
+
+
 def test_cleanup_covers_every_terminal_status_but_not_exact_cutoff_or_nonterminal(
     tmp_path,
 ) -> None:

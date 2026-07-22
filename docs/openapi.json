@@ -1069,6 +1069,25 @@
               }
             },
             "description": "The request was rejected with a public error envelope."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "The request exceeded the public creation budget or a live-only capacity, cooldown, or daily-budget admission limit.",
+            "headers": {
+              "Retry-After": {
+                "description": "Retry delay in seconds when provided. Creation-budget exhaustion uses 1..86400 seconds until the next UTC midnight; live-only outcomes may use a longer or otherwise different delay.",
+                "schema": {
+                  "minimum": 1.0,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "Create Recovery"

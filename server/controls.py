@@ -33,6 +33,7 @@ PublicErrorCode = Literal[
     "live_unavailable",
     "live_cooldown",
     "live_daily_budget_exceeded",
+    "creation_daily_budget_exceeded",
     "live_capacity_reached",
     "stream_capacity_reached",
     "resume_incompatible",
@@ -61,6 +62,9 @@ PUBLIC_ERROR_MESSAGES: Mapping[str, str] = {
     "live_unavailable": "Live mode is unavailable on this server.",
     "live_cooldown": "Live mode is cooling down for this demo identity.",
     "live_daily_budget_exceeded": "The live demo budget is exhausted for today.",
+    "creation_daily_budget_exceeded": (
+        "The public demo recovery creation budget is exhausted for today."
+    ),
     "live_capacity_reached": "The live demo is currently at capacity.",
     "stream_capacity_reached": "The event stream is currently at capacity.",
     "resume_incompatible": "The saved decision cannot be resumed safely.",
@@ -93,6 +97,18 @@ class PublicLiveAdmissionError(RuntimeError):
         self.code = code
         self.retry_after_seconds = retry_after_seconds
         super().__init__(code)
+
+
+class PublicCreationAdmissionError(RuntimeError):
+    """One generic durable public-creation limit outcome."""
+
+    code = "creation_daily_budget_exceeded"
+
+    def __init__(self, *, retry_after_seconds: int) -> None:
+        if not 1 <= retry_after_seconds <= 86_400:
+            raise ValueError("Creation retry delay must be within one UTC day")
+        self.retry_after_seconds = retry_after_seconds
+        super().__init__(self.code)
 
 
 class LiveConcurrencyLimitError(RuntimeError):

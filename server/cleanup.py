@@ -23,6 +23,7 @@ class RecoveryCleanupService:
         ttl: timedelta,
         interval: timedelta,
         batch_size: int,
+        creation_usage_retention: timedelta = timedelta(days=8),
         clock: CleanupClock | None = None,
     ) -> None:
         if ttl <= timedelta(0):
@@ -31,10 +32,13 @@ class RecoveryCleanupService:
             raise ValueError("Cleanup interval must be positive")
         if batch_size < 1:
             raise ValueError("Cleanup batch size must be positive")
+        if creation_usage_retention < timedelta(days=1):
+            raise ValueError("Creation usage retention must be at least one day")
         self._store = store
         self._ttl = ttl
         self._interval = interval
         self._batch_size = batch_size
+        self._creation_usage_retention = creation_usage_retention
         self._clock = clock or (lambda: datetime.now(UTC))
         self._stop = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
@@ -57,7 +61,11 @@ class RecoveryCleanupService:
             cutoff=now,
             batch_size=self._batch_size,
         )
-        return terminal_count + session_count
+        creation_usage_count = self._store.cleanup_public_creation_usage(
+            cutoff_day=(now - self._creation_usage_retention).date().isoformat(),
+            batch_size=self._batch_size,
+        )
+        return terminal_count + session_count + creation_usage_count
 
     async def _run(self) -> None:
         while not self._stop.is_set():

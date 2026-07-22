@@ -8,7 +8,7 @@ import math
 import re
 import sqlite3
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from threading import RLock
 from typing import Any, Literal, cast
@@ -17,7 +17,11 @@ from pydantic import JsonValue
 
 from server.agents.live_models import ModelResponseMetadata
 from server.agents.schemas import CommitRemedyArguments
-from server.controls import HASH_PREFIX, PublicLiveAdmissionError
+from server.controls import (
+    HASH_PREFIX,
+    PublicCreationAdmissionError,
+    PublicLiveAdmissionError,
+)
 from server.digest import remedy_consent_digest
 from server.models import (
     ApprovalDecisionRequest,
@@ -71,6 +75,21 @@ QUOTA_PROTOCOL_PHASES = (
 QUOTA_TERMINAL_SUMMARY = (
     "The grant was verified, runtime permission revoked, and receipt sealed."
 )
+PUBLIC_CREATION_USAGE_TABLE_SQL = """
+CREATE TABLE public_creation_usage (
+    identity_kind TEXT NOT NULL CHECK (
+        identity_kind IN ('session', 'ip', 'global')
+    ),
+    identity_hash TEXT NOT NULL,
+    usage_day TEXT NOT NULL,
+    amount INTEGER NOT NULL DEFAULT 0 CHECK (amount >= 0),
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (identity_kind, identity_hash, usage_day)
+)
+"""
+_SCHEMA_SQL_TOKEN = re.compile(
+    r"'(?:''|[^'])*'|>=|<=|<>|!=|[(),;]|[A-Za-z_][A-Za-z0-9_]*|[0-9]+"
+)
 OPENAI_LIVE_RECEIPT_BOUNDARY = (
     "Live OpenAI model orchestration and demo hotel adapter only; "
     "no real booking or payment change."
@@ -111,6 +130,26 @@ def non_replay_receipt_boundary(execution_mode: ExecutionMode) -> str:
     if execution_mode is ExecutionMode.SDK_STUB:
         return SDK_STUB_RECEIPT_BOUNDARY
     raise ValueError("Replay fixtures do not use the SDK receipt boundary")
+
+
+def _canonical_schema_tokens(sql: str) -> tuple[str, ...] | None:
+    """Tokenize exact owned DDL while allowing only whitespace and keyword case."""
+
+    if "--" in sql or "/*" in sql or "*/" in sql:
+        return None
+    tokens: list[str] = []
+    cursor = 0
+    for matched in _SCHEMA_SQL_TOKEN.finditer(sql):
+        if sql[cursor : matched.start()].strip():
+            return None
+        token = matched.group(0)
+        tokens.append(token if token.startswith("'") else token.casefold())
+        cursor = matched.end()
+    if sql[cursor:].strip():
+        return None
+    if tokens and tokens[-1] == ";":
+        tokens.pop()
+    return tuple(tokens)
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -249,6 +288,17 @@ CREATE TABLE IF NOT EXISTS usage_ledger (
     usage_day TEXT NOT NULL,
     amount INTEGER NOT NULL DEFAULT 0 CHECK (amount >= 0),
     last_admitted_at TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (identity_kind, identity_hash, usage_day)
+);
+
+CREATE TABLE IF NOT EXISTS public_creation_usage (
+    identity_kind TEXT NOT NULL CHECK (
+        identity_kind IN ('session', 'ip', 'global')
+    ),
+    identity_hash TEXT NOT NULL,
+    usage_day TEXT NOT NULL,
+    amount INTEGER NOT NULL DEFAULT 0 CHECK (amount >= 0),
     updated_at TEXT NOT NULL,
     PRIMARY KEY (identity_kind, identity_hash, usage_day)
 );
@@ -427,6 +477,7 @@ class SQLiteStore:
             self._migrate_task6_approval_decisions(connection)
             self._migrate_task6_permission_scopes(connection)
             self._migrate_task8_public_controls(connection)
+            self._migrate_public_creation_usage(connection)
             self._migrate_recovery_access(connection)
             event_columns = {
                 cast(str, row["name"])
@@ -507,6 +558,96 @@ class SQLiteStore:
             "PRAGMA index_info(recovery_access_session_idx)"
         ).fetchall()
         return [cast(str, row["name"]) for row in index] == ["session_hash"]
+
+    @staticmethod
+    def _public_creation_usage_schema_is_exact(
+        connection: sqlite3.Connection,
+    ) -> bool:
+        columns = [
+            (
+                cast(str, row["name"]),
+                cast(str, row["type"]).upper(),
+                cast(int, row["notnull"]),
+                row["dflt_value"],
+                cast(int, row["pk"]),
+            )
+            for row in connection.execute(
+                "PRAGMA table_info(public_creation_usage)"
+            ).fetchall()
+        ]
+        if columns != [
+            ("identity_kind", "TEXT", 1, None, 1),
+            ("identity_hash", "TEXT", 1, None, 2),
+            ("usage_day", "TEXT", 1, None, 3),
+            ("amount", "INTEGER", 1, "0", 0),
+            ("updated_at", "TEXT", 1, None, 0),
+        ]:
+            return False
+        if connection.execute(
+            "PRAGMA foreign_key_list(public_creation_usage)"
+        ).fetchall():
+            return False
+        indexes = {
+            cast(str, row["name"]): (
+                cast(int, row["unique"]),
+                cast(str, row["origin"]),
+                cast(int, row["partial"]),
+            )
+            for row in connection.execute(
+                "PRAGMA index_list(public_creation_usage)"
+            ).fetchall()
+        }
+        if indexes != {
+            "public_creation_usage_day_idx": (0, "c", 0),
+            "sqlite_autoindex_public_creation_usage_1": (1, "pk", 0),
+        }:
+            return False
+        index_columns = connection.execute(
+            "PRAGMA index_info(public_creation_usage_day_idx)"
+        ).fetchall()
+        if [cast(str, row["name"]) for row in index_columns] != ["usage_day"]:
+            return False
+        index_row = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+            ("public_creation_usage_day_idx",),
+        ).fetchone()
+        if index_row is None or index_row["sql"] is None:
+            return False
+        index_sql = re.sub(r"\s+", " ", cast(str, index_row["sql"]).strip())
+        if re.fullmatch(
+            r"CREATE INDEX public_creation_usage_day_idx "
+            r"ON public_creation_usage\s*\(\s*usage_day\s*\)",
+            index_sql,
+            flags=re.IGNORECASE,
+        ) is None:
+            return False
+        table_row = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+            ("public_creation_usage",),
+        ).fetchone()
+        if table_row is None or table_row["sql"] is None:
+            return False
+        return _canonical_schema_tokens(
+            cast(str, table_row["sql"])
+        ) == _canonical_schema_tokens(PUBLIC_CREATION_USAGE_TABLE_SQL)
+
+    @classmethod
+    def _migrate_public_creation_usage(cls, connection: sqlite3.Connection) -> None:
+        """Add and then fail-closed validate the independent creation ledger."""
+
+        try:
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS public_creation_usage_day_idx
+                ON public_creation_usage(usage_day)
+                """
+            )
+        except sqlite3.DatabaseError as error:
+            raise RuntimeError("Unsupported public creation usage schema") from error
+        if not cls._public_creation_usage_schema_is_exact(connection):
+            raise RuntimeError("Unsupported public creation usage schema")
+        if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+            raise RuntimeError("Public creation usage migration violated foreign keys")
 
     @classmethod
     def _migrate_recovery_access(cls, connection: sqlite3.Connection) -> None:
@@ -4373,7 +4514,9 @@ class SQLiteStore:
                     return False
                 if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
                     return False
-                return self._recovery_access_schema_is_exact(connection)
+                return self._recovery_access_schema_is_exact(
+                    connection
+                ) and self._public_creation_usage_schema_is_exact(connection)
         except (RuntimeError, sqlite3.DatabaseError):
             return False
 
@@ -4562,6 +4705,126 @@ class SQLiteStore:
                     ),
                 )
 
+    def claim_public_creation_admission(
+        self,
+        *,
+        session_hash: str,
+        ip_hash: str,
+        session_daily_budget: int,
+        ip_daily_budget: int,
+        global_daily_budget: int,
+        now: datetime | None = None,
+    ) -> None:
+        """Atomically charge one supported public recovery creation."""
+
+        self._require_public_identity_hash(session_hash)
+        self._require_public_identity_hash(ip_hash)
+        budgets = (
+            session_daily_budget,
+            ip_daily_budget,
+            global_daily_budget,
+        )
+        if min(budgets) < 0:
+            raise ValueError("Public creation daily budgets cannot be negative")
+        identities = (
+            ("session", session_hash, session_daily_budget),
+            ("ip", ip_hash, ip_daily_budget),
+            ("global", "public-creation-global", global_daily_budget),
+        )
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            admission_now = self._now() if now is None else now
+            if (
+                admission_now.tzinfo is None
+                or admission_now.utcoffset() != timedelta(0)
+            ):
+                raise ValueError("Creation admission time must be timezone-aware UTC")
+            usage_day = admission_now.date().isoformat()
+            next_day = admission_now.date() + timedelta(days=1)
+            next_midnight = datetime(
+                next_day.year,
+                next_day.month,
+                next_day.day,
+                tzinfo=UTC,
+            )
+            retry_after_seconds = min(
+                86_400,
+                max(1, math.ceil((next_midnight - admission_now).total_seconds())),
+            )
+            amounts: dict[tuple[str, str], int] = {}
+            for identity_kind, identity_hash, _budget in identities:
+                row = connection.execute(
+                    """
+                    SELECT amount FROM public_creation_usage
+                    WHERE identity_kind = ? AND identity_hash = ? AND usage_day = ?
+                    """,
+                    (identity_kind, identity_hash, usage_day),
+                ).fetchone()
+                amounts[(identity_kind, identity_hash)] = (
+                    0 if row is None else cast(int, row["amount"])
+                )
+            if any(
+                amounts[(identity_kind, identity_hash)] >= budget
+                for identity_kind, identity_hash, budget in identities
+            ):
+                raise PublicCreationAdmissionError(
+                    retry_after_seconds=retry_after_seconds
+                )
+            for identity_kind, identity_hash, _budget in identities:
+                connection.execute(
+                    """
+                    INSERT INTO public_creation_usage (
+                        identity_kind, identity_hash, usage_day, amount, updated_at
+                    ) VALUES (?, ?, ?, 1, ?)
+                    ON CONFLICT(identity_kind, identity_hash, usage_day) DO UPDATE SET
+                        amount = public_creation_usage.amount + 1,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        identity_kind,
+                        identity_hash,
+                        usage_day,
+                        admission_now.isoformat(),
+                    ),
+                )
+
+    def public_creation_usage(
+        self,
+        *,
+        identity_kind: Literal["session", "ip", "global"],
+        identity_hash: str,
+        usage_day: str,
+    ) -> int:
+        if identity_kind == "global":
+            if identity_hash != "public-creation-global":
+                raise ValueError("Global public creation usage uses one fixed key")
+        else:
+            self._require_public_identity_hash(identity_hash)
+        try:
+            parsed_day = date.fromisoformat(usage_day)
+        except ValueError as error:
+            raise ValueError("Usage day must be canonical ISO date") from error
+        if parsed_day.isoformat() != usage_day:
+            raise ValueError("Usage day must be canonical ISO date")
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT amount FROM public_creation_usage
+                WHERE identity_kind = ? AND identity_hash = ? AND usage_day = ?
+                """,
+                (identity_kind, identity_hash, usage_day),
+            ).fetchone()
+        return 0 if row is None else cast(int, row["amount"])
+
+    def count_public_creation_usage_rows(self) -> int:
+        with self._lock, self._connect() as connection:
+            return cast(
+                int,
+                connection.execute(
+                    "SELECT COUNT(*) FROM public_creation_usage"
+                ).fetchone()[0],
+            )
+
     def public_live_usage(
         self,
         *,
@@ -4676,6 +4939,56 @@ class SQLiteStore:
                 if deleted.rowcount != 1:
                     raise RuntimeError("Session cleanup lost its expired candidate")
         return len(session_hashes)
+
+    def cleanup_public_creation_usage(
+        self,
+        *,
+        cutoff_day: str,
+        batch_size: int,
+    ) -> int:
+        """Delete one indexed batch strictly older than a canonical UTC day."""
+
+        try:
+            parsed_cutoff = date.fromisoformat(cutoff_day)
+        except (TypeError, ValueError) as error:
+            raise ValueError("Creation usage cutoff must be a canonical ISO date") from error
+        if parsed_cutoff.isoformat() != cutoff_day:
+            raise ValueError("Creation usage cutoff must be a canonical ISO date")
+        if batch_size < 1:
+            raise ValueError("Creation usage cleanup batch size must be positive")
+        canonical_cutoff = min(parsed_cutoff, self._now().date()).isoformat()
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """
+                SELECT identity_kind, identity_hash, usage_day
+                FROM public_creation_usage
+                WHERE usage_day < ?
+                ORDER BY usage_day ASC, identity_kind ASC, identity_hash ASC
+                LIMIT ?
+                """,
+                (canonical_cutoff, batch_size),
+            ).fetchall()
+            keys = [
+                (
+                    cast(str, row["identity_kind"]),
+                    cast(str, row["identity_hash"]),
+                    cast(str, row["usage_day"]),
+                )
+                for row in rows
+            ]
+            for identity_kind, identity_hash, usage_day in keys:
+                deleted = connection.execute(
+                    """
+                    DELETE FROM public_creation_usage
+                    WHERE identity_kind = ? AND identity_hash = ? AND usage_day = ?
+                      AND usage_day < ?
+                    """,
+                    (identity_kind, identity_hash, usage_day, canonical_cutoff),
+                )
+                if deleted.rowcount != 1:
+                    raise RuntimeError("Creation usage cleanup lost its candidate")
+        return len(keys)
 
     def get_pending_approval(self, recovery_id: str) -> PendingApprovalEnvelope:
         """Load the opaque SDK state envelope without exposing it through public models."""

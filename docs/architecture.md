@@ -44,6 +44,20 @@ concurrent multi-container SQLite operation is unsupported and unverified. A sca
 deployment would require a shared transactional database plus distributed admission
 and event fanout.
 
+Every supported public `POST /api/recoveries` is admitted through a separate durable
+SQLite creation ledger before replay or SDK orchestration and before the live-only
+gate and ledger. Strict body/schema, scenario/mode support, deployed SDK availability,
+and keyless live availability are checked first and do not consume creation budget.
+An admitted attempt remains charged if a later capacity, cooldown, upstream, or
+internal step fails; there is intentionally no refund state machine. Session, IP,
+and global UTC-day counters are incremented atomically, contain only HMAC identities
+plus one fixed global key, and are never mixed with the live-only usage ledger.
+
+The creation defaults are 12 per signed session, 60 per IP, and 120 globally per UTC
+day. Any value may be zero as an operator kill switch. Rows are retained for eight
+days by the bounded cleanup service; demo reset, recovery deletion, and process
+restart do not erase the current counters.
+
 ## Long-lived single-host container recipe
 
 This is an operator recipe, not deployment evidence. Build the exact source tree,
@@ -102,8 +116,8 @@ volume backup/restore, log retention, and a verified public smoke. Public deploy
 
 1. React loads `/health`, creates or restores a session-owned recovery, and subscribes
    to its SSE ledger.
-2. FastAPI validates public input and delegates transitions to the orchestrator and
-   SQLite store.
+2. FastAPI validates public input, atomically admits the supported creation, and then
+   delegates transitions to the orchestrator and SQLite store.
 3. The orchestrator pauses the SDK run at `commit_remedy`; the store records the
    exact interruption and digest.
 4. The decision route durably claims one exact action before resuming the SDK state.

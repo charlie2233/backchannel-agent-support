@@ -42,6 +42,10 @@ class RuntimeSettings:
     live_max_concurrent: int = 1
     live_cooldown: timedelta = timedelta(seconds=30)
     live_daily_budget: int = 12
+    creation_session_daily_budget: int = 12
+    creation_ip_daily_budget: int = 60
+    creation_global_daily_budget: int = 120
+    creation_usage_retention: timedelta = timedelta(days=8)
     sse_max_concurrent: int = 32
     sse_max_per_session: int = 4
     sse_max_per_recovery: int = 2
@@ -67,6 +71,14 @@ class RuntimeSettings:
             raise ValueError("Live cooldown cannot be negative")
         if self.live_daily_budget < 0:
             raise ValueError("Live daily budget cannot be negative")
+        if min(
+            self.creation_session_daily_budget,
+            self.creation_ip_daily_budget,
+            self.creation_global_daily_budget,
+        ) < 0:
+            raise ValueError("Public creation daily budgets cannot be negative")
+        if self.creation_usage_retention < timedelta(days=1):
+            raise ValueError("Public creation usage retention must be at least one day")
         if min(
             self.sse_max_concurrent,
             self.sse_max_per_session,
@@ -186,6 +198,25 @@ class RuntimeSettings:
                 seconds=integer("BACKCHANNEL_LIVE_COOLDOWN_SECONDS", 30)
             ),
             live_daily_budget=integer("BACKCHANNEL_LIVE_DAILY_BUDGET", 12),
+            creation_session_daily_budget=integer(
+                "BACKCHANNEL_CREATION_SESSION_DAILY_BUDGET",
+                12,
+            ),
+            creation_ip_daily_budget=integer(
+                "BACKCHANNEL_CREATION_IP_DAILY_BUDGET",
+                60,
+            ),
+            creation_global_daily_budget=integer(
+                "BACKCHANNEL_CREATION_GLOBAL_DAILY_BUDGET",
+                120,
+            ),
+            creation_usage_retention=timedelta(
+                seconds=integer(
+                    "BACKCHANNEL_CREATION_USAGE_RETENTION_SECONDS",
+                    8 * 24 * 60 * 60,
+                    minimum=24 * 60 * 60,
+                )
+            ),
             sse_max_concurrent=integer(
                 "BACKCHANNEL_SSE_MAX_CONCURRENT",
                 32,

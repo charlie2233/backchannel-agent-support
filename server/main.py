@@ -26,6 +26,7 @@ from server.controls import (
     LiveConcurrencyLimitError,
     PublicApiException,
     PublicBoundaryMiddleware,
+    PublicCreationAdmissionError,
     PublicIdentityHasher,
     PublicLiveAdmissionError,
     identity_from_scope,
@@ -191,6 +192,7 @@ def create_app(
             ttl=runtime_settings.recovery_ttl,
             interval=runtime_settings.cleanup_interval,
             batch_size=runtime_settings.cleanup_batch_size,
+            creation_usage_retention=runtime_settings.creation_usage_retention,
         )
         _application.state.cleanup_service = cleanup_service
         try:
@@ -335,24 +337,42 @@ def create_app(
         "/api/recoveries",
         response_model=RecoverySnapshot,
         status_code=status.HTTP_201_CREATED,
+        responses={
+            429: {
+                "model": PublicErrorResponse,
+                "description": (
+                    "The request exceeded the public creation budget or a live-only "
+                    "capacity, cooldown, or daily-budget admission limit."
+                ),
+                "headers": {
+                    "Retry-After": {
+                        "description": (
+                            "Retry delay in seconds when provided. Creation-budget "
+                            "exhaustion uses 1..86400 seconds until the next UTC "
+                            "midnight; live-only outcomes may use a longer or otherwise "
+                            "different delay."
+                        ),
+                        "schema": {
+                            "type": "integer",
+                            "minimum": 1,
+                        },
+                    }
+                },
+            }
+        },
     )
     async def create_recovery(
         request: Request,
         payload: CreateRecoveryRequest,
     ) -> RecoverySnapshot:
         identity = identity_from_scope(request.scope)
-        if payload.execution_mode is ExecutionMode.REPLAY_FIXTURE:
-            try:
-                return replay_engine.start(
-                    payload.scenario_id,
-                    execution_mode=payload.execution_mode,
-                    session_hash=identity.session_hash,
-                )
-            except (ScenarioNotFoundError, UnsupportedExecutionModeError):
-                _raise_public(
-                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                    code="invalid_request",
-                )
+        try:
+            scenario_loader.get(payload.scenario_id)
+        except ScenarioNotFoundError:
+            _raise_public(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                code="invalid_request",
+            )
         if (
             payload.execution_mode is ExecutionMode.SDK_STUB
             and not runtime_settings.sdk_stub_ready
@@ -360,13 +380,6 @@ def create_app(
             _raise_public(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 code="invalid_request",
-            )
-        if (
-            payload.scenario_id is ScenarioId.API_QUOTA
-            and payload.execution_mode is ExecutionMode.SDK_STUB
-        ):
-            return await recovery_orchestrator.run_quota_stub(
-                session_hash=identity.session_hash,
             )
         if payload.execution_mode is ExecutionMode.OPENAI_LIVE:
             if payload.scenario_id is not ScenarioId.HOTEL:
@@ -380,6 +393,42 @@ def create_app(
                     code="live_unavailable",
                     replay_offer=True,
                 )
+        try:
+            recovery_store.claim_public_creation_admission(
+                session_hash=identity.session_hash,
+                ip_hash=identity.ip_hash,
+                session_daily_budget=(
+                    runtime_settings.creation_session_daily_budget
+                ),
+                ip_daily_budget=runtime_settings.creation_ip_daily_budget,
+                global_daily_budget=runtime_settings.creation_global_daily_budget,
+            )
+        except PublicCreationAdmissionError as error:
+            _raise_public(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                code=error.code,
+                retry_after_seconds=error.retry_after_seconds,
+            )
+        if payload.execution_mode is ExecutionMode.REPLAY_FIXTURE:
+            try:
+                return replay_engine.start(
+                    payload.scenario_id,
+                    execution_mode=payload.execution_mode,
+                    session_hash=identity.session_hash,
+                )
+            except (ScenarioNotFoundError, UnsupportedExecutionModeError):
+                _raise_public(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    code="invalid_request",
+                )
+        if (
+            payload.scenario_id is ScenarioId.API_QUOTA
+            and payload.execution_mode is ExecutionMode.SDK_STUB
+        ):
+            return await recovery_orchestrator.run_quota_stub(
+                session_hash=identity.session_hash,
+            )
+        if payload.execution_mode is ExecutionMode.OPENAI_LIVE:
             try:
                 async with live_gate.slot():
                     recovery_store.claim_public_live_admission(

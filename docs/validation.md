@@ -53,5 +53,15 @@ A later documentation-only successor does not inherit a new browser claim. Keep 
 capture lane bound to `9bda860…` unless `npm run capture:judge` is observed again on a
 different frozen tree.
 
+## Creation-admission proof boundary
+
+The source contract has a separate durable UTC-day creation ledger with session, IP,
+and global limits. Its tests cover atomic race admission, rollback on an injected
+second/third write failure, validation-before-charge, live-ledger separation, reset
+and restart persistence, bounded retention, and the generic `429`/`Retry-After`
+contract. This source/test evidence does not change the final-build capture lane from
+`9bda860…` and is not public deployment, live OpenAI, container-host durability, tag,
+or release proof.
+
 Update this matrix only after the corresponding same-SHA command or external gate is
 actually observed.

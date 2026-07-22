@@ -66,6 +66,23 @@ enforces global, signed-session, and recovery caps; saturation returns the gener
 `BACKCHANNEL_SSE_MAX_*` environment values. Heartbeats do not advance the durable
 cursor.
 
+## Public creation admission
+
+`POST /api/recoveries` validates the complete supported scenario/mode request before
+charging one durable creation admission. Malformed or extra fields, unsupported
+scenario/mode combinations, deployed `sdk_stub`, and keyless `openai_live` requests
+do not charge. A supported request is charged once before replay/SDK orchestration
+and, for live mode, before the process-local live gate and separate live-only ledger.
+The charge is retained if a later capacity, cooldown, upstream, or internal failure
+occurs.
+
+The independent session, IP, and global counters use UTC calendar days. Exhaustion
+returns HTTP `429`, code `creation_daily_budget_exceeded`, the generic message
+`The public demo recovery creation budget is exhausted for today.`, and matching
+`Retry-After` / `retryAfterSeconds` seconds until the next UTC midnight. The response
+does not reveal which counter decided the rejection, has no replay fallback, and
+does not issue a provisional session cookie.
+
 ## Endpoint map
 
 The generated, checked contract is [OpenAPI](openapi.json).
