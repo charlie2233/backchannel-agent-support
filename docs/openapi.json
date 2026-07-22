@@ -1239,6 +1239,16 @@
               }
             },
             "description": "The request was rejected with a public error envelope."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "The request was rejected with a public error envelope."
           }
         },
         "summary": "Recovery Events"

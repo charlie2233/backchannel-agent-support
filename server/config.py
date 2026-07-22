@@ -42,6 +42,9 @@ class RuntimeSettings:
     live_max_concurrent: int = 1
     live_cooldown: timedelta = timedelta(seconds=30)
     live_daily_budget: int = 12
+    sse_max_concurrent: int = 32
+    sse_max_per_session: int = 4
+    sse_max_per_recovery: int = 2
     demo_session_ttl: timedelta = timedelta(days=1)
     recovery_ttl: timedelta = timedelta(days=7)
     cleanup_interval: timedelta = timedelta(minutes=5)
@@ -64,6 +67,20 @@ class RuntimeSettings:
             raise ValueError("Live cooldown cannot be negative")
         if self.live_daily_budget < 0:
             raise ValueError("Live daily budget cannot be negative")
+        if min(
+            self.sse_max_concurrent,
+            self.sse_max_per_session,
+            self.sse_max_per_recovery,
+        ) < 1:
+            raise ValueError("SSE stream limits must be positive")
+        if not (
+            self.sse_max_per_recovery
+            <= self.sse_max_per_session
+            <= self.sse_max_concurrent
+        ):
+            raise ValueError(
+                "SSE stream limits must order per recovery <= per session <= global"
+            )
         if self.demo_session_ttl <= timedelta(0):
             raise ValueError("Demo session TTL must be positive")
         if self.recovery_ttl <= timedelta(0):
@@ -169,6 +186,21 @@ class RuntimeSettings:
                 seconds=integer("BACKCHANNEL_LIVE_COOLDOWN_SECONDS", 30)
             ),
             live_daily_budget=integer("BACKCHANNEL_LIVE_DAILY_BUDGET", 12),
+            sse_max_concurrent=integer(
+                "BACKCHANNEL_SSE_MAX_CONCURRENT",
+                32,
+                minimum=1,
+            ),
+            sse_max_per_session=integer(
+                "BACKCHANNEL_SSE_MAX_PER_SESSION",
+                4,
+                minimum=1,
+            ),
+            sse_max_per_recovery=integer(
+                "BACKCHANNEL_SSE_MAX_PER_RECOVERY",
+                2,
+                minimum=1,
+            ),
             demo_session_ttl=timedelta(
                 seconds=integer(
                     "BACKCHANNEL_DEMO_SESSION_TTL_SECONDS",

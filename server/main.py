@@ -62,6 +62,11 @@ from server.providers.hotel_simulator import HotelSimulator
 from server.providers.quota_simulator import QuotaSimulator
 from server.replay.engine import ReplayEngine, UnsupportedExecutionModeError
 from server.replay.loader import ScenarioLoader, ScenarioNotFoundError
+from server.sse_admission import (
+    LeasedStreamingResponse,
+    SSEAdmissionGate,
+    StreamCapacityReachedError,
+)
 from server.static import FrontendBundle
 from server.store import ApprovalDecisionError, RecoveryNotFoundError, SQLiteStore
 
@@ -148,6 +153,11 @@ def create_app(
     live_gate = LiveConcurrencyGate(
         max_concurrent=runtime_settings.live_max_concurrent
     )
+    sse_gate = SSEAdmissionGate(
+        max_concurrent=runtime_settings.sse_max_concurrent,
+        max_per_session=runtime_settings.sse_max_per_session,
+        max_per_recovery=runtime_settings.sse_max_per_recovery,
+    )
     recovery_orchestrator = orchestrator
     live_client: AsyncOpenAI | None = None
     if recovery_orchestrator is None:
@@ -213,6 +223,7 @@ def create_app(
     application.state.recovery_store = recovery_store
     application.state.recovery_orchestrator = recovery_orchestrator
     application.state.live_gate = live_gate
+    application.state.sse_gate = sse_gate
     application.state.frontend_bundle = frontend_bundle
     application.add_middleware(
         CORSMiddleware,
@@ -552,6 +563,7 @@ def create_app(
             },
             400: public_error_response,
             404: public_error_response,
+            429: public_error_response,
         },
     )
     async def recovery_events(
@@ -588,21 +600,38 @@ def create_app(
                 _raise_public(status_code=400, code="invalid_request")
             if cursor < 0:
                 _raise_public(status_code=400, code="invalid_request")
-        return StreamingResponse(
-            stream_recovery_events(
-                recovery_store,
-                recovery_key,
-                after_seq=cursor,
-                is_disconnected=request.is_disconnected,
-                session_hash=identity.session_hash,
-                session_expires_at=identity.session_expires_at,
-            ),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "X-Accel-Buffering": "no",
-            },
-        )
+        try:
+            lease = sse_gate.acquire(
+                session_key=identity.session_hash,
+                recovery_id=recovery_key,
+            )
+        except StreamCapacityReachedError:
+            _raise_public(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                code="stream_capacity_reached",
+                recovery_id=recovery_key,
+                retry_after_seconds=1,
+            )
+        try:
+            return LeasedStreamingResponse(
+                stream_recovery_events(
+                    recovery_store,
+                    recovery_key,
+                    after_seq=cursor,
+                    is_disconnected=request.is_disconnected,
+                    session_hash=identity.session_hash,
+                    session_expires_at=identity.session_expires_at,
+                ),
+                lease=lease,
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+        except BaseException:
+            lease.release()
+            raise
 
     @application.get(
         "/api/recoveries/{recovery_id}/receipt", response_model=RecoveryReceipt

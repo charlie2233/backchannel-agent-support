@@ -32,7 +32,7 @@ replay states cannot claim returned model identifiers.
 ## Process and container topology
 
 Production-compatible startup uses **one process** and one worker. Process-local live
-admission and SSE fanout therefore remain authoritative for that topology. The
+admission and bounded SSE fanout therefore remain authoritative for that topology. The
 packaged image runs as non-root UID/GID `10001:10001`, serves the built React bundle,
 and stores its SQLite database below the mounted `/data` volume.
 

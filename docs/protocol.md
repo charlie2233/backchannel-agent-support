@@ -59,7 +59,12 @@ receipt distinguishes `providerDispatchStarted`, `providerExecution`, and
 Events have a monotonically increasing per-recovery sequence. SSE uses that sequence
 as `id`, replays persisted rows after `Last-Event-ID`, then fans out new rows with a
 bounded process-local subscriber. A reconnect is session-authorized before any event
-is returned. Heartbeats do not advance the durable cursor.
+is returned. After that ownership check and before HTTP `200`, process-local admission
+enforces global, signed-session, and recovery caps; saturation returns the generic
+`stream_capacity_reached` public `429` with a one-second retry hint. The defaults are
+32 global, 4 per session, and 2 per recovery, configurable through the documented
+`BACKCHANNEL_SSE_MAX_*` environment values. Heartbeats do not advance the durable
+cursor.
 
 ## Endpoint map
 

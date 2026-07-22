@@ -140,6 +140,9 @@ def test_generated_schema_matches_the_implemented_public_http_contract() -> None
     assert event_responses["400"]["content"]["application/json"]["schema"] == {
         "$ref": "#/components/schemas/PublicErrorResponse"
     }
+    assert event_responses["429"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/PublicErrorResponse"
+    }
     assert event_responses["422"]["content"]["application/json"]["schema"] == {
         "$ref": "#/components/schemas/PublicErrorResponse"
     }

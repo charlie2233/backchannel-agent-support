@@ -256,6 +256,9 @@ def test_event_openapi_matches_runtime_stream_and_public_error_envelopes(
     assert responses["400"]["content"]["application/json"]["schema"] == {
         "$ref": "#/components/schemas/PublicErrorResponse"
     }
+    assert responses["429"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/PublicErrorResponse"
+    }
 
 
 def test_terminal_transition_after_event_read_is_emitted_before_stream_end(
