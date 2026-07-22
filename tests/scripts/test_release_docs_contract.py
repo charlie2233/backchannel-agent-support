@@ -196,8 +196,13 @@ def test_release_docs_cover_architecture_protocol_and_evidence_boundaries() -> N
 
     validation = _read("docs/validation.md")
     assert "`codex/backchannel-v0.3`" in validation
-    assert "6cda24b96aae07732e75850be973e4fad8765a77" in validation
-    assert "29805866404" in validation
+    assert "9bda860a45efaf7ecc061810cbbc54562cc9c338" in validation
+    assert "29868045880" in validation
+    assert "17 capture contracts" in validation
+    assert "198 web tests" in validation
+    assert "465 Python tests" in validation
+    assert "1440×1024" in validation
+    assert "390×844" in validation
     for lane in (
         "Local source and tests",
         "Local final-build captures",
