@@ -353,6 +353,20 @@ def test_deployed_mode_requires_explicit_https_origin_and_identity_secret() -> N
         RuntimeSettings(live_ready=False, deployed_mode=True)
 
 
+def test_deployed_mode_rejects_demo_reset_with_valid_deployment_settings() -> None:
+    with pytest.raises(
+        ValueError,
+        match="deployed mode cannot enable destructive demo reset",
+    ):
+        RuntimeSettings(
+            live_ready=False,
+            demo_reset_enabled=True,
+            deployed_mode=True,
+            deployed_cors_origins=("https://demo.example",),
+            identity_hash_secret="deployment-identity-secret-that-is-long-enough",
+        )
+
+
 def test_proxy_trust_requires_valid_explicit_cidrs() -> None:
     with pytest.raises(ValueError, match="trusted_proxy_cidrs"):
         RuntimeSettings(live_ready=False, trusted_proxy_enabled=True)

@@ -424,8 +424,6 @@ def _container_arguments(
         "-e",
         "BACKCHANNEL_CORS_ORIGINS",
         "-e",
-        "BACKCHANNEL_DEMO_RESET_ENABLED",
-        "-e",
         "BACKCHANNEL_DEPLOYED_MODE",
         "-e",
         "BACKCHANNEL_DB_PATH",
@@ -569,7 +567,6 @@ def run_container_restart_smoke(*, image: str, canary: str) -> dict[str, object]
         environment.update(
             {
                 "BACKCHANNEL_CORS_ORIGINS": "https://judge.example",
-                "BACKCHANNEL_DEMO_RESET_ENABLED": "true",
                 "BACKCHANNEL_DEPLOYED_MODE": "true",
                 "BACKCHANNEL_DB_PATH": _DATABASE_PATH,
                 "BACKCHANNEL_IDENTITY_HASH_SECRET": identity_secret,

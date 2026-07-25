@@ -177,6 +177,7 @@ def test_release_commands_use_cli_first_browser_capture() -> None:
     }
     assert "OPENAI_API_KEY" not in orchestration
     assert "BACKCHANNEL_DEMO_RESET_ENABLED=true" in orchestration
+    assert "BACKCHANNEL_DEPLOYED_MODE=false" in server_environment
     assert "scripts/start.py" in orchestration
 
     capture = _read("e2e/capture-release.mjs")
@@ -438,6 +439,10 @@ def test_final_build_capture_validation_rejects_truncation_and_corruption(
 def test_ci_is_keyless_lockfile_based_and_declares_external_gates() -> None:
     workflow = _read(".github/workflows/ci.yml")
     verify_job, container_job = workflow.split("  container-smoke:", 1)
+    packaged_start = container_job.split("- name: Start packaged app", 1)[1].split(
+        "- run: npm run smoke:docker",
+        1,
+    )[0]
     approved_action_pins = (
         "actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1",
         "actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0",
@@ -473,6 +478,7 @@ def test_ci_is_keyless_lockfile_based_and_declares_external_gates() -> None:
     assert "::add-mask::$release_canary" in workflow
     assert "BACKCHANNEL_SMOKE_CANARY=%s" in workflow
     assert '-e OPENAI_API_KEY="$BACKCHANNEL_SMOKE_CANARY"' in workflow
+    assert "BACKCHANNEL_DEMO_RESET_ENABLED" not in packaged_start
     assert re.search(r"sk-[A-Za-z0-9_-]{20,}", workflow) is None
 
     assert re.search(

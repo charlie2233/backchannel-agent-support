@@ -103,6 +103,11 @@ retried after the owner resolves or the signed session expires. A ready claim is
 Successful reset deletes only the caller session's claims and access; another session's claim
 and access to a shared canonical replay remain intact.
 
+Demo reset is a capture-only local capability. Runtime configuration rejects it whenever
+deployed mode is enabled, and packaged CI plus replacement-container profiles do not pass the
+reset flag. The locked local capture lane runs with deployed mode disabled and opts in explicitly
+to create deterministic screenshot states.
+
 Known live-admission rejection deletes an untouched reservation and releases its capacity.
 Successful reset releases ready claims, but unresolved reset is refused without mutation and
 ordinary terminal-recovery cleanup does not delete a still-unexpired creation claim. Signed

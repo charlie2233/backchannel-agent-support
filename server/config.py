@@ -192,6 +192,10 @@ class RuntimeSettings:
         if self.trusted_proxy_enabled and not self.trusted_proxy_cidrs:
             raise ValueError("trusted proxy mode requires explicit trusted_proxy_cidrs")
         if self.deployed_mode:
+            if self.demo_reset_enabled:
+                raise ValueError(
+                    "deployed mode cannot enable destructive demo reset"
+                )
             if self.identity_hash_secret == DEVELOPMENT_IDENTITY_HASH_SECRET:
                 raise ValueError(
                     "deployed mode requires an explicit BACKCHANNEL_IDENTITY_HASH_SECRET"
