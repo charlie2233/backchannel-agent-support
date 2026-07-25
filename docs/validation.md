@@ -31,6 +31,7 @@ uv run pytest -q tests/security/test_session_isolation.py
 uv run pytest -q tests/domain/test_pending_expiry.py tests/api/test_expiry_lifecycle.py
 uv run pytest -q tests/domain/test_decision_resume.py tests/api/test_decision_resume.py
 uv run pytest -q tests/domain/test_event_stream_admission.py tests/api/test_event_stream_admission.py
+uv run pytest -q tests/api/test_readiness.py tests/domain/test_store.py
 uv run pytest -q tests/integration/test_policy_eligibility.py
 uv run pytest -q tests/integration/test_live_contract.py::test_mocked_live_policy_denial_is_generic_and_releases_exact_admission
 npm --workspace web exec -- vitest run src/components/EvidenceInspector.test.tsx
@@ -43,6 +44,14 @@ It proves foreign snapshot/SSE/receipt/approve/decline all match an absent recov
 404, owner approval remains at-most-once under a foreign race, the signed cookie survives a
 same-secret restart, tampered cookies fail closed, shared replay access detaches per session,
 reset preserves cooldown/budget history, and retention cleanup cascades access rows.
+The readiness suite proves required schema checks plus the trigger-free probe's exact visible and
+hidden column/primary-key shape, full singleton row and binary value, one committed generation
+toggle per uncached interval, five-second success and failure caching, concurrent request
+coalescing, bounded writer-lock contention, query-only refusal, commit-failure rollback and
+recovery, schema/row fail-closed behavior, unchanged application-table counts, and independent
+`/health` liveness. Its deterministic seams and local SQLite file prove the application
+transaction contract, not a total endpoint deadline, POSIX sidecar permissions, ENOSPC, the next
+write, backup recovery, NFS, target-host behavior, or multi-container safety.
 The policy-eligibility suite proves hard-constraint and delegated-authority denial both stop a
 typed SDK-stub attempt before recovery/access/event/remedy/pending/decision/execution/receipt
 persistence, with zero demo-provider dispatch. It also proves store refusal occurs before

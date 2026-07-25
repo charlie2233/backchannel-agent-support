@@ -2,10 +2,13 @@
 
 import asyncio
 import re
-from collections.abc import AsyncIterator, Mapping
+import sqlite3
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from pathlib import Path
+from threading import Lock
+from time import monotonic
 from typing import Any, cast
 from uuid import UUID, uuid4
 
@@ -174,7 +177,14 @@ _READY_SCHEMA_COLUMNS = {
             "released_at",
         }
     ),
+    "readiness_probe": frozenset({"id", "generation"}),
 }
+_READY_PROBE_COLUMNS = [
+    (0, "id", "INTEGER", 0, None, 1, 0),
+    (1, "generation", "INTEGER", 1, None, 0, 0),
+]
+_READY_DB_BUSY_TIMEOUT_MS = 350
+_READY_DB_CACHE_SECONDS = 5.0
 _SPA_SEGMENT = re.compile(r"^[A-Za-z0-9_-]+$")
 _RESERVED_ROUTE_ROOTS = frozenset(
     {"api", "assets", "docs", "health", "openapi.json", "readyz", "redoc"}
@@ -397,49 +407,193 @@ def _build_admitted_event_stream_response(
         raise
 
 
-def _store_schema_is_ready(store: SQLiteStore) -> bool:
-    """Probe the configured SQLite database without exposing failure details."""
+def _store_schema_is_ready(
+    store: SQLiteStore,
+    *,
+    connection_factory: Callable[[], sqlite3.Connection] | None = None,
+    commit: Callable[[sqlite3.Connection], None] | None = None,
+) -> bool:
+    """Commit one bounded SQLite write after required schema and probe checks."""
 
+    connection: sqlite3.Connection | None = None
     try:
-        with store._connect() as connection:
-            integrity = connection.execute("PRAGMA quick_check(1)").fetchone()
-            if integrity is None or integrity[0] != "ok":
-                return False
-            if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
-                return False
-            for table_name, required_columns in _READY_SCHEMA_COLUMNS.items():
-                actual_columns = {
-                    str(row[1])
-                    for row in connection.execute(
-                        f'PRAGMA table_info("{table_name}")'
-                    ).fetchall()
-                }
-                if not required_columns.issubset(actual_columns):
-                    return False
-            access_columns = [
-                (str(row[1]), int(row[5]))
+        connection = (
+            connection_factory()
+            if connection_factory is not None
+            else store._connect_readiness(
+                timeout_seconds=_READY_DB_BUSY_TIMEOUT_MS / 1_000
+            )
+        )
+        connection.execute(f"PRAGMA busy_timeout = {_READY_DB_BUSY_TIMEOUT_MS}")
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("BEGIN IMMEDIATE")
+
+        integrity = connection.execute("PRAGMA quick_check(1)").fetchone()
+        if integrity is None or integrity[0] != "ok":
+            return False
+        if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+            return False
+        for table_name, required_columns in _READY_SCHEMA_COLUMNS.items():
+            actual_columns = {
+                str(row[1])
                 for row in connection.execute(
-                    'PRAGMA table_info("recovery_access")'
+                    f'PRAGMA table_info("{table_name}")'
                 ).fetchall()
-            ]
-            if access_columns != [("recovery_id", 1), ("session_key", 2)]:
+            }
+            if not required_columns.issubset(actual_columns):
                 return False
-            access_foreign_keys = connection.execute(
-                'PRAGMA foreign_key_list("recovery_access")'
+        access_columns = [
+            (str(row[1]), int(row[5]))
+            for row in connection.execute(
+                'PRAGMA table_info("recovery_access")'
             ).fetchall()
-            if len(access_foreign_keys) != 1:
-                return False
-            access_foreign_key = access_foreign_keys[0]
-            if (
-                str(access_foreign_key[2]),
-                str(access_foreign_key[3]),
-                str(access_foreign_key[4]),
-                str(access_foreign_key[6]).upper(),
-            ) != ("recoveries", "recovery_id", "id", "CASCADE"):
-                return False
+        ]
+        if access_columns != [("recovery_id", 1), ("session_key", 2)]:
+            return False
+        access_foreign_keys = connection.execute(
+            'PRAGMA foreign_key_list("recovery_access")'
+        ).fetchall()
+        if len(access_foreign_keys) != 1:
+            return False
+        access_foreign_key = access_foreign_keys[0]
+        if (
+            str(access_foreign_key[2]),
+            str(access_foreign_key[3]),
+            str(access_foreign_key[4]),
+            str(access_foreign_key[6]).upper(),
+        ) != ("recoveries", "recovery_id", "id", "CASCADE"):
+            return False
+
+        probe_objects = connection.execute(
+            """
+            SELECT type
+            FROM main.sqlite_master
+            WHERE name = 'readiness_probe'
+            """
+        ).fetchall()
+        if len(probe_objects) != 1 or str(probe_objects[0][0]) != "table":
+            return False
+        if (
+            connection.execute(
+                """
+                SELECT 1
+                FROM main.sqlite_master
+                WHERE type = 'trigger'
+                  AND tbl_name = 'readiness_probe' COLLATE NOCASE
+                LIMIT 1
+                """
+            ).fetchone()
+            is not None
+        ):
+            return False
+
+        probe_columns = [
+            (
+                int(row[0]),
+                str(row[1]),
+                str(row[2]).upper(),
+                int(row[3]),
+                row[4],
+                int(row[5]),
+                int(row[6]),
+            )
+            for row in connection.execute(
+                'PRAGMA main.table_xinfo("readiness_probe")'
+            ).fetchall()
+        ]
+        if probe_columns != _READY_PROBE_COLUMNS:
+            return False
+        probe_rows = connection.execute(
+            "SELECT id, generation FROM main.readiness_probe ORDER BY id"
+        ).fetchall()
+        if len(probe_rows) != 1:
+            return False
+        probe_id = probe_rows[0][0]
+        generation = probe_rows[0][1]
+        if type(probe_id) is not int or type(generation) is not int:
+            return False
+        if probe_id != 1 or generation not in (0, 1):
+            return False
+
+        update = connection.execute(
+            """
+            UPDATE main.readiness_probe
+            SET generation = CASE generation WHEN 0 THEN 1 ELSE 0 END
+            WHERE id = 1 AND generation IN (0, 1)
+            """
+        )
+        if update.rowcount != 1:
+            return False
+        toggled_rows = connection.execute(
+            "SELECT id, generation FROM main.readiness_probe ORDER BY id"
+        ).fetchall()
+        if len(toggled_rows) != 1:
+            return False
+        toggled_id = toggled_rows[0][0]
+        toggled_generation = toggled_rows[0][1]
+        if type(toggled_id) is not int or type(toggled_generation) is not int:
+            return False
+        if (toggled_id, toggled_generation) != (1, 1 - generation):
+            return False
+
+        if commit is None:
+            connection.commit()
+        else:
+            commit(connection)
+        if connection.in_transaction:
+            return False
     except Exception:
         return False
+    finally:
+        if connection is not None:
+            try:
+                if connection.in_transaction:
+                    connection.rollback()
+            except Exception:
+                pass
+            try:
+                connection.close()
+            except Exception:
+                pass
     return True
+
+
+class _CachedReadinessProbe:
+    """Coalesce and briefly cache success or failure for one application process."""
+
+    def __init__(
+        self,
+        probe: Callable[[], bool],
+        *,
+        clock: Callable[[], float] = monotonic,
+        cache_seconds: float = _READY_DB_CACHE_SECONDS,
+        available: Callable[[], bool] | None = None,
+    ) -> None:
+        self._probe = probe
+        self._clock = clock
+        self._cache_seconds = cache_seconds
+        self._available = available
+        self._lock = Lock()
+        self._checked_at: float | None = None
+        self._cached_result: bool | None = None
+
+    def is_ready(self) -> bool:
+        with self._lock:
+            if self._available is not None and not self._available():
+                self._cached_result = False
+                self._checked_at = self._clock()
+                return False
+            now = self._clock()
+            if self._checked_at is not None and self._cached_result is not None:
+                elapsed = now - self._checked_at
+                if 0 <= elapsed < self._cache_seconds:
+                    return self._cached_result
+            result = self._probe()
+            if self._available is not None and not self._available():
+                result = False
+            self._cached_result = result
+            self._checked_at = self._clock()
+            return result
 
 
 def _is_route_like_spa_path(path: str) -> bool:
@@ -535,6 +689,9 @@ def create_app(
     orchestrator: RecoveryOrchestrator | None = None,
     model_provider: ModelProvider | None = None,
     static_dir: Path | None = None,
+    readiness_clock: Callable[[], float] | None = None,
+    readiness_connection_factory: Callable[[], sqlite3.Connection] | None = None,
+    readiness_commit: Callable[[sqlite3.Connection], None] | None = None,
 ) -> FastAPI:
     install_server_log_safety()
     runtime_settings = settings or RuntimeSettings.from_environment()
@@ -565,6 +722,15 @@ def create_app(
     )
     terminal_ttl = timedelta(
         seconds=runtime_settings.terminal_recovery_ttl_seconds
+    )
+    database_readiness = _CachedReadinessProbe(
+        lambda: _store_schema_is_ready(
+            recovery_store,
+            connection_factory=readiness_connection_factory,
+            commit=readiness_commit,
+        ),
+        clock=readiness_clock if readiness_clock is not None else monotonic,
+        available=lambda: not recovery_store.closed,
     )
 
     @asynccontextmanager
@@ -625,6 +791,7 @@ def create_app(
     application.state.event_stream_admission = event_stream_admission
     application.state.runtime_settings = runtime_settings
     application.state.static_dir = configured_static_dir
+    application.state.database_readiness = database_readiness
     application.add_middleware(
         CORSMiddleware,
         allow_origins=list(runtime_settings.cors_origins),
@@ -714,7 +881,7 @@ def create_app(
 
     @application.get("/readyz", response_model=ReadinessResponse)
     def ready() -> Response:
-        database_ready = _store_schema_is_ready(recovery_store)
+        database_ready = database_readiness.is_ready()
         static_ready = static_index is None or static_index.is_file()
         readiness_status = "ready" if database_ready and static_ready else "not_ready"
         return JSONResponse(

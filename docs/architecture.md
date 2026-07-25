@@ -138,9 +138,18 @@ API, documentation, missing asset, and suspicious paths remain non-HTML 404s.
 
 The multi-stage Dockerfile builds Node assets separately, installs the frozen Python runtime,
 runs as UID/GID 10001, stores SQLite under writable `/data`, and checks `/readyz`.
-Readiness probes both the required SQLite schema and the built index. HTML receives a
-self-only script/style/image/connect CSP; API and non-HTML responses receive
-`default-src 'none'`.
+Readiness checks the built index and coalesces the database readiness probe behind a process-local
+lock. The database result, including failures, is cached for five seconds. A refresh uses a
+dedicated SQLite connection configured with a 350 ms writer-lock timeout, starts
+`BEGIN IMMEDIATE`, retains the quick integrity, foreign-key, and required-schema checks, requires
+the probe to be a real trigger-free table with exact columns and primary-key positions, validates
+the full singleton row and binary value, toggles its generation exactly once, and explicitly
+commits. The endpoint never creates or reseeds that row; store initialization and migration own
+it. This proves one committed local SQLite write at the most recent uncached probe. The
+five-second result can be stale, and the writer timeout does not bound every integrity query. It
+does not prove the next write, available disk space, backup recovery, target-host durability or
+networking, NFS behavior, or concurrent multi-container safety. HTML receives a self-only
+script/style/image/connect CSP; API and non-HTML responses receive `default-src 'none'`.
 
 This deployment requires a host that preserves one long-lived HTTP connection for SSE and a
 persistent `/data` volume. It is intentionally not converted to short-lived serverless

@@ -8,7 +8,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from threading import RLock
+from threading import Event, RLock
 from typing import Any, Literal, cast
 from uuid import uuid4
 
@@ -217,6 +217,13 @@ ON live_admissions(ip_key, admitted_at);
 
 CREATE INDEX IF NOT EXISTS live_admissions_session_time_idx
 ON live_admissions(session_key, admitted_at);
+
+CREATE TABLE IF NOT EXISTS readiness_probe (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    generation INTEGER NOT NULL CHECK (generation IN (0, 1))
+);
+
+INSERT OR IGNORE INTO readiness_probe (id, generation) VALUES (1, 0);
 """
 
 
@@ -386,6 +393,7 @@ class SQLiteStore:
         self._database_path = Path(database_path)
         self._lock = RLock()
         self._closed = False
+        self._closed_event = Event()
         self._database_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
             connection.executescript(SCHEMA)
@@ -1101,6 +1109,27 @@ class SQLiteStore:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
+
+    def _connect_readiness(self, *, timeout_seconds: float) -> sqlite3.Connection:
+        """Open a dedicated bounded connection for the public readiness probe."""
+
+        if self.closed:
+            raise RuntimeError("SQLiteStore is closed")
+        connection = sqlite3.connect(
+            self._database_path,
+            timeout=timeout_seconds,
+        )
+        if self.closed:
+            connection.close()
+            raise RuntimeError("SQLiteStore is closed")
+        connection.row_factory = sqlite3.Row
+        return connection
+
+    @property
+    def closed(self) -> bool:
+        """Return lock-free lifecycle state for bounded health probes."""
+
+        return self._closed_event.is_set()
 
     @staticmethod
     def _now() -> datetime:
@@ -3695,3 +3724,4 @@ class SQLiteStore:
     def close(self) -> None:
         with self._lock:
             self._closed = True
+            self._closed_event.set()

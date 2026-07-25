@@ -24,6 +24,7 @@ REQUIRED_TABLES = {
     "events",
     "executions",
     "pending_approvals",
+    "readiness_probe",
     "receipts",
     "recoveries",
     "remedies",
