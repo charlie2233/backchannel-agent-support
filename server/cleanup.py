@@ -70,7 +70,7 @@ class RecoveryCleanupService:
     async def _run(self) -> None:
         while not self._stop.is_set():
             try:
-                deleted = self.run_once()
+                deleted = await asyncio.to_thread(self.run_once)
                 if deleted:
                     logger.info("Durable cleanup completed count=%d", deleted)
             except Exception:

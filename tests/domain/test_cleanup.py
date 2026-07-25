@@ -4,7 +4,8 @@ import asyncio
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
-from threading import Barrier
+from threading import Barrier, Event
+from threading import enumerate as enumerate_threads
 
 import pytest
 
@@ -229,6 +230,96 @@ def test_cleanup_service_owns_one_task_and_joins_it_on_shutdown(tmp_path) -> Non
 
     asyncio.run(exercise())
     assert calls >= 1
+
+
+def test_periodic_cleanup_keeps_event_loop_live_during_sqlite_writer_contention(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "cleanup-liveness.sqlite3"
+    store = SQLiteStore(database_path)
+    writer_lock_held = Event()
+    release_writer = Event()
+    cleanup_started = Event()
+    cleanup_finished = Event()
+    cleanup_results: list[int] = []
+
+    def hold_writer_lock() -> None:
+        connection = sqlite3.connect(database_path, timeout=1)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            writer_lock_held.set()
+            cleanup_started.wait(timeout=2)
+            release_writer.wait(timeout=1)
+            connection.rollback()
+        finally:
+            writer_lock_held.clear()
+            connection.close()
+
+    original_cleanup = store.cleanup_terminal_recoveries
+
+    def tracked_cleanup(*, cutoff: datetime, batch_size: int) -> int:
+        cleanup_started.set()
+        return original_cleanup(cutoff=cutoff, batch_size=batch_size)
+
+    store.cleanup_terminal_recoveries = tracked_cleanup  # type: ignore[method-assign]
+    service = RecoveryCleanupService(
+        store=store,
+        ttl=timedelta(days=7),
+        interval=timedelta(hours=1),
+        batch_size=10,
+    )
+    original_run_once = service.run_once
+
+    def tracked_run_once() -> int:
+        result = original_run_once()
+        cleanup_results.append(result)
+        cleanup_finished.set()
+        return result
+
+    service.run_once = tracked_run_once  # type: ignore[method-assign]
+
+    async def exercise() -> None:
+        await service.startup()
+        cleanup_task = service.task
+        assert cleanup_task is not None
+
+        while not cleanup_started.is_set():
+            await asyncio.sleep(0)
+        assert writer_lock_held.is_set()
+        assert not cleanup_finished.is_set()
+
+        release_writer.set()
+        while not cleanup_finished.is_set():
+            await asyncio.sleep(0)
+
+        await service.shutdown()
+        assert cleanup_task.done()
+        assert service.task is None
+        assert not service.running
+
+    with ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix="cleanup-writer",
+    ) as writer_pool:
+        writer = writer_pool.submit(hold_writer_lock)
+        assert writer_lock_held.wait(timeout=2)
+        try:
+            asyncio.run(asyncio.wait_for(exercise(), timeout=5))
+        finally:
+            release_writer.set()
+        writer.result(timeout=2)
+
+    assert cleanup_results == [0]
+    assert not any(
+        thread.name.startswith("cleanup-writer") for thread in enumerate_threads()
+    )
+    connection = sqlite3.connect(database_path, timeout=0.1)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.rollback()
+    finally:
+        connection.close()
+    store.close()
 
 
 def test_creation_usage_cleanup_is_retained_bounded_and_graph_independent(
