@@ -34,16 +34,91 @@ def _cookie_value(response) -> str:
     return parsed["backchannel_demo_session"].value
 
 
-def _decision_payload(snapshot: dict[str, object]) -> dict[str, str]:
+def _decision_payload(
+    snapshot: dict[str, object], *, decision: str = "approve"
+) -> dict[str, str]:
     pending = snapshot["pendingApproval"]
     assert isinstance(pending, dict)
     return {
-        "decision": "approve",
+        "decision": decision,
         "clientDecisionId": str(uuid4()),
         "remedyId": str(pending["remedyId"]),
         "remedyDigest": str(pending["remedyDigest"]),
         "toolCallId": str(pending["toolCallId"]),
     }
+
+
+def test_owner_scoped_successes_are_private_no_store_and_preserve_cors_vary(
+    tmp_path,
+) -> None:
+    store = SQLiteStore(tmp_path / "owner-cache-policy.sqlite3")
+    origin = "https://demo.example"
+    app = create_app(
+        _settings(cors_origins=(origin,)),
+        store=store,
+    )
+
+    def assert_private_no_store(response, expected_status: int) -> None:
+        assert response.status_code == expected_status
+        assert response.headers["cache-control"] == "private, no-store"
+        vary_tokens = {
+            token.strip().lower()
+            for token in response.headers.get("vary", "").split(",")
+            if token.strip()
+        }
+        assert "origin" in vary_tokens
+        assert "cookie" not in vary_tokens
+
+    headers = {"Origin": origin}
+    with TestClient(app) as owner:
+        created = owner.post(
+            "/api/recoveries",
+            json={"scenarioId": "hotel", "executionMode": "sdk_stub"},
+            headers=headers,
+        )
+        assert_private_no_store(created, 201)
+        assert "set-cookie" in created.headers
+        recovery_id = str(created.json()["recoveryId"])
+
+        snapshot = owner.get(f"/api/recoveries/{recovery_id}", headers=headers)
+        compact_snapshot = owner.get(
+            f"/api/recoveries/{recovery_id.replace('-', '')}",
+            headers=headers,
+        )
+        assert_private_no_store(snapshot, 200)
+        assert_private_no_store(compact_snapshot, 200)
+
+        approval = _decision_payload(created.json())
+        approved = owner.post(
+            f"/api/recoveries/{recovery_id}/decisions",
+            json=approval,
+            headers=headers,
+        )
+        replayed = owner.post(
+            f"/api/recoveries/{recovery_id}/decisions",
+            json=approval,
+            headers=headers,
+        )
+        assert_private_no_store(approved, 200)
+        assert_private_no_store(replayed, 200)
+
+        declined_created = owner.post(
+            "/api/recoveries",
+            json={"scenarioId": "hotel", "executionMode": "sdk_stub"},
+            headers=headers,
+        )
+        assert_private_no_store(declined_created, 201)
+        declined = owner.post(
+            f"/api/recoveries/{declined_created.json()['recoveryId']}/decisions",
+            json=_decision_payload(declined_created.json(), decision="decline"),
+            headers=headers,
+        )
+        assert_private_no_store(declined, 200)
+
+        receipt = owner.get(f"/api/recoveries/{recovery_id}/receipt", headers=headers)
+        events = owner.get(f"/api/recoveries/{recovery_id}/events", headers=headers)
+        assert_private_no_store(receipt, 200)
+        assert_private_no_store(events, 200)
 
 
 def test_signed_cookie_binds_recovery_and_survives_restart(tmp_path) -> None:

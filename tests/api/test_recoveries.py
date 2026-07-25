@@ -193,7 +193,7 @@ def test_last_event_id_replays_only_newer_persisted_events(client: TestClient) -
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/event-stream")
-    assert response.headers["cache-control"] == "no-cache"
+    assert response.headers["cache-control"] == "private, no-store"
     assert response.headers["x-accel-buffering"] == "no"
     assert response.headers["x-content-type-options"] == "nosniff"
     assert response.headers["x-frame-options"] == "DENY"

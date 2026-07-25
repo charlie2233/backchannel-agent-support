@@ -1058,7 +1058,18 @@
                 }
               }
             },
-            "description": "Successful Response"
+            "description": "Created owner-scoped recovery snapshot.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Prevents storage of owner-scoped recovery data in shared or persistent caches.",
+                "schema": {
+                  "enum": [
+                    "private, no-store"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
           },
           "422": {
             "content": {
@@ -1127,7 +1138,18 @@
                 }
               }
             },
-            "description": "Successful Response"
+            "description": "Owner-scoped recovery snapshot.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Prevents storage of owner-scoped recovery data in shared or persistent caches.",
+                "schema": {
+                  "enum": [
+                    "private, no-store"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
           },
           "422": {
             "content": {
@@ -1185,7 +1207,18 @@
                 }
               }
             },
-            "description": "Successful Response"
+            "description": "Owner-scoped decision result.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Prevents storage of owner-scoped recovery data in shared or persistent caches.",
+                "schema": {
+                  "enum": [
+                    "private, no-store"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
           },
           "422": {
             "content": {
@@ -1247,7 +1280,18 @@
             "content": {
               "text/event-stream": {}
             },
-            "description": "Server-sent recovery event stream."
+            "description": "Server-sent recovery event stream.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Prevents storage of owner-scoped recovery data in shared or persistent caches.",
+                "schema": {
+                  "enum": [
+                    "private, no-store"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
           },
           "400": {
             "content": {
@@ -1327,7 +1371,18 @@
                 }
               }
             },
-            "description": "Successful Response"
+            "description": "Owner-scoped recovery receipt.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Prevents storage of owner-scoped recovery data in shared or persistent caches.",
+                "schema": {
+                  "enum": [
+                    "private, no-store"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
           },
           "422": {
             "content": {

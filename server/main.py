@@ -22,6 +22,7 @@ from server.agents.live_models import (
 from server.cleanup import RecoveryCleanupService
 from server.config import RuntimeSettings
 from server.controls import (
+    OWNER_SCOPED_SUCCESS_CACHE_CONTROL,
     LiveConcurrencyGate,
     LiveConcurrencyLimitError,
     PublicApiException,
@@ -71,6 +72,24 @@ from server.sse_admission import (
 )
 from server.static import FrontendBundle
 from server.store import ApprovalDecisionError, RecoveryNotFoundError, SQLiteStore
+
+
+def _owner_scoped_success_response(description: str) -> dict[str, Any]:
+    return {
+        "description": description,
+        "headers": {
+            "Cache-Control": {
+                "description": (
+                    "Prevents storage of owner-scoped recovery data in shared or "
+                    "persistent caches."
+                ),
+                "schema": {
+                    "type": "string",
+                    "enum": [OWNER_SCOPED_SUCCESS_CACHE_CONTROL],
+                },
+            }
+        },
+    }
 
 
 def _raise_public(
@@ -370,6 +389,9 @@ def create_app(
         response_model=RecoverySnapshot,
         status_code=status.HTTP_201_CREATED,
         responses={
+            201: _owner_scoped_success_response(
+                "Created owner-scoped recovery snapshot."
+            ),
             429: {
                 "model": PublicErrorResponse,
                 "description": (
@@ -525,6 +547,7 @@ def create_app(
         "/api/recoveries/{recovery_id}/decisions",
         response_model=DecisionResponse,
         responses={
+            200: _owner_scoped_success_response("Owner-scoped decision result."),
             504: {
                 "model": PublicErrorResponse,
                 "description": (
@@ -620,7 +643,11 @@ def create_app(
             _raise_live_failure(error, recovery_id=recovery_key)
 
     @application.get(
-        "/api/recoveries/{recovery_id}", response_model=RecoverySnapshot
+        "/api/recoveries/{recovery_id}",
+        response_model=RecoverySnapshot,
+        responses={
+            200: _owner_scoped_success_response("Owner-scoped recovery snapshot."),
+        },
     )
     def get_recovery(recovery_id: UUID, request: Request) -> RecoverySnapshot:
         recovery_key = str(recovery_id)
@@ -653,7 +680,7 @@ def create_app(
         response_class=StreamingResponse,
         responses={
             200: {
-                "description": "Server-sent recovery event stream.",
+                **_owner_scoped_success_response("Server-sent recovery event stream."),
                 "content": {"text/event-stream": {}},
             },
             400: public_error_response,
@@ -734,7 +761,7 @@ def create_app(
                 lease=lease,
                 media_type="text/event-stream",
                 headers={
-                    "Cache-Control": "no-cache",
+                    "Cache-Control": OWNER_SCOPED_SUCCESS_CACHE_CONTROL,
                     "X-Accel-Buffering": "no",
                 },
             )
@@ -743,7 +770,11 @@ def create_app(
             raise
 
     @application.get(
-        "/api/recoveries/{recovery_id}/receipt", response_model=RecoveryReceipt
+        "/api/recoveries/{recovery_id}/receipt",
+        response_model=RecoveryReceipt,
+        responses={
+            200: _owner_scoped_success_response("Owner-scoped recovery receipt."),
+        },
     )
     def get_receipt(recovery_id: UUID, request: Request) -> RecoveryReceipt:
         recovery_key = str(recovery_id)

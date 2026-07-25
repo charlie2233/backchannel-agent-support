@@ -155,6 +155,26 @@ def test_generated_schema_matches_the_implemented_public_http_contract() -> None
         "$ref": "#/components/schemas/PublicErrorResponse"
     }
     creation_responses = paths["/api/recoveries"]["post"]["responses"]
+    cache_control_header = {
+        "description": (
+            "Prevents storage of owner-scoped recovery data in shared or persistent "
+            "caches."
+        ),
+        "schema": {
+            "enum": ["private, no-store"],
+            "type": "string",
+        },
+    }
+    for path, method, success_status in (
+        ("/api/recoveries", "post", "201"),
+        ("/api/recoveries/{recovery_id}", "get", "200"),
+        ("/api/recoveries/{recovery_id}/decisions", "post", "200"),
+        ("/api/recoveries/{recovery_id}/events", "get", "200"),
+        ("/api/recoveries/{recovery_id}/receipt", "get", "200"),
+    ):
+        assert paths[path][method]["responses"][success_status]["headers"] == {
+            "Cache-Control": cache_control_header
+        }
     assert creation_responses["429"]["description"] == (
         "The request exceeded the public creation budget or a live-only capacity, "
         "cooldown, or daily-budget admission limit."

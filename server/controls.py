@@ -24,6 +24,7 @@ from server.logging import log_public_event
 
 DEMO_SESSION_COOKIE = "backchannel_demo_session"
 HASH_PREFIX = "hmac-sha256:"
+OWNER_SCOPED_SUCCESS_CACHE_CONTROL = "private, no-store"
 PublicErrorCode = Literal[
     "invalid_request",
     "method_not_allowed",
@@ -458,6 +459,15 @@ class PublicBoundaryMiddleware:
 
     _JSON_ROUTES = frozenset({"/api/recoveries", "/api/demo/reset"})
     _UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+    _OWNER_SCOPED_SUCCESS_ROUTES = frozenset(
+        {
+            ("POST", "/api/recoveries"),
+            ("GET", "/api/recoveries/{recovery_id}"),
+            ("POST", "/api/recoveries/{recovery_id}/decisions"),
+            ("GET", "/api/recoveries/{recovery_id}/events"),
+            ("GET", "/api/recoveries/{recovery_id}/receipt"),
+        }
+    )
 
     def __init__(
         self,
@@ -540,6 +550,18 @@ class PublicBoundaryMiddleware:
                 (b"strict-transport-security", b"max-age=31536000; includeSubDomains")
             )
         return tuple(headers)
+
+    @classmethod
+    def _is_owner_scoped_success(cls, scope: Scope, status_code: int) -> bool:
+        """Identify the exact recovery responses that may contain owner data."""
+
+        if not 200 <= status_code < 300:
+            return False
+        route = scope.get("route")
+        route_path = getattr(route, "path", None)
+        if not isinstance(route_path, str):
+            return False
+        return (scope.get("method"), route_path) in cls._OWNER_SCOPED_SUCCESS_ROUTES
 
     async def _send_error(
         self,
@@ -871,11 +893,23 @@ class PublicBoundaryMiddleware:
             if message["type"] == "http.response.start":
                 response_started = True
                 canonical_names = {key for key, _value in security_headers}
+                owner_scoped_success = self._is_owner_scoped_success(
+                    scope, message["status"]
+                )
                 downstream_headers = [
                     (key, value)
                     for key, value in message.get("headers", ())
                     if key.lower() not in canonical_names
+                    and not (owner_scoped_success and key.lower() == b"cache-control")
                 ]
+                cache_control_headers: tuple[tuple[bytes, bytes], ...] = ()
+                if owner_scoped_success:
+                    cache_control_headers = (
+                        (
+                            b"cache-control",
+                            OWNER_SCOPED_SUCCESS_CACHE_CONTROL.encode("ascii"),
+                        ),
+                    )
                 session_headers: tuple[tuple[bytes, bytes], ...] = ()
                 if provisional_cookie is not None and message.get("status") == 201:
                     session_headers = (
@@ -887,6 +921,7 @@ class PublicBoundaryMiddleware:
                 message["headers"] = [
                     *downstream_headers,
                     *security_headers,
+                    *cache_control_headers,
                     *session_headers,
                 ]
             elif (
