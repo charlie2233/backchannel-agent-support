@@ -31,6 +31,7 @@ uv run pytest -q tests/security/test_session_isolation.py
 uv run pytest -q tests/domain/test_pending_expiry.py tests/api/test_expiry_lifecycle.py
 uv run pytest -q tests/domain/test_decision_resume.py tests/api/test_decision_resume.py
 uv run pytest -q tests/domain/test_event_stream_admission.py tests/api/test_event_stream_admission.py
+uv run pytest -q tests/api/test_terminal_read_integrity.py
 uv run pytest -q tests/api/test_readiness.py tests/domain/test_store.py
 uv run pytest -q tests/api/test_creation_idempotency.py
 uv run pytest -q tests/integration/test_policy_eligibility.py
@@ -137,6 +138,17 @@ one-shot preservation of the capacity status at stream EOF, transient error clea
 unchanged terminal closure. These tests prove at most the configured polling loops in this
 application process. They do not prove a shared limit across workers or containers;
 `scripts/start.py` is separately asserted to launch one worker.
+The terminal-read integrity suite proves public snapshot, receipt, and initial SSE authorization
+precedes any targeted expiry mutation inside the same SQLite transaction; a stale outer access
+result cannot close another session's recovery. It proves rollback-safe validation before stream
+admission, explicit rollback of a newly sealed expiry when validation fails, corruption
+detection on a post-admission SSE poll, generic foreign/absent 404 parity, and sanitized owner
+failure for missing, duplicate, cross-record, cursor-hidden, or scenario-invalid terminal
+evidence. It requires an exact seq-1 creation event plus contiguous, UTC, nondecreasing dynamic
+event chronology bounded by the snapshot update. It also binds recovery, receipt, and final-event
+provenance plus their UTC seal timestamp, and binds canonical replay creation, every replay
+event, and the receipt to one atomic UTC chronology. Raw internal store readers intentionally
+remain outside this public integrity fence for reconciliation and migration compatibility.
 The explicit-live suites prove zero live POSTs on initial mount and authorized restore,
 synchronous one-POST activation coalescing under StrictMode, UUID-only storage with exception
 safety, valid consent/receipt restoration, terminal invalid-hint clearing, truthful snapshotless

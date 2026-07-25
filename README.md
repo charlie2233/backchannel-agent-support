@@ -95,6 +95,15 @@ model call nor a provider dispatch.
   have a 12-second owned deadline; timeout or unmount aborts the exact request, and retry always
   refreshes the snapshot before requesting its receipt. Quota replay remains explicitly
   non-executing, while only the matching SDK trace claims demo-adapter execution.
+- Public snapshot, receipt, and initial SSE reads authorize the opaque session, seal any
+  targeted consent expiry, and validate the returned recovery, terminal event, and receipt in
+  one SQLite transaction before exposing evidence or admitting a stream. Every public ledger
+  starts with the exact creation event and has a contiguous, nondecreasing UTC chronology bounded
+  by the snapshot update time. Terminal rows require one exact final event and one receipt with
+  matching provenance and UTC seal time; canonical replay creation, every replay event, and its
+  receipt share one immutable UTC timestamp. Later SSE polls remain read-only but revalidate the
+  same bundle. Owner corruption fails with the generic sanitized error, while foreign and absent
+  IDs remain indistinguishable 404s.
 - Compatible pending approvals survive a process restart; version or definition drift fails
   closed with `resume_incompatible`.
 - An unfinished durable decision claim can be continued before its authoritative expiry without

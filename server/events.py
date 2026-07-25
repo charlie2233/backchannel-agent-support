@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from threading import Lock
 from time import monotonic
 
-from server.models import RecoveryEvent
+from server.models import (
+    RecoveryEvent,
+    RecoveryStatus,
+    ReplayScenarioDefinition,
+    ScenarioId,
+)
 from server.store import SQLiteStore
 
 HEARTBEAT_SECONDS = 15.0
@@ -155,15 +160,40 @@ async def stream_recovery_events(
     is_disconnected: Callable[[], Awaitable[bool]],
     heartbeat_seconds: float = HEARTBEAT_SECONDS,
     poll_interval_seconds: float = POLL_INTERVAL_SECONDS,
+    initial_batch: tuple[list[RecoveryEvent], RecoveryStatus] | None = None,
+    public_session_key: str | None = None,
+    public_replay_scenarios: (
+        Mapping[ScenarioId, ReplayScenarioDefinition] | None
+    ) = None,
 ) -> AsyncIterator[str]:
     """Replay durable events first, then poll for newly committed events."""
 
+    if (public_session_key is None) is not (public_replay_scenarios is None):
+        raise ValueError(
+            "Public event validation requires both session and replay definitions"
+        )
     cursor = after_seq
     last_emission = monotonic()
+    pending_initial_batch = initial_batch
     while True:
-        persisted, recovery_status = store.read_event_batch(
-            recovery_id, after_seq=cursor
-        )
+        if pending_initial_batch is not None:
+            persisted, recovery_status = pending_initial_batch
+            pending_initial_batch = None
+        elif (
+            public_session_key is not None
+            and public_replay_scenarios is not None
+        ):
+            persisted, recovery_status = store.read_public_event_batch(
+                recovery_id,
+                after_seq=cursor,
+                session_key=public_session_key,
+                replay_scenarios=public_replay_scenarios,
+            )
+        else:
+            persisted, recovery_status = store.read_event_batch(
+                recovery_id,
+                after_seq=cursor,
+            )
         for event in persisted:
             yield encode_sse_event(event)
             cursor = event.seq

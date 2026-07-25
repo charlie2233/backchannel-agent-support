@@ -1033,6 +1033,9 @@ def create_app(
     runtime_settings = settings or RuntimeSettings.from_environment()
     recovery_store = store or SQLiteStore(runtime_settings.database_path)
     scenario_loader = ScenarioLoader()
+    public_replay_scenarios = {
+        scenario.id: scenario for scenario in scenario_loader.list()
+    }
     replay_engine = ReplayEngine(recovery_store, scenario_loader)
     recovery_orchestrator = orchestrator
     if recovery_orchestrator is None:
@@ -1777,13 +1780,13 @@ def create_app(
     def get_recovery(recovery_id: UUID, request: Request) -> RecoverySnapshot:
         recovery_key = str(recovery_id)
         _require_recovery_access(request, recovery_store, recovery_key)
-        expire_pending_approvals(
-            recovery_store,
-            batch_size=1,
-            recovery_id=recovery_key,
-        )
+        session_key = cast(ClientIdentity, request.state.demo_identity).session_key
         try:
-            return recovery_store.get_recovery(recovery_key)
+            return recovery_store.get_public_recovery(
+                recovery_key,
+                session_key=session_key,
+                replay_scenarios=public_replay_scenarios,
+            )
         except RecoveryNotFoundError as error:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Not found"
@@ -1803,6 +1806,7 @@ def create_app(
     ) -> Response:
         recovery_key = str(recovery_id)
         _require_recovery_access(request, recovery_store, recovery_key)
+        session_key = cast(ClientIdentity, request.state.demo_identity).session_key
         try:
             cursor_values = request.headers.getlist("last-event-id")
             if len(cursor_values) > 1:
@@ -1813,13 +1817,13 @@ def create_app(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=_INVALID_EVENT_CURSOR_DETAIL,
             ) from error
-        expire_pending_approvals(
-            recovery_store,
-            batch_size=1,
-            recovery_id=recovery_key,
-        )
         try:
-            recovery_store.get_recovery(recovery_key)
+            initial_batch = recovery_store.read_initial_public_event_batch(
+                recovery_key,
+                after_seq=cursor,
+                session_key=session_key,
+                replay_scenarios=public_replay_scenarios,
+            )
         except RecoveryNotFoundError as error:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Not found"
@@ -1843,6 +1847,9 @@ def create_app(
                     recovery_key,
                     after_seq=cursor,
                     is_disconnected=request.is_disconnected,
+                    initial_batch=initial_batch,
+                    public_session_key=session_key,
+                    public_replay_scenarios=public_replay_scenarios,
                 ),
                 lease,
             ),
@@ -1858,13 +1865,13 @@ def create_app(
     def get_receipt(recovery_id: UUID, request: Request) -> RecoveryReceipt:
         recovery_key = str(recovery_id)
         _require_recovery_access(request, recovery_store, recovery_key)
-        expire_pending_approvals(
-            recovery_store,
-            batch_size=1,
-            recovery_id=recovery_key,
-        )
+        session_key = cast(ClientIdentity, request.state.demo_identity).session_key
         try:
-            return recovery_store.get_receipt(recovery_key)
+            return recovery_store.get_public_receipt(
+                recovery_key,
+                session_key=session_key,
+                replay_scenarios=public_replay_scenarios,
+            )
         except RecoveryNotFoundError as error:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Not found"

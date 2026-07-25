@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -298,6 +300,10 @@ class ReceiptTransitionError(ValueError):
 
 class ReplayIntegrityError(RuntimeError):
     """Raised when a canonical replay row no longer matches its definition."""
+
+
+class PublicEvidenceIntegrityError(RuntimeError):
+    """Raised when public snapshot, event, and receipt evidence disagree."""
 
 
 class ExecutionConflictError(ValueError):
@@ -1367,6 +1373,20 @@ class SQLiteStore:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
+
+    @contextmanager
+    def _expiry_transaction(
+        self,
+        existing_connection: sqlite3.Connection | None,
+    ) -> Iterator[sqlite3.Connection]:
+        """Reuse an authoritative transaction or own one for batch cleanup."""
+
+        if existing_connection is not None:
+            yield existing_connection
+            return
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            yield connection
 
     def _connect_readiness(self, *, timeout_seconds: float) -> sqlite3.Connection:
         """Open a dedicated bounded connection for the public readiness probe."""
@@ -2796,25 +2816,10 @@ class SQLiteStore:
 
         now = self._now()
         now_text = now.isoformat()
-        created_payload: dict[str, JsonValue] = {
-            "scenarioId": scenario.id.value,
-            "executionMode": ExecutionMode.REPLAY_FIXTURE.value,
-            "summary": "Recovery created for the selected execution mode.",
-        }
-        receipt = (
-            RecoveryReceipt(
-                recoveryId=recovery_id,
-                executionMode=ExecutionMode.REPLAY_FIXTURE,
-                modelCall=False,
-                rootTraceId=None,
-                sdkVersion=None,
-                protocolVersion=None,
-                agentGraphVersion=None,
-                definitionDigest=None,
-                **scenario.receipt.model_dump(),
-            )
-            if scenario.receipt is not None
-            else None
+        created_payload = self._canonical_replay_created_payload(scenario)
+        receipt = self._canonical_replay_receipt(
+            recovery_id=recovery_id,
+            scenario=scenario,
         )
 
         with self._lock, self._connect() as connection:
@@ -2905,6 +2910,38 @@ class SQLiteStore:
             return self._recovery_from_row(row)
 
     @staticmethod
+    def _canonical_replay_created_payload(
+        scenario: ReplayScenarioDefinition,
+    ) -> dict[str, JsonValue]:
+        return {
+            "scenarioId": scenario.id.value,
+            "executionMode": ExecutionMode.REPLAY_FIXTURE.value,
+            "summary": "Recovery created for the selected execution mode.",
+        }
+
+    @staticmethod
+    def _canonical_replay_receipt(
+        *,
+        recovery_id: str,
+        scenario: ReplayScenarioDefinition,
+    ) -> RecoveryReceipt | None:
+        return (
+            RecoveryReceipt(
+                recoveryId=recovery_id,
+                executionMode=ExecutionMode.REPLAY_FIXTURE,
+                modelCall=False,
+                rootTraceId=None,
+                sdkVersion=None,
+                protocolVersion=None,
+                agentGraphVersion=None,
+                definitionDigest=None,
+                **scenario.receipt.model_dump(),
+            )
+            if scenario.receipt is not None
+            else None
+        )
+
+    @staticmethod
     def _validate_canonical_replay(
         connection: sqlite3.Connection,
         *,
@@ -2917,6 +2954,17 @@ class SQLiteStore:
 
         recovery_id = cast(str, row["id"])
         final_event = scenario.events[-1]
+        try:
+            replay_created_at = datetime.fromisoformat(
+                cast(str, row["created_at"]).replace("Z", "+00:00")
+            )
+            replay_updated_at = datetime.fromisoformat(
+                cast(str, row["updated_at"]).replace("Z", "+00:00")
+            )
+        except (TypeError, ValueError):
+            raise ReplayIntegrityError(
+                "Canonical replay timestamps are malformed"
+            ) from None
         provenance_values = (
             json.loads(cast(str, row["model_ids_json"])),
             row["root_trace_id"],
@@ -2933,12 +2981,17 @@ class SQLiteStore:
             or cast(int, row["current_step"]) != final_event.current_step
             or cast(str, row["current_step_summary"]) != final_event.summary
             or provenance_values != ([], None, 0, None, None, None, None)
+            or replay_created_at.tzinfo is None
+            or replay_created_at.utcoffset() != timedelta(0)
+            or replay_updated_at.tzinfo is None
+            or replay_updated_at.utcoffset() != timedelta(0)
+            or replay_created_at != replay_updated_at
         ):
             raise ReplayIntegrityError("Canonical replay snapshot does not match its definition")
 
         stored_events = connection.execute(
             """
-            SELECT seq, type, terminal, data_json
+            SELECT seq, type, terminal, data_json, created_at
             FROM events
             WHERE recovery_id = ?
             ORDER BY seq ASC
@@ -2966,21 +3019,69 @@ class SQLiteStore:
             )
             for event in stored_events
         ]
-        if actual_events != expected_events:
+        try:
+            event_created_at = [
+                datetime.fromisoformat(
+                    cast(str, event["created_at"]).replace("Z", "+00:00")
+                )
+                for event in stored_events
+            ]
+        except (TypeError, ValueError):
+            raise ReplayIntegrityError(
+                "Canonical replay event timestamps are malformed"
+            ) from None
+        if (
+            actual_events != expected_events
+            or any(
+                created_at.tzinfo is None
+                or created_at.utcoffset() != timedelta(0)
+                or created_at != replay_updated_at
+                for created_at in event_created_at
+            )
+        ):
             raise ReplayIntegrityError("Canonical replay event set is incomplete or changed")
 
         receipt_row = connection.execute(
-            "SELECT receipt_json FROM receipts WHERE recovery_id = ?", (recovery_id,)
+            """
+            SELECT receipt_json, created_at
+            FROM receipts
+            WHERE recovery_id = ?
+            """,
+            (recovery_id,),
         ).fetchone()
         if receipt is None:
             if receipt_row is not None:
                 raise ReplayIntegrityError("Canonical replay has an unexpected receipt")
-        elif (
-            receipt_row is None
-            or RecoveryReceipt.model_validate_json(cast(str, receipt_row["receipt_json"]))
-            != receipt
-        ):
-            raise ReplayIntegrityError("Canonical replay receipt is incomplete or changed")
+        else:
+            try:
+                receipt_created_at = (
+                    datetime.fromisoformat(
+                        cast(str, receipt_row["created_at"]).replace("Z", "+00:00")
+                    )
+                    if receipt_row is not None
+                    else None
+                )
+                stored_receipt = (
+                    RecoveryReceipt.model_validate_json(
+                        cast(str, receipt_row["receipt_json"])
+                    )
+                    if receipt_row is not None
+                    else None
+                )
+            except (TypeError, ValueError):
+                raise ReplayIntegrityError(
+                    "Canonical replay receipt is malformed"
+                ) from None
+            if (
+                stored_receipt != receipt
+                or receipt_created_at is None
+                or receipt_created_at.tzinfo is None
+                or receipt_created_at.utcoffset() != timedelta(0)
+                or receipt_created_at != replay_updated_at
+            ):
+                raise ReplayIntegrityError(
+                    "Canonical replay receipt is incomplete or changed"
+                )
 
     def record_transition(
         self,
@@ -3211,6 +3312,517 @@ class SQLiteStore:
                     (terminal_approval_status, now.isoformat(), recovery_id),
                 )
         return self.get_recovery(recovery_id)
+
+    def _validated_public_event_ledger_in_connection(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        recovery_id: str,
+        scenario_id: ScenarioId,
+        execution_mode: ExecutionMode,
+        recovery_created_at: datetime,
+        recovery_updated_at: datetime,
+    ) -> list[RecoveryEvent]:
+        """Load one complete UTC event chronology for a public evidence read."""
+
+        event_rows = connection.execute(
+            """
+            SELECT recovery_id, seq, type, terminal, data_json, created_at
+            FROM events
+            WHERE recovery_id = ?
+            ORDER BY seq ASC
+            """,
+            (recovery_id,),
+        ).fetchall()
+        try:
+            events = [self._event_from_row(event_row) for event_row in event_rows]
+        except (TypeError, ValueError):
+            raise PublicEvidenceIntegrityError(
+                "Recovery event ledger is malformed"
+            ) from None
+        expected_created_payload: dict[str, JsonValue] = {
+            "scenarioId": scenario_id.value,
+            "executionMode": execution_mode.value,
+            "summary": "Recovery created for the selected execution mode.",
+        }
+        if (
+            not events
+            or events[0].seq != 1
+            or events[0].type != "recovery.created"
+            or events[0].terminal
+            or events[0].data != expected_created_payload
+            or events[0].created_at != recovery_created_at
+        ):
+            raise PublicEvidenceIntegrityError(
+                "Recovery creation event does not match its snapshot"
+            )
+
+        previous_created_at = recovery_created_at
+        for expected_sequence, event in enumerate(events, start=1):
+            if (
+                event.recovery_id != recovery_id
+                or event.seq != expected_sequence
+                or event.created_at.tzinfo is None
+                or event.created_at.utcoffset() != timedelta(0)
+                or event.created_at < previous_created_at
+                or event.created_at > recovery_updated_at
+            ):
+                raise PublicEvidenceIntegrityError(
+                    "Recovery event chronology does not match its snapshot"
+                )
+            previous_created_at = event.created_at
+        return events
+
+    def _validate_public_evidence_in_connection(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        row: sqlite3.Row,
+        replay_scenarios: Mapping[ScenarioId, ReplayScenarioDefinition],
+    ) -> RecoveryReceipt | None:
+        """Validate one public snapshot, terminal event, and receipt as a bundle."""
+
+        recovery_id = cast(str, row["id"])
+        try:
+            scenario_id = ScenarioId(cast(str, row["scenario_id"]))
+            execution_mode = ExecutionMode(cast(str, row["execution_mode"]))
+            recovery_status = RecoveryStatus(cast(str, row["status"]))
+            provenance = self._provenance_from_row(row)
+            recovery_created_at = datetime.fromisoformat(
+                cast(str, row["created_at"]).replace("Z", "+00:00")
+            )
+            recovery_updated_at = datetime.fromisoformat(
+                cast(str, row["updated_at"]).replace("Z", "+00:00")
+            )
+        except (TypeError, ValueError):
+            raise PublicEvidenceIntegrityError(
+                "Recovery provenance is invalid"
+            ) from None
+        if (
+            recovery_created_at.tzinfo is None
+            or recovery_created_at.utcoffset() != timedelta(0)
+            or recovery_updated_at.tzinfo is None
+            or recovery_updated_at.utcoffset() != timedelta(0)
+            or recovery_created_at > recovery_updated_at
+        ):
+            raise PublicEvidenceIntegrityError(
+                "Recovery timestamps are invalid"
+            )
+        events = self._validated_public_event_ledger_in_connection(
+            connection,
+            recovery_id=recovery_id,
+            scenario_id=scenario_id,
+            execution_mode=execution_mode,
+            recovery_created_at=recovery_created_at,
+            recovery_updated_at=recovery_updated_at,
+        )
+
+        if execution_mode is ExecutionMode.REPLAY_FIXTURE:
+            scenario = replay_scenarios.get(scenario_id)
+            if scenario is None:
+                raise PublicEvidenceIntegrityError(
+                    "Replay scenario definition is unavailable"
+                )
+            try:
+                self._validate_canonical_replay(
+                    connection,
+                    row=row,
+                    scenario=scenario,
+                    created_payload=self._canonical_replay_created_payload(scenario),
+                    receipt=self._canonical_replay_receipt(
+                        recovery_id=recovery_id,
+                        scenario=scenario,
+                    ),
+                )
+            except (ReplayIntegrityError, TypeError, ValueError):
+                raise PublicEvidenceIntegrityError(
+                    "Canonical replay evidence is invalid"
+                ) from None
+
+        receipt_row = connection.execute(
+            """
+            SELECT receipt_json, created_at
+            FROM receipts
+            WHERE recovery_id = ?
+            """,
+            (recovery_id,),
+        ).fetchone()
+        terminal_events = [event for event in events if event.terminal]
+
+        if not recovery_status.terminal:
+            if receipt_row is not None or terminal_events:
+                raise PublicEvidenceIntegrityError(
+                    "Nonterminal recovery has terminal evidence"
+                )
+            return None
+
+        if (
+            cast(int, row["current_step"]) != 5
+            or receipt_row is None
+            or len(terminal_events) != 1
+            or terminal_events[0].seq != events[-1].seq
+        ):
+            raise PublicEvidenceIntegrityError(
+                "Terminal recovery evidence is incomplete or ambiguous"
+            )
+
+        try:
+            receipt = RecoveryReceipt.model_validate_json(
+                cast(str, receipt_row["receipt_json"])
+            )
+            terminal_event = terminal_events[0]
+            receipt_created_at = datetime.fromisoformat(
+                cast(str, receipt_row["created_at"]).replace("Z", "+00:00")
+            )
+            event_created_at = terminal_event.created_at
+        except (TypeError, ValueError):
+            raise PublicEvidenceIntegrityError(
+                "Terminal recovery evidence is malformed"
+            ) from None
+
+        expected_receipt_status = (
+            "simulated_completed"
+            if execution_mode is ExecutionMode.REPLAY_FIXTURE
+            and recovery_status is RecoveryStatus.COMPLETED
+            else recovery_status.value
+        )
+        if (
+            receipt.recovery_id != recovery_id
+            or receipt.execution_mode is not execution_mode
+            or receipt.status != expected_receipt_status
+            or receipt.model_call != provenance.model_call
+            or tuple(receipt.model_ids) != provenance.model_ids
+            or receipt.root_trace_id != provenance.root_trace_id
+            or receipt.sdk_version != provenance.sdk_version
+            or receipt.protocol_version != provenance.protocol_version
+            or receipt.agent_graph_version != provenance.agent_graph_version
+            or receipt.definition_digest != provenance.definition_digest
+            or terminal_event.recovery_id != recovery_id
+            or not terminal_event.terminal
+            or receipt_created_at.tzinfo is None
+            or receipt_created_at.utcoffset() != timedelta(0)
+            or event_created_at.tzinfo is None
+            or event_created_at.utcoffset() != timedelta(0)
+            or recovery_updated_at != receipt_created_at
+            or receipt_created_at != event_created_at
+        ):
+            raise PublicEvidenceIntegrityError(
+                "Terminal recovery provenance does not match"
+            )
+
+        event_data = terminal_event.data
+        if (
+            ("recoveryId" in event_data and event_data["recoveryId"] != recovery_id)
+            or (
+                "executionMode" in event_data
+                and event_data["executionMode"] != execution_mode.value
+            )
+            or (
+                "providerExecution" in event_data
+                and event_data["providerExecution"] is not receipt.provider_execution
+            )
+            or ("phase" in event_data and event_data["phase"] != "Verify & seal")
+        ):
+            raise PublicEvidenceIntegrityError(
+                "Terminal event provenance does not match"
+            )
+
+        if scenario_id is ScenarioId.API_QUOTA:
+            if (
+                recovery_status is not RecoveryStatus.COMPLETED
+                or execution_mode is ExecutionMode.OPENAI_LIVE
+                or receipt.approval_count != 0
+                or receipt.approved_remedy_digest is not None
+                or terminal_event.type != "quota.receipt_sealed"
+            ):
+                raise PublicEvidenceIntegrityError(
+                    "Quota terminal evidence does not match its scenario"
+                )
+            if execution_mode is ExecutionMode.SDK_STUB:
+                expected_quota_event: dict[str, JsonValue] = {
+                    "phase": "Verify & seal",
+                    "approvalCount": 0,
+                    "providerExecution": True,
+                    "executionVerified": True,
+                    "permissionRevoked": True,
+                    "restoredCeilingUnits": 1000,
+                    "summary": "Verified quota recovery evidence sealed.",
+                }
+                if (
+                    cast(str, row["current_step_summary"])
+                    != (
+                        "Execution verified, temporary permission revoked, "
+                        "and receipt sealed."
+                    )
+                    or not receipt.has_canonical_quota_evidence
+                    or terminal_event.data != expected_quota_event
+                ):
+                    raise PublicEvidenceIntegrityError(
+                        "SDK quota terminal evidence is not canonical"
+                    )
+            return receipt
+
+        if execution_mode is ExecutionMode.REPLAY_FIXTURE:
+            raise PublicEvidenceIntegrityError(
+                "Replay hotel recovery cannot be terminal"
+            )
+        allowed_hotel_event_types = {
+            RecoveryStatus.COMPLETED: {"recovery.completed"},
+            RecoveryStatus.CLOSED_WITHOUT_ACTION: {
+                "recovery.closed_without_action",
+                "recovery.expired",
+                "recovery.claim_expired",
+            },
+            RecoveryStatus.OUTCOME_UNKNOWN: {
+                "recovery.outcome_unknown",
+                "recovery.claim_expired",
+            },
+        }
+        if (
+            terminal_event.type not in allowed_hotel_event_types[recovery_status]
+            or (
+                recovery_status is RecoveryStatus.COMPLETED
+                and receipt.approval_count != 1
+            )
+        ):
+            raise PublicEvidenceIntegrityError(
+                "Hotel terminal evidence does not match its outcome"
+            )
+
+        decision_row = connection.execute(
+            "SELECT * FROM approval_decisions WHERE recovery_id = ?",
+            (recovery_id,),
+        ).fetchone()
+        if decision_row is not None:
+            try:
+                claim = self._verified_decision_claim_from_row(
+                    decision_row,
+                    recovery_id=recovery_id,
+                )
+            except (ApprovalDecisionError, TypeError, ValueError):
+                raise PublicEvidenceIntegrityError(
+                    "Terminal decision evidence is invalid"
+                ) from None
+            if terminal_event.type == "recovery.claim_expired":
+                valid_decision_evidence = self._recovery_has_expiration_evidence(
+                    connection,
+                    recovery_id,
+                )
+            elif claim.response is None:
+                valid_decision_evidence = (
+                    terminal_event.type == "recovery.completed"
+                    and self._reconcilable_completed_claim(
+                        connection,
+                        recovery_id=recovery_id,
+                        decision_row=decision_row,
+                    )
+                    is not None
+                )
+            else:
+                valid_decision_evidence = (
+                    self._completed_decision_has_terminal_evidence(
+                        connection,
+                        recovery_id=recovery_id,
+                        decision_row=decision_row,
+                        claim=claim,
+                    )
+                )
+            if not valid_decision_evidence:
+                raise PublicEvidenceIntegrityError(
+                    "Terminal decision evidence does not match"
+                )
+            return receipt
+
+        if terminal_event.type == "recovery.expired":
+            if not self._recovery_has_expiration_evidence(connection, recovery_id):
+                raise PublicEvidenceIntegrityError(
+                    "Expiration evidence does not match"
+                )
+            return receipt
+
+        raise PublicEvidenceIntegrityError(
+            "Terminal recovery has no authoritative evidence source"
+        )
+
+    def _expire_targeted_approval_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        recovery_id: str,
+        now: datetime,
+    ) -> int:
+        """Seal at most one authorized target without leaving the transaction."""
+
+        claimed_count = self._expire_claimed_decisions_in_transaction(
+            now=now,
+            batch_size=1,
+            recovery_id=recovery_id,
+            connection=connection,
+        )
+        if claimed_count:
+            return claimed_count
+        return self._expire_pending_approvals_in_transaction(
+            now=now,
+            batch_size=1,
+            recovery_id=recovery_id,
+            connection=connection,
+        )
+
+    def _read_public_evidence(
+        self,
+        recovery_id: str,
+        *,
+        session_key: str,
+        replay_scenarios: Mapping[ScenarioId, ReplayScenarioDefinition],
+        after_seq: int | None,
+        seal_expired: bool,
+    ) -> tuple[
+        RecoverySnapshot,
+        RecoveryReceipt | None,
+        list[RecoveryEvent],
+    ]:
+        """Read and validate one public evidence bundle in one SQLite snapshot."""
+
+        self._require_opaque_session_key(session_key)
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE" if seal_expired else "BEGIN")
+            access = connection.execute(
+                """
+                SELECT 1 FROM recovery_access
+                WHERE recovery_id = ? AND session_key = ?
+                """,
+                (recovery_id, session_key),
+            ).fetchone()
+            if access is None:
+                raise RecoveryNotFoundError("Recovery not found")
+            if seal_expired:
+                self._expire_targeted_approval_in_transaction(
+                    connection,
+                    recovery_id=recovery_id,
+                    now=self._now(),
+                )
+            row = connection.execute(
+                "SELECT * FROM recoveries WHERE id = ?",
+                (recovery_id,),
+            ).fetchone()
+            if row is None:
+                raise RecoveryNotFoundError("Recovery not found")
+            is_pending_hotel = (
+                cast(str, row["status"]) == RecoveryStatus.PENDING_APPROVAL.value
+                and cast(str, row["scenario_id"]) == ScenarioId.HOTEL.value
+            )
+            pending_view = (
+                self._public_pending_view(connection, recovery_id)
+                if is_pending_hotel
+                else None
+            )
+            claimed_view = (
+                self._public_claimed_decision_view(connection, recovery_id)
+                if is_pending_hotel
+                else None
+            )
+            receipt = self._validate_public_evidence_in_connection(
+                connection,
+                row=row,
+                replay_scenarios=replay_scenarios,
+            )
+            event_rows = (
+                connection.execute(
+                    """
+                    SELECT recovery_id, seq, type, terminal, data_json, created_at
+                    FROM events
+                    WHERE recovery_id = ? AND seq > ?
+                    ORDER BY seq ASC
+                    """,
+                    (recovery_id, after_seq),
+                ).fetchall()
+                if after_seq is not None
+                else []
+            )
+            snapshot = self._recovery_from_row(
+                row,
+                pending_approval=pending_view,
+                claimed_decision=claimed_view,
+            )
+            events = [self._event_from_row(event_row) for event_row in event_rows]
+            connection.commit()
+        return snapshot, receipt, events
+
+    def get_public_recovery(
+        self,
+        recovery_id: str,
+        *,
+        session_key: str,
+        replay_scenarios: Mapping[ScenarioId, ReplayScenarioDefinition],
+    ) -> RecoverySnapshot:
+        """Return a snapshot only after its public terminal bundle is coherent."""
+
+        snapshot, _receipt, _events = self._read_public_evidence(
+            recovery_id,
+            session_key=session_key,
+            replay_scenarios=replay_scenarios,
+            after_seq=None,
+            seal_expired=True,
+        )
+        return snapshot
+
+    def get_public_receipt(
+        self,
+        recovery_id: str,
+        *,
+        session_key: str,
+        replay_scenarios: Mapping[ScenarioId, ReplayScenarioDefinition],
+    ) -> RecoveryReceipt:
+        """Return a receipt only after its public terminal bundle is coherent."""
+
+        _snapshot, receipt, _events = self._read_public_evidence(
+            recovery_id,
+            session_key=session_key,
+            replay_scenarios=replay_scenarios,
+            after_seq=None,
+            seal_expired=True,
+        )
+        if receipt is None:
+            raise RecoveryNotFoundError("Receipt not found")
+        return receipt
+
+    def read_public_event_batch(
+        self,
+        recovery_id: str,
+        *,
+        after_seq: int = 0,
+        session_key: str,
+        replay_scenarios: Mapping[ScenarioId, ReplayScenarioDefinition],
+    ) -> tuple[list[RecoveryEvent], RecoveryStatus]:
+        """Read an event batch only after validating the same public DB snapshot."""
+
+        snapshot, _receipt, events = self._read_public_evidence(
+            recovery_id,
+            session_key=session_key,
+            replay_scenarios=replay_scenarios,
+            after_seq=after_seq,
+            seal_expired=False,
+        )
+        return events, snapshot.status
+
+    def read_initial_public_event_batch(
+        self,
+        recovery_id: str,
+        *,
+        after_seq: int = 0,
+        session_key: str,
+        replay_scenarios: Mapping[ScenarioId, ReplayScenarioDefinition],
+    ) -> tuple[list[RecoveryEvent], RecoveryStatus]:
+        """Authorize, seal expiry, and validate an initial public event batch."""
+
+        snapshot, _receipt, events = self._read_public_evidence(
+            recovery_id,
+            session_key=session_key,
+            replay_scenarios=replay_scenarios,
+            after_seq=after_seq,
+            seal_expired=True,
+        )
+        return events, snapshot.status
 
     def get_recovery(self, recovery_id: str) -> RecoverySnapshot:
         with self._lock, self._connect() as connection:
@@ -5201,6 +5813,23 @@ class SQLiteStore:
     ) -> int:
         """Atomically seal bounded exact decision claims after consent expiry."""
 
+        return self._expire_claimed_decisions_in_transaction(
+            now=now,
+            batch_size=batch_size,
+            recovery_id=recovery_id,
+            connection=None,
+        )
+
+    def _expire_claimed_decisions_in_transaction(
+        self,
+        *,
+        now: datetime,
+        batch_size: int,
+        recovery_id: str | None = None,
+        connection: sqlite3.Connection | None,
+    ) -> int:
+        """Seal decision claims in an existing or newly owned transaction."""
+
         if now.tzinfo is None or now.utcoffset() != timedelta(0):
             raise ValueError("now must be timezone-aware UTC")
         if not 1 <= batch_size <= MAX_STORE_EXPIRY_BATCH_SIZE:
@@ -5218,9 +5847,8 @@ class SQLiteStore:
         now_text = now.isoformat()
         expired_count = 0
 
-        with self._lock, self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            rows = connection.execute(
+        with self._expiry_transaction(connection) as active_connection:
+            rows = active_connection.execute(
                 f"""
                 SELECT recoveries.id, remedies.expiry AS remedy_expiry
                 FROM recoveries
@@ -5272,7 +5900,7 @@ class SQLiteStore:
                         or expiry > now
                     ):
                         continue
-                    decision_rows = connection.execute(
+                    decision_rows = active_connection.execute(
                         "SELECT * FROM approval_decisions WHERE recovery_id = ?",
                         (target_id,),
                     ).fetchall()
@@ -5284,7 +5912,7 @@ class SQLiteStore:
                         recovery_id=target_id,
                     )
                     recovery, pending, consent = self._require_claim_evidence(
-                        connection,
+                        active_connection,
                         target_id,
                         claim.request,
                     )
@@ -5301,7 +5929,7 @@ class SQLiteStore:
                     ):
                         continue
                     provenance = self._provenance_from_row(recovery)
-                    execution_rows = connection.execute(
+                    execution_rows = active_connection.execute(
                         "SELECT * FROM executions WHERE recovery_id = ?",
                         (target_id,),
                     ).fetchall()
@@ -5342,7 +5970,7 @@ class SQLiteStore:
 
                 next_sequence = cast(
                     int,
-                    connection.execute(
+                    active_connection.execute(
                         """
                         SELECT COALESCE(MAX(seq), 0) + 1
                         FROM events WHERE recovery_id = ?
@@ -5350,7 +5978,7 @@ class SQLiteStore:
                         (target_id,),
                     ).fetchone()[0],
                 )
-                connection.execute(
+                active_connection.execute(
                     """
                     INSERT INTO receipts (recovery_id, receipt_json, created_at)
                     VALUES (?, ?, ?)
@@ -5361,7 +5989,7 @@ class SQLiteStore:
                         now_text,
                     ),
                 )
-                connection.execute(
+                active_connection.execute(
                     """
                     INSERT INTO events (
                         recovery_id, seq, type, terminal, data_json, created_at
@@ -5378,7 +6006,7 @@ class SQLiteStore:
                         now_text,
                     ),
                 )
-                recovery_cursor = connection.execute(
+                recovery_cursor = active_connection.execute(
                     """
                     UPDATE recoveries
                     SET status = ?, current_step = 5,
@@ -5387,7 +6015,7 @@ class SQLiteStore:
                     """,
                     (terminal_status, summary, now_text, target_id),
                 )
-                pending_cursor = connection.execute(
+                pending_cursor = active_connection.execute(
                     """
                     UPDATE pending_approvals
                     SET status = ?, updated_at = ?
@@ -5400,7 +6028,7 @@ class SQLiteStore:
                         pending.status,
                     ),
                 )
-                remedy_cursor = connection.execute(
+                remedy_cursor = active_connection.execute(
                     """
                     UPDATE remedies
                     SET status = ?
@@ -5420,7 +6048,7 @@ class SQLiteStore:
                     raise ReceiptTransitionError(
                         "Claim expiry state changed during terminal transition"
                     )
-                connection.execute(
+                active_connection.execute(
                     """
                     UPDATE live_admissions
                     SET released_at = COALESCE(released_at, ?)
@@ -5441,6 +6069,23 @@ class SQLiteStore:
     ) -> int:
         """Atomically seal bounded, untouched consent windows that have expired."""
 
+        return self._expire_pending_approvals_in_transaction(
+            now=now,
+            batch_size=batch_size,
+            recovery_id=recovery_id,
+            connection=None,
+        )
+
+    def _expire_pending_approvals_in_transaction(
+        self,
+        *,
+        now: datetime,
+        batch_size: int,
+        recovery_id: str | None = None,
+        connection: sqlite3.Connection | None,
+    ) -> int:
+        """Seal untouched approvals in an existing or newly owned transaction."""
+
         if now.tzinfo is None or now.utcoffset() != timedelta(0):
             raise ValueError("now must be timezone-aware UTC")
         if not 1 <= batch_size <= MAX_STORE_EXPIRY_BATCH_SIZE:
@@ -5456,9 +6101,8 @@ class SQLiteStore:
         now_text = now.isoformat()
         expired_count = 0
 
-        with self._lock, self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            rows = connection.execute(
+        with self._expiry_transaction(connection) as active_connection:
+            rows = active_connection.execute(
                 f"""
                 SELECT recoveries.*, remedies.expiry AS remedy_expiry
                 FROM recoveries
@@ -5549,7 +6193,7 @@ class SQLiteStore:
                 }
                 next_sequence = cast(
                     int,
-                    connection.execute(
+                    active_connection.execute(
                         """
                         SELECT COALESCE(MAX(seq), 0) + 1
                         FROM events WHERE recovery_id = ?
@@ -5557,7 +6201,7 @@ class SQLiteStore:
                         (target_id,),
                     ).fetchone()[0],
                 )
-                connection.execute(
+                active_connection.execute(
                     """
                     INSERT INTO receipts (recovery_id, receipt_json, created_at)
                     VALUES (?, ?, ?)
@@ -5568,7 +6212,7 @@ class SQLiteStore:
                         now_text,
                     ),
                 )
-                connection.execute(
+                active_connection.execute(
                     """
                     INSERT INTO events (
                         recovery_id, seq, type, terminal, data_json, created_at
@@ -5585,7 +6229,7 @@ class SQLiteStore:
                         now_text,
                     ),
                 )
-                connection.execute(
+                active_connection.execute(
                     """
                     UPDATE recoveries
                     SET status = 'closed_without_action', current_step = 5,
@@ -5594,7 +6238,7 @@ class SQLiteStore:
                     """,
                     (EXPIRATION_SUMMARY, now_text, target_id),
                 )
-                connection.execute(
+                active_connection.execute(
                     """
                     UPDATE pending_approvals
                     SET status = 'expired', updated_at = ?
@@ -5602,11 +6246,11 @@ class SQLiteStore:
                     """,
                     (now_text, target_id),
                 )
-                connection.execute(
+                active_connection.execute(
                     "UPDATE remedies SET status = 'expired' WHERE recovery_id = ?",
                     (target_id,),
                 )
-                connection.execute(
+                active_connection.execute(
                     """
                     UPDATE live_admissions
                     SET released_at = COALESCE(released_at, ?)

@@ -195,14 +195,33 @@ without capacity acquisition or redispatch. Exact later decision/resume attempts
 
 Untouched SDK/live hotel consent is also durable lifecycle state. A bounded SQLite
 `BEGIN IMMEDIATE` sweep runs at startup, on the existing maintenance cadence, and before new
-recovery cleanup. Authorized snapshot, receipt, and decision requests sweep their exact target
-after the session-access check; initial SSE does so after both access and cursor validation.
-Expiry and decision claims therefore serialize as competing writers: an expiration that commits
-first prevents a later claim, while a claim that commits first owns continuation only until its
-consent deadline or a canonical completed result. Untouched expiry seals one `recovery.expired`
-event; claimed expiry seals one `recovery.claim_expired` event with its conservative terminal
-receipt. Both mark the pending envelope and remedy terminal and release the matching live
-admission with `COALESCE` so cooldown and aggregate usage evidence remain intact.
+recovery cleanup. Public snapshot and receipt reads use one writer transaction to authorize the
+opaque session before sweeping that exact target, then load and validate the resulting snapshot,
+receipt, and event ledger before commit. Initial SSE uses the same transaction after the outer
+access and cursor checks and acquires its process-local stream lease only after validation.
+Subsequent SSE polls use read-only snapshots and repeat access plus evidence validation without
+taking a writer lock. A stale outer access result can therefore neither mutate another session's
+recovery nor inspect its integrity; validation failure rolls back a just-sealed expiry. Decision
+requests retain their exact targeted sweep before claim handling.
+
+Terminal public evidence requires one receipt and exactly one final terminal event, with exact
+recovery, mode, status, model/trace/version provenance, scenario semantics, and one shared
+timezone-aware UTC seal across the recovery update, receipt, and terminal event. Every dynamic
+ledger must start with the exact seq-1 `recovery.created` event at the snapshot creation time;
+sequences are contiguous and event timestamps are UTC, nondecreasing, and no later than the
+snapshot update. Canonical replay is stricter because it is written atomically: recovery
+creation/update, every replay event, and its optional receipt must share that same seal time.
+Nonterminal rows may have no terminal evidence. These checks are public-read fences; raw store
+readers remain available for internal reconciliation and migration paths. Owner-side
+disagreement fails through the generic sanitized 500 boundary, while unauthorized and absent
+reads remain the same 404.
+
+Expiry and decision claims serialize as competing writers: an expiration that commits first
+prevents a later claim, while a claim that commits first owns continuation only until its consent
+deadline or a canonical completed result. Untouched expiry seals one `recovery.expired` event;
+claimed expiry seals one `recovery.claim_expired` event with its conservative terminal receipt.
+Both mark the pending envelope and remedy terminal and release the matching live admission with
+`COALESCE` so cooldown and aggregate usage evidence remain intact.
 
 ## Runtime provenance and trust boundary
 
