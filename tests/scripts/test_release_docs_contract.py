@@ -37,7 +37,7 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     )
 
     assert manifest["sourceCommit"] in current_evidence
-    assert "576ba5e3dfd3d13b9f797c1c516c2352c4e40688" in current_evidence
+    assert "4a317e563c8d45bc45f676e465b01780b2b0be78" in current_evidence
     assert runtime_input["digest"] in current_evidence
     assert f"{len(runtime_input['paths'])} runtime paths" in current_evidence
     assert f"{browser['name']} {browser['version']}" in current_evidence
@@ -54,35 +54,56 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     }:
         assert f"{width}×{height}" in current_evidence
 
-    for evidence_id in ("30162644778", "89690352979", "89690513333"):
-        assert evidence_id in current_evidence
-    assert "Both jobs passed with empty annotations" in current_evidence
-    for count in (
-        "29 capture contracts",
+    assert "`npm run capture:judge` reported `29 passed`" in current_evidence
+    assert (
+        "`uv run pytest -q tests/domain/test_cleanup.py` reported `15 passed`"
+        in current_evidence
+    )
+    assert (
+        "No Task25 hosted GitHub Actions run or job is recorded or verified"
+        in current_evidence
+    )
+    for unobserved_current_count in (
         "292 web tests",
         "534 Python tests",
         "strict MyPy over 34 source files",
     ):
-        assert count in current_evidence
+        assert unobserved_current_count not in current_evidence
 
-    historical_activation = "b57868005a3fe0869136f54472ee0098035a9099"
-    historical_run = "30140554792"
-    historical_jobs = ("89632837699", "89633002245")
+    prior_capture = "7d9128a8171ddb4978d8f7b0debb9effce997e27"
+    prior_activation = "576ba5e3dfd3d13b9f797c1c516c2352c4e40688"
+    prior_run = "30162644778"
+    prior_jobs = ("89690352979", "89690513333")
+    older_activation = "b57868005a3fe0869136f54472ee0098035a9099"
+    older_run = "30140554792"
+    older_jobs = ("89632837699", "89633002245")
     for historical_identifier in (
         "85e1e8ec9147242adca311c4ba10ea8c1c3008dc",
         "85e1e8e…",
-        historical_activation,
+        prior_capture,
+        "7d9128a…",
+        prior_activation,
+        "576ba5e…",
+        prior_run,
+        *prior_jobs,
+        older_activation,
         "b578680…",
-        historical_run,
-        *historical_jobs,
+        older_run,
+        *older_jobs,
     ):
         assert historical_identifier not in current_evidence
-    for intended_historical_identifier in (
-        historical_activation,
-        historical_run,
-        *historical_jobs,
+    for required_historical_identifier in (
+        prior_capture,
+        "7d9128a…",
+        prior_activation,
+        "576ba5e…",
+        prior_run,
+        *prior_jobs,
+        older_activation,
+        older_run,
+        *older_jobs,
     ):
-        assert intended_historical_identifier in historical_evidence
+        assert required_historical_identifier in historical_evidence
     for obsolete in (
         "85e1e8ec9147242adca311c4ba10ea8c1c3008dc",
         "eeb6b87ce35ad04cb4c53d048c39fcbc8caf33bb62e142526e0f9aba544afb30",
@@ -96,6 +117,13 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     (
         "85e1e8ec9147242adca311c4ba10ea8c1c3008dc",
         "85e1e8e…",
+        "7d9128a8171ddb4978d8f7b0debb9effce997e27",
+        "7d9128a…",
+        "576ba5e3dfd3d13b9f797c1c516c2352c4e40688",
+        "576ba5e…",
+        "30162644778",
+        "89690352979",
+        "89690513333",
         "b57868005a3fe0869136f54472ee0098035a9099",
         "b578680…",
         "30140554792",
@@ -309,26 +337,14 @@ def test_release_docs_cover_architecture_protocol_and_evidence_boundaries() -> N
     assert "`codex/backchannel-v0.3`" in validation
     assert "## Current capture and evidence activation" in validation
     assert "## Superseded historical hosted baseline" in validation
-    assert (
-        "- Local exact-tree pre-activation gate covered 29 capture contracts, offline\n"
-        "  manifest verification, 292 web tests, 534 Python tests, Vite build, Ruff,\n"
-        "  strict MyPy over 34 source files, stub smoke, local one-process\n"
-        "  production/SSE/SIGTERM smoke, OpenAPI freshness, history-aware secret scan,\n"
-        "  Node syntax, and diff checks.\n"
-    ) in validation
-    assert (
-        "- Hosted exact-activation `verify` covered the canonical `npm run check`,\n"
-        "  deterministic stub smoke, OpenAPI artifact verification, and the\n"
-        "  history-aware secret scan; `container-smoke` separately covered the\n"
-        "  packaged image build, non-root identity, and two offline packaged smoke\n"
-        "  profiles.\n"
-    ) in validation
+    assert "### Prior capture and hosted baseline (superseded)" in validation
+    assert "### Older hosted baseline (superseded)" in validation
     assert (
         "Local exact-tree gate before activation and the hosted canonical gate covered"
         not in validation
     )
     assert "[`docs/assets/final/manifest.json`](assets/final/manifest.json)" in validation
-    assert "CI did not execute the browser capture" in validation
+    assert "does not claim that CI executed the browser capture" in validation
     assert "1440×1024" in validation
     assert "390×844" in validation
     for lane in (
