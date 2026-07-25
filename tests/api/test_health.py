@@ -21,6 +21,9 @@ def test_health_without_key_reports_truthful_stub_boundary(monkeypatch) -> None:
     assert body["liveReady"] is False
     assert body["sdkStubReady"] is True
     assert body["providerBoundary"] == "demo_adapter_only"
+    assert response.headers["cache-control"] == "no-store"
+    assert "set-cookie" not in response.headers
+    assert response.headers.get("vary", "").lower() != "cookie"
     assert "key" not in json.dumps(body).lower()
 
 

@@ -400,6 +400,7 @@ export async function getHealth(signal?: AbortSignal): Promise<HealthStatus> {
     headers: { Accept: "application/json" },
     credentials: "same-origin",
     signal,
+    cache: "no-store",
   });
 
   if (!response.ok) {

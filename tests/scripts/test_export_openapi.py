@@ -155,6 +155,20 @@ def test_generated_schema_matches_the_implemented_public_http_contract() -> None
         "$ref": "#/components/schemas/PublicErrorResponse"
     }
     creation_responses = paths["/api/recoveries"]["post"]["responses"]
+    operational_cache_control_header = {
+        "description": (
+            "Prevents storage of mutable public operational status in shared or "
+            "persistent caches."
+        ),
+        "schema": {
+            "enum": ["no-store"],
+            "type": "string",
+        },
+    }
+    for path in ("/health", "/readyz"):
+        assert paths[path]["get"]["responses"]["200"]["headers"] == {
+            "Cache-Control": operational_cache_control_header
+        }
     cache_control_header = {
         "description": (
             "Prevents storage of owner-scoped recovery data in shared or persistent "

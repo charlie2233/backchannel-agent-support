@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from http.cookies import SimpleCookie
 from threading import Barrier
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -123,6 +124,77 @@ def _live_settings(**overrides: object) -> RuntimeSettings:
     }
     values.update(overrides)
     return RuntimeSettings(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("route_path", ["/health", "/readyz"])
+def test_boundary_replaces_duplicate_cache_control_for_resolved_operational_routes(
+    route_path: str,
+) -> None:
+    sent: list[dict[str, object]] = []
+
+    async def downstream(scope, receive, send) -> None:
+        del receive
+        scope["route"] = SimpleNamespace(path=route_path)
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [
+                    (b"Cache-Control", b"max-age=3600"),
+                    (b"cAcHe-CoNtRoL", b"private"),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": b"{}"})
+
+    middleware = PublicBoundaryMiddleware(
+        downstream,
+        max_body_bytes=64,
+        identity_hasher=PublicIdentityHasher(
+            "test-identity-secret-that-is-at-least-32-bytes"
+        ),
+        session_ttl_seconds=3600,
+        trusted_proxy_cidrs=(),
+        deployed=False,
+    )
+    request_messages = [{"type": "http.request", "body": b"", "more_body": False}]
+
+    async def receive() -> dict[str, object]:
+        if request_messages:
+            return request_messages.pop(0)
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/not-the-resolved-route",
+        "raw_path": b"/not-the-resolved-route",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [],
+        "client": ("127.0.0.1", 43123),
+        "server": ("testserver", 80),
+        "state": {},
+    }
+
+    asyncio.run(middleware(scope, receive, send))  # type: ignore[arg-type]
+
+    response_start = next(
+        message for message in sent if message["type"] == "http.response.start"
+    )
+    headers = response_start["headers"]  # type: ignore[assignment]
+    cache_control = [
+        (name, value)
+        for name, value in headers  # type: ignore[union-attr]
+        if name.lower() == b"cache-control"
+    ]
+    assert cache_control == [(b"cache-control", b"no-store")]
 
 
 def test_raw_boundary_accepts_exact_multibyte_byte_limit_without_content_length() -> None:

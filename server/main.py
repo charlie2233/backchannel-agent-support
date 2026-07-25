@@ -22,6 +22,7 @@ from server.agents.live_models import (
 from server.cleanup import RecoveryCleanupService
 from server.config import RuntimeSettings
 from server.controls import (
+    OPERATIONAL_STATUS_SUCCESS_CACHE_CONTROL,
     OWNER_SCOPED_SUCCESS_CACHE_CONTROL,
     LiveConcurrencyGate,
     LiveConcurrencyLimitError,
@@ -86,6 +87,24 @@ def _owner_scoped_success_response(description: str) -> dict[str, Any]:
                 "schema": {
                     "type": "string",
                     "enum": [OWNER_SCOPED_SUCCESS_CACHE_CONTROL],
+                },
+            }
+        },
+    }
+
+
+def _operational_status_success_response(description: str) -> dict[str, Any]:
+    return {
+        "description": description,
+        "headers": {
+            "Cache-Control": {
+                "description": (
+                    "Prevents storage of mutable public operational status in shared or "
+                    "persistent caches."
+                ),
+                "schema": {
+                    "type": "string",
+                    "enum": [OPERATIONAL_STATUS_SUCCESS_CACHE_CONTROL],
                 },
             }
         },
@@ -348,7 +367,15 @@ def create_app(
             code="internal_error",
         )
 
-    @application.get("/health", response_model=HealthResponse)
+    @application.get(
+        "/health",
+        response_model=HealthResponse,
+        responses={
+            200: _operational_status_success_response(
+                "Current public runtime capability status."
+            )
+        },
+    )
     def health() -> HealthResponse:
         backend = (
             RuntimeBackend.OPENAI if runtime_settings.live_ready else RuntimeBackend.STUB
@@ -360,7 +387,15 @@ def create_app(
             providerBoundary=ProviderBoundary.DEMO_ADAPTER_ONLY,
         )
 
-    @application.get("/readyz", response_model=ReadinessResponse)
+    @application.get(
+        "/readyz",
+        response_model=ReadinessResponse,
+        responses={
+            200: _operational_status_success_response(
+                "Current public service readiness status."
+            )
+        },
+    )
     def ready() -> ReadinessResponse:
         if not recovery_store.is_ready() or (
             (runtime_settings.deployed or frontend_bundle is not None)

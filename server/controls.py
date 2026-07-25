@@ -25,6 +25,7 @@ from server.logging import log_public_event
 DEMO_SESSION_COOKIE = "backchannel_demo_session"
 HASH_PREFIX = "hmac-sha256:"
 OWNER_SCOPED_SUCCESS_CACHE_CONTROL = "private, no-store"
+OPERATIONAL_STATUS_SUCCESS_CACHE_CONTROL = "no-store"
 PublicErrorCode = Literal[
     "invalid_request",
     "method_not_allowed",
@@ -468,6 +469,12 @@ class PublicBoundaryMiddleware:
             ("GET", "/api/recoveries/{recovery_id}/receipt"),
         }
     )
+    _OPERATIONAL_STATUS_SUCCESS_ROUTES = frozenset(
+        {
+            ("GET", "/health"),
+            ("GET", "/readyz"),
+        }
+    )
 
     def __init__(
         self,
@@ -562,6 +569,20 @@ class PublicBoundaryMiddleware:
         if not isinstance(route_path, str):
             return False
         return (scope.get("method"), route_path) in cls._OWNER_SCOPED_SUCCESS_ROUTES
+
+    @classmethod
+    def _success_cache_control(cls, scope: Scope, status_code: int) -> str | None:
+        if cls._is_owner_scoped_success(scope, status_code):
+            return OWNER_SCOPED_SUCCESS_CACHE_CONTROL
+        if not 200 <= status_code < 300:
+            return None
+        route = scope.get("route")
+        route_path = getattr(route, "path", None)
+        if not isinstance(route_path, str):
+            return None
+        if (scope.get("method"), route_path) in cls._OPERATIONAL_STATUS_SUCCESS_ROUTES:
+            return OPERATIONAL_STATUS_SUCCESS_CACHE_CONTROL
+        return None
 
     async def _send_error(
         self,
@@ -893,21 +914,22 @@ class PublicBoundaryMiddleware:
             if message["type"] == "http.response.start":
                 response_started = True
                 canonical_names = {key for key, _value in security_headers}
-                owner_scoped_success = self._is_owner_scoped_success(
-                    scope, message["status"]
-                )
+                success_cache_control = self._success_cache_control(scope, message["status"])
                 downstream_headers = [
                     (key, value)
                     for key, value in message.get("headers", ())
                     if key.lower() not in canonical_names
-                    and not (owner_scoped_success and key.lower() == b"cache-control")
+                    and not (
+                        success_cache_control is not None
+                        and key.lower() == b"cache-control"
+                    )
                 ]
                 cache_control_headers: tuple[tuple[bytes, bytes], ...] = ()
-                if owner_scoped_success:
+                if success_cache_control is not None:
                     cache_control_headers = (
                         (
                             b"cache-control",
-                            OWNER_SCOPED_SUCCESS_CACHE_CONTROL.encode("ascii"),
+                            success_cache_control.encode("ascii"),
                         ),
                     )
                 session_headers: tuple[tuple[bytes, bytes], ...] = ()

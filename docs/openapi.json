@@ -1442,7 +1442,18 @@
                 }
               }
             },
-            "description": "Successful Response"
+            "description": "Current public runtime capability status.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Prevents storage of mutable public operational status in shared or persistent caches.",
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
           },
           "422": {
             "content": {
@@ -1470,7 +1481,18 @@
                 }
               }
             },
-            "description": "Successful Response"
+            "description": "Current public service readiness status.",
+            "headers": {
+              "Cache-Control": {
+                "description": "Prevents storage of mutable public operational status in shared or persistent caches.",
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
           },
           "422": {
             "content": {

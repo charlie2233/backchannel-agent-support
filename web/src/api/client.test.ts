@@ -244,6 +244,30 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("health transport", () => {
+  it("bypasses the browser cache while preserving the public request contract", async () => {
+    const signal = new AbortController().signal;
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        backend: "stub",
+        liveReady: false,
+        sdkStubReady: true,
+        providerBoundary: "demo_adapter_only",
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await getHealth(signal);
+
+    expect(fetchMock).toHaveBeenCalledWith("/health", {
+      headers: { Accept: "application/json" },
+      credentials: "same-origin",
+      signal,
+      cache: "no-store",
+    });
+  });
+});
+
 describe("decision and receipt contracts", () => {
   it("preserves a non-success recovery HTTP status as typed client evidence", async () => {
     vi.stubGlobal(
