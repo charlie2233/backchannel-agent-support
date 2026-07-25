@@ -1,7 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import {
-  copyFileSync,
   existsSync,
   mkdtempSync,
   mkdirSync,
@@ -15,6 +14,13 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { chromium } from "playwright-core";
+import {
+  CaptureManifestError,
+  buildCaptureManifest,
+  captureManifestFailureCode,
+  installCaptureEvidence,
+  prepareCaptureSource,
+} from "./capture-manifest.mjs";
 
 const MODULE_PATH = fileURLToPath(import.meta.url);
 const ROOT = resolve(dirname(MODULE_PATH), "..");
@@ -997,6 +1003,7 @@ async function captureOneViewport(
 }
 
 async function runCapture() {
+  const captureSource = prepareCaptureSource(ROOT);
   assertFinalBuild(FINAL_BUILD_DIRECTORY);
   requireContract(
     existsSync(join(ROOT, SERVER_COMMAND[0])),
@@ -1036,6 +1043,7 @@ async function runCapture() {
     } catch {
       throw new CaptureContractError("capture_chrome_missing");
     }
+    const browserVersion = browser.version();
     for (const viewport of VIEWPORTS) {
       await captureOneViewport(
         browser,
@@ -1059,13 +1067,18 @@ async function runCapture() {
         "capture_png_dimensions",
       );
     }
-    mkdirSync(FINAL_ASSET_DIRECTORY, { recursive: true });
-    for (const captureName of CAPTURE_FILES) {
-      copyFileSync(
-        join(captureDirectory, captureName),
-        join(FINAL_ASSET_DIRECTORY, captureName),
-      );
-    }
+    const manifest = buildCaptureManifest({
+      artifactDirectory: captureDirectory,
+      browserVersion,
+      runtimeInput: captureSource.runtimeInput,
+      sourceCommit: captureSource.sourceCommit,
+    });
+    installCaptureEvidence({
+      captureDirectory,
+      finalDirectory: FINAL_ASSET_DIRECTORY,
+      manifest,
+      root: ROOT,
+    });
   } finally {
     try {
       if (browser !== null) {
@@ -1082,6 +1095,9 @@ async function runCapture() {
 }
 
 export function captureFailureCode(error) {
+  if (error instanceof CaptureManifestError) {
+    return captureManifestFailureCode(error);
+  }
   if (
     error instanceof CaptureContractError &&
     PUBLIC_CAPTURE_FAILURE_CODES.has(error.message)

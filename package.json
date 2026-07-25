@@ -9,6 +9,7 @@
     "build": "npm --workspace web run build",
     "check": "npm run test:capture-contract && npm --workspace web run check && uv run ruff check server scripts tests && uv run mypy server scripts/start.py scripts/docker_smoke.py scripts/export_openapi.py scripts/secret_scan.py && uv run pytest -q",
     "capture:judge": "npm run test:e2e",
+    "capture:verify": "node e2e/capture-manifest.mjs",
     "openapi:export": "uv run python scripts/export_openapi.py",
     "openapi:check": "uv run python scripts/export_openapi.py --check",
     "pretest:e2e": "npm run build",
@@ -24,7 +25,7 @@
     "smoke:production": "uv run python scripts/docker_smoke.py --launch",
     "start": "uv run python scripts/start.py",
     "test": "npm --workspace web test -- --run",
-    "test:capture-contract": "node --test e2e/judge-flow.test.mjs",
+    "test:capture-contract": "node --test e2e/judge-flow.test.mjs e2e/capture-manifest.test.mjs",
     "test:e2e": "npm run test:capture-contract && node e2e/judge-flow.mjs"
   },
   "engines": {

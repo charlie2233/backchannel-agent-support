@@ -25,7 +25,9 @@ def test_package_wires_a_pinned_standalone_capture_contract() -> None:
     scripts = package["scripts"]
 
     assert package["devDependencies"]["playwright-core"] == "1.61.1"
-    assert scripts["test:capture-contract"] == "node --test e2e/judge-flow.test.mjs"
+    assert scripts["test:capture-contract"] == (
+        "node --test e2e/judge-flow.test.mjs e2e/capture-manifest.test.mjs"
+    )
     assert scripts["pretest:e2e"] == "npm run build"
     assert scripts["test:e2e"] == (
         "npm run test:capture-contract && node e2e/judge-flow.mjs"
