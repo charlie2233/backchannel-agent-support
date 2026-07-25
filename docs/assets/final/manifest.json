@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "sourceCommit": "f5475d29cfae4603c31ca93aaa9687d50d9e3930",
+  "sourceCommit": "6a0b84d603c200e3e8ca3ef746e6d70f4c6eaddf",
   "runtimeInput": {
     "algorithm": "sha256",
-    "digest": "8b96c5fbd8dcb22271c9ddb4d1d710cc33800bddf553190b885ad1004fb3e3ab",
+    "digest": "8e80b4972fa263740d772088d9614d507e755b175f074ca01cb8505bf48cf63c",
     "paths": [
       ".node-version",
       "e2e/capture-manifest.mjs",
@@ -106,7 +106,7 @@
   "artifacts": [
     {
       "filename": "desktop-consent.png",
-      "sha256": "34e9d77078b531cb4439d11af22c385fc4d11ce11d0ea2805ec36612324ed9c4",
+      "sha256": "778b4d22a94b0d82cbb9a9a20d20d924888f594737b1727fd454a0fed13ebfda",
       "width": 1440,
       "height": 1024,
       "scenarioId": "hotel",
@@ -115,7 +115,7 @@
     },
     {
       "filename": "desktop-completed.png",
-      "sha256": "266b90156764472f4ca747a9bb4d22c280f1e9b7a8da64676ece04b53b771c2b",
+      "sha256": "6c1f3d87078e144cc105ad5945c04cd1d036ef315f0e208c1a8b343d180f57a2",
       "width": 1440,
       "height": 1024,
       "scenarioId": "hotel",
@@ -124,7 +124,7 @@
     },
     {
       "filename": "desktop-declined.png",
-      "sha256": "ffef75d0a0dcb382257eee265073527f990b40b1d6899eac3c8cf4e0ff08a8d7",
+      "sha256": "e6e4b56d7f01ee2c37b1209a801d98a6597cf54ecabda278174edb77602ca221",
       "width": 1440,
       "height": 1024,
       "scenarioId": "hotel",
@@ -142,7 +142,7 @@
     },
     {
       "filename": "mobile-completed.png",
-      "sha256": "14eeab00898a1624d505a231e569faa075de90811155117f72513f4e6b1c7f24",
+      "sha256": "4158bdc748eb5702e6aceb4fc17e2f8f8918a8d4b4cce7bd8b34cb8c978008b8",
       "width": 390,
       "height": 844,
       "scenarioId": "hotel",
@@ -151,7 +151,7 @@
     },
     {
       "filename": "mobile-declined.png",
-      "sha256": "e94a8af751fe53bc3e92d5a41ac68af40177654e710daf8a465ba56b77c57255",
+      "sha256": "2a8d69a8165e2a31c4fb2f823b59dfddc75564cb07e19f8e689f85e637007cce",
       "width": 390,
       "height": 844,
       "scenarioId": "hotel",
