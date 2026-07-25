@@ -1287,7 +1287,17 @@
                 }
               }
             },
-            "description": "The request was rejected with a public error envelope."
+            "description": "The request was rejected with a public error envelope.",
+            "headers": {
+              "Retry-After": {
+                "description": "Retry delay in seconds for a stream-capacity response.",
+                "schema": {
+                  "maximum": 300,
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "Recovery Events"

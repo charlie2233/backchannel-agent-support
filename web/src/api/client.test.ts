@@ -9,6 +9,7 @@ import {
   isRecoverySnapshot,
   postDecision,
   PublicApiError,
+  readRecoveryEventStreamFailure,
 } from "./client";
 
 const recoveryId = "11111111-2222-4333-8444-555555555555";
@@ -45,6 +46,7 @@ function publicErrorResponse(
 
 const creationBudgetMessage =
   "The public demo recovery creation budget is exhausted for today.";
+const streamCapacityMessage = "The event stream is currently at capacity.";
 
 function creationBudgetResponse(
   {
@@ -71,6 +73,46 @@ function creationBudgetResponse(
         code: "creation_daily_budget_exceeded",
         message: creationBudgetMessage,
         requestId: "req_11111111111111111111111111111111",
+        recoveryId: errorRecoveryId,
+        retryAfterSeconds,
+        fallback,
+      },
+    }),
+    { status, headers },
+  );
+}
+
+function streamCapacityResponse(
+  {
+    status = 429,
+    retryAfterSeconds = 1,
+    retryAfterHeader = String(retryAfterSeconds),
+    errorRecoveryId = recoveryId,
+    requestId = "req_11111111111111111111111111111111",
+    message = streamCapacityMessage,
+    fallback = null,
+    contentType = "application/json",
+  }: {
+    status?: number;
+    retryAfterSeconds?: number | null;
+    retryAfterHeader?: string | null;
+    errorRecoveryId?: string | null;
+    requestId?: string | null;
+    message?: string;
+    fallback?: object | null;
+    contentType?: string;
+  } = {},
+): Response {
+  const headers = new Headers({ "Content-Type": contentType });
+  if (retryAfterHeader !== null) {
+    headers.set("Retry-After", retryAfterHeader);
+  }
+  return new Response(
+    JSON.stringify({
+      error: {
+        code: "stream_capacity_reached",
+        message,
+        requestId,
         recoveryId: errorRecoveryId,
         retryAfterSeconds,
         fallback,
@@ -470,6 +512,126 @@ describe("decision and receipt contracts", () => {
       code: "unexpected_response",
       status: 429,
       recoveryId: null,
+      retryAfterSeconds: null,
+      fallback: null,
+    });
+  });
+
+  it("accepts the exact correlated stream-capacity envelope only for event streams", async () => {
+    const failure = await readRecoveryEventStreamFailure(
+      streamCapacityResponse(),
+      recoveryId,
+    );
+
+    expect(failure).toBeInstanceOf(PublicApiError);
+    expect(failure).toMatchObject({
+      code: "stream_capacity_reached",
+      status: 429,
+      message: streamCapacityMessage,
+      requestId: "req_11111111111111111111111111111111",
+      recoveryId,
+      retryAfterSeconds: 1,
+      fallback: null,
+    });
+  });
+
+  it.each([
+    ["wrong status", () => streamCapacityResponse({ status: 503 })],
+    ["null retry", () => streamCapacityResponse({ retryAfterSeconds: null })],
+    ["zero retry", () => streamCapacityResponse({ retryAfterSeconds: 0 })],
+    ["oversized retry", () => streamCapacityResponse({ retryAfterSeconds: 301 })],
+    [
+      "missing Retry-After",
+      () => streamCapacityResponse({ retryAfterHeader: null }),
+    ],
+    [
+      "mismatched Retry-After",
+      () => streamCapacityResponse({ retryAfterHeader: "2" }),
+    ],
+    [
+      "null recovery correlation",
+      () => streamCapacityResponse({ errorRecoveryId: null }),
+    ],
+    [
+      "substituted recovery correlation",
+      () =>
+        streamCapacityResponse({
+          errorRecoveryId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        }),
+    ],
+    [
+      "null request ID",
+      () => streamCapacityResponse({ requestId: null }),
+    ],
+    [
+      "substituted message",
+      () => streamCapacityResponse({ message: "Capacity details leaked." }),
+    ],
+    [
+      "fallback offer",
+      () =>
+        streamCapacityResponse({
+          fallback: {
+            kind: "show_replay_fixture",
+            scenarioId: "hotel",
+            executionMode: "replay_fixture",
+          },
+        }),
+    ],
+    [
+      "wrong media type",
+      () => streamCapacityResponse({ contentType: "text/plain" }),
+    ],
+  ])("redacts a malformed stream-capacity envelope with %s", async (_label, response) => {
+    const failure = await readRecoveryEventStreamFailure(
+      response(),
+      recoveryId,
+    );
+
+    expect(failure).toBeInstanceOf(PublicApiError);
+    expect(failure).toMatchObject({
+      code: "unexpected_response",
+      recoveryId: null,
+      requestId: null,
+      retryAfterSeconds: null,
+      fallback: null,
+    });
+    expect(failure.message).toBe("The server returned an unexpected response.");
+  });
+
+  it("rejects the stream-capacity code outside the event-stream endpoint", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(streamCapacityResponse()));
+
+    const failure = await getRecovery(recoveryId).catch(
+      (error: unknown) => error,
+    );
+
+    expect(failure).toBeInstanceOf(PublicApiError);
+    expect(failure).toMatchObject({
+      code: "unexpected_response",
+      status: 429,
+      recoveryId: null,
+      retryAfterSeconds: null,
+      fallback: null,
+    });
+  });
+
+  it("preserves the generic correlated 404 contract for event streams", async () => {
+    const failure = await readRecoveryEventStreamFailure(
+      publicErrorResponse(
+        "not_found",
+        "The requested resource was not found.",
+        404,
+        null,
+        recoveryId,
+      ),
+      recoveryId,
+    );
+
+    expect(failure).toMatchObject({
+      code: "not_found",
+      status: 404,
+      recoveryId,
       retryAfterSeconds: null,
       fallback: null,
     });

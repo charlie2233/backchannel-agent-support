@@ -637,7 +637,11 @@ export default function App() {
     activeSnapshot.status === "pending_approval" &&
     activeSnapshot.pendingApproval !== null;
 
-  const activeEvents = activeId === "hotel" ? recovery.events : quotaRecovery.events;
+  const activeRecovery =
+    activeId === "hotel" ? recovery : quotaRecovery;
+  const activeEvents = activeRecovery.events;
+  const activeEventError =
+    activeRecovery.errorPhase === "events" ? activeRecovery.error : null;
   const activeRecoveryStateLabel = recoveryStateLabel(
     activeSnapshot,
     activeScenarioView,
@@ -810,6 +814,36 @@ export default function App() {
               )}
             </span>
           </section>
+          {activeSnapshot !== null && activeEventError !== null ? (
+            <section
+              className="live-run-controls"
+              role="alert"
+              aria-label="Event update connection"
+            >
+              <p>
+                {activeEventError}
+                {activeRecovery.eventsRetryAfterSeconds !== null
+                  ? ` Retry is available in ${activeRecovery.eventsRetryAfterSeconds} ${
+                      activeRecovery.eventsRetryAfterSeconds === 1
+                        ? "second"
+                        : "seconds"
+                    }.`
+                  : ""}
+              </p>
+              <button
+                type="button"
+                disabled={
+                  !activeRecovery.eventsRetryAvailable ||
+                  activeRecovery.eventsRetrying
+                }
+                onClick={activeRecovery.retryEvents}
+              >
+                {activeRecovery.eventsRetrying
+                  ? "Retrying event updates…"
+                  : "Retry event updates"}
+              </button>
+            </section>
+          ) : null}
           {contentPending ? (
             <section className="recovery-loading" aria-live="polite" aria-busy="true">
               Loading authoritative recovery…

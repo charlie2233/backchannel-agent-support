@@ -658,7 +658,21 @@ def create_app(
             },
             400: public_error_response,
             404: public_error_response,
-            429: public_error_response,
+            429: {
+                **public_error_response,
+                "headers": {
+                    "Retry-After": {
+                        "description": (
+                            "Retry delay in seconds for a stream-capacity response."
+                        ),
+                        "schema": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 300,
+                        },
+                    }
+                },
+            },
         },
     )
     async def recovery_events(

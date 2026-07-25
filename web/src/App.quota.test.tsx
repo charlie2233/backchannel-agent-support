@@ -7,12 +7,6 @@ const hotelRecoveryId = "11111111-2222-4333-8444-555555555555";
 const quotaRecoveryId = "99999999-2222-4333-8444-555555555555";
 const retryQuotaRecoveryId = "88888888-2222-4333-8444-555555555555";
 
-class MockEventSource {
-  onmessage: ((event: MessageEvent<string>) => void) | null = null;
-  onerror: ((event: Event) => void) | null = null;
-  close = vi.fn();
-}
-
 function response(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -161,7 +155,6 @@ function selectQuota() {
 
 beforeEach(() => {
   sessionStorage.clear();
-  vi.stubGlobal("EventSource", MockEventSource);
 });
 
 afterEach(() => {

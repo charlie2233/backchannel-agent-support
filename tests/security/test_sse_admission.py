@@ -372,3 +372,11 @@ def test_sse_openapi_declares_the_generic_capacity_response(tmp_path) -> None:
     assert responses["429"]["content"]["application/json"]["schema"] == {
         "$ref": "#/components/schemas/PublicErrorResponse"
     }
+    assert responses["429"]["headers"]["Retry-After"] == {
+        "description": "Retry delay in seconds for a stream-capacity response.",
+        "schema": {
+            "maximum": 300.0,
+            "minimum": 1.0,
+            "type": "integer",
+        },
+    }

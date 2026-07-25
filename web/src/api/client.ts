@@ -35,6 +35,7 @@ export type PublicErrorCode =
   | "live_daily_budget_exceeded"
   | "live_capacity_reached"
   | "creation_daily_budget_exceeded"
+  | "stream_capacity_reached"
   | "resume_incompatible"
   | "already_decided"
   | "decision_id_conflict"
@@ -70,6 +71,7 @@ const publicMessages: Readonly<Record<PublicErrorCode, string>> = {
   live_capacity_reached: "The live demo is currently at capacity.",
   creation_daily_budget_exceeded:
     "The public demo recovery creation budget is exhausted for today.",
+  stream_capacity_reached: "The event stream is currently at capacity.",
   resume_incompatible: "The saved decision cannot be resumed safely.",
   already_decided: "This recovery already has a terminal decision.",
   decision_id_conflict: "This decision identifier was already used.",
@@ -164,6 +166,7 @@ async function failedRequest(
   options: {
     allowFallback?: boolean;
     allowCreationBudget?: boolean;
+    allowStreamCapacity?: boolean;
     expectedRecoveryId?: string | null;
   } = {},
 ): Promise<PublicApiError> {
@@ -222,6 +225,21 @@ async function failedRequest(
     return unexpectedResponse(response.status);
   }
   if (
+    code === "stream_capacity_reached" &&
+    (options.allowStreamCapacity !== true ||
+      response.status !== 429 ||
+      options.expectedRecoveryId === undefined ||
+      error.recoveryId !== options.expectedRecoveryId ||
+      !Number.isInteger(error.retryAfterSeconds) ||
+      Number(error.retryAfterSeconds) < 1 ||
+      Number(error.retryAfterSeconds) > 300 ||
+      error.fallback !== null ||
+      response.headers.get("Retry-After") !==
+        String(error.retryAfterSeconds))
+  ) {
+    return unexpectedResponse(response.status);
+  }
+  if (
     code === "live_timeout" &&
     (response.status !== 504 || error.retryAfterSeconds !== null)
   ) {
@@ -247,6 +265,24 @@ async function failedRequest(
     retryAfterSeconds:
       error.retryAfterSeconds === null ? null : Number(error.retryAfterSeconds),
     fallback,
+  });
+}
+
+export async function readRecoveryEventStreamFailure(
+  response: Response,
+  recoveryId: string,
+): Promise<PublicApiError> {
+  const contentType = response.headers.get("Content-Type");
+  if (
+    response.ok ||
+    contentType === null ||
+    contentType.split(";", 1)[0]?.trim().toLowerCase() !== "application/json"
+  ) {
+    return unexpectedResponse(response.status);
+  }
+  return failedRequest(response, {
+    allowStreamCapacity: true,
+    expectedRecoveryId: recoveryId,
   });
 }
 

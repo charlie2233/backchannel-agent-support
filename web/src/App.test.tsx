@@ -7,26 +7,6 @@ import App from "./App";
 const recoveryId = "11111111-2222-4333-8444-555555555555";
 const digest = `sha256:${"a".repeat(64)}`;
 
-class MockEventSource {
-  static instances: MockEventSource[] = [];
-
-  readonly url: string;
-  onmessage: ((event: MessageEvent<string>) => void) | null = null;
-  onerror: ((event: Event) => void) | null = null;
-  close = vi.fn();
-
-  constructor(url: string | URL) {
-    this.url = String(url);
-    MockEventSource.instances.push(this);
-  }
-
-  emit(body: unknown) {
-    this.onmessage?.(
-      new MessageEvent("message", { data: JSON.stringify(body) }),
-    );
-  }
-}
-
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -250,8 +230,6 @@ function declinedReceipt(status: "closed_without_action" | "outcome_unknown") {
 }
 
 beforeEach(() => {
-  MockEventSource.instances = [];
-  vi.stubGlobal("EventSource", MockEventSource);
   sessionStorage.clear();
 });
 
@@ -590,6 +568,7 @@ describe("Backchannel console", () => {
   );
 
   it("renders a decline receipt only after terminal SSE and authoritative refetch", async () => {
+    let eventController: ReadableStreamDefaultController<Uint8Array> | undefined;
     const fetchMock = vi.fn().mockImplementation(
       (input: string | URL | Request, init?: RequestInit) => {
         const url = String(input);
@@ -610,6 +589,23 @@ describe("Backchannel console", () => {
               decisionRemedyDigest: digest,
               executionStarted: false,
             }),
+          );
+        }
+        if (url === `/api/recoveries/${recoveryId}/events`) {
+          return Promise.resolve(
+            new Response(
+              new ReadableStream<Uint8Array>({
+                start(controller) {
+                  eventController = controller;
+                },
+              }),
+              {
+                status: 200,
+                headers: {
+                  "Content-Type": "text/event-stream; charset=utf-8",
+                },
+              },
+            ),
           );
         }
         if (url === `/api/recoveries/${recoveryId}`) {
@@ -636,16 +632,24 @@ describe("Backchannel console", () => {
       ),
     ).toBeVisible();
     expect(screen.queryByRole("heading", { name: "Closed without action" })).not.toBeInTheDocument();
-    await waitFor(() => expect(MockEventSource.instances).toHaveLength(1), {
+    await waitFor(() => expect(eventController).toBeDefined(), {
       timeout: 5_000,
     });
-    MockEventSource.instances[0]?.emit({
-      recoveryId,
-      seq: 8,
-      type: "recovery.closed_without_action",
-      terminal: true,
-      data: { status: "closed_without_action" },
-      createdAt: "2026-07-18T20:00:03Z",
+    await act(async () => {
+      const terminalEvent = {
+        recoveryId,
+        seq: 1,
+        type: "recovery.closed_without_action",
+        terminal: true,
+        data: { status: "closed_without_action" },
+        createdAt: "2026-07-18T20:00:03Z",
+      };
+      eventController?.enqueue(
+        new TextEncoder().encode(
+          `id: 1\ndata: ${JSON.stringify(terminalEvent)}\n\n`,
+        ),
+      );
+      await Promise.resolve();
     });
 
     expect(

@@ -2,17 +2,48 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
-  connectRecoveryEvents,
   type RecoveryEvent,
-  type RecoveryEventHandlers,
+  type RecoveryEventStreamHandlers,
+  type RecoveryEventStreamRequest,
+  type RecoveryEventStreamResult,
 } from "../api/events";
-import { HttpStatusError } from "../api/client";
+import { HttpStatusError, PublicApiError } from "../api/client";
 import type { RecoveryReceipt, RecoverySnapshot } from "../domain/recovery";
 import { initialRecoveryState, recoveryReducer, useRecovery } from "./useRecovery";
 
 const recoveryId = "c9f6b65a-0ccf-4ef3-9d12-072e2660b852";
 const sdkRootTraceId = "qa_trace_11111111111111111111111111111111";
 const sdkDefinitionDigest = "b".repeat(64);
+
+type OpenEvents = (
+  request: RecoveryEventStreamRequest,
+  handlers: RecoveryEventStreamHandlers,
+) => Promise<RecoveryEventStreamResult>;
+
+function pendingOpenEvents() {
+  return vi.fn<OpenEvents>(() => new Promise(() => undefined));
+}
+
+function capacityError(): PublicApiError {
+  return new PublicApiError(
+    "The event stream is currently at capacity.",
+    429,
+    {
+      code: "stream_capacity_reached",
+      requestId: "req_11111111111111111111111111111111",
+      recoveryId,
+      retryAfterSeconds: 1,
+      fallback: null,
+    },
+  );
+}
+
+async function flushAsyncWork(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+}
 
 function event(seq: number, type = `event.${seq}`): RecoveryEvent {
   return {
@@ -164,59 +195,525 @@ function quotaTerminalReceipt(
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
 describe("recoveryReducer", () => {
-  it("deduplicates sequence IDs and preserves monotonically increasing server order", () => {
-    const withSecond = recoveryReducer(initialRecoveryState, {
-      type: "eventReceived",
-      event: event(2),
-    });
-    const withFirst = recoveryReducer(withSecond, {
+  it("accepts only the next sequence and ignores duplicate, regressed, or gapped dispatches", () => {
+    const withFirst = recoveryReducer(initialRecoveryState, {
       type: "eventReceived",
       event: event(1),
     });
-    const duplicate = recoveryReducer(withFirst, {
+    const withSecond = recoveryReducer(withFirst, {
+      type: "eventReceived",
+      event: event(2),
+    });
+    const duplicate = recoveryReducer(withSecond, {
       type: "eventReceived",
       event: event(2, "duplicate.must.be.ignored"),
     });
+    const regression = recoveryReducer(duplicate, {
+      type: "eventReceived",
+      event: event(1, "regression.must.be.ignored"),
+    });
+    const gap = recoveryReducer(regression, {
+      type: "eventReceived",
+      event: event(4, "gap.must.be.ignored"),
+    });
 
-    expect(duplicate.events.map(({ seq }) => seq)).toEqual([1, 2]);
-    expect(duplicate.events[1]?.type).toBe("event.2");
-    expect(duplicate.lastSeq).toBe(2);
+    expect(gap.events.map(({ seq }) => seq)).toEqual([1, 2]);
+    expect(gap.events[1]?.type).toBe("event.2");
+    expect(gap.lastSeq).toBe(2);
   });
 
-  it("delivers a terminal event once, closes once, and suppresses later disconnect errors", () => {
-    const close = vi.fn<() => void>();
-    const source: {
-      onmessage: ((event: MessageEvent<string>) => void) | null;
-      onerror: ((event: Event) => void) | null;
-      close: () => void;
-    } = {
-      onmessage: null,
-      onerror: null,
-      close,
+  it("keeps an events-phase error when an authoritative snapshot loads", () => {
+    const failed = recoveryReducer(initialRecoveryState, {
+      type: "failed",
+      message: "The event stream is currently at capacity.",
+      status: 429,
+      phase: "events",
+    });
+    const loaded = recoveryReducer(failed, {
+      type: "snapshotLoaded",
+      snapshot: snapshot("pending_approval"),
+    });
+
+    expect(loaded.snapshot).toEqual(snapshot("pending_approval"));
+    expect(loaded.loading).toBe(false);
+    expect(loaded.error).toBe(
+      "The event stream is currently at capacity.",
+    );
+    expect(loaded.errorStatus).toBe(429);
+    expect(loaded.errorPhase).toBe("events");
+  });
+
+  it("does not let an events failure replace an initial or terminal evidence failure", () => {
+    for (const phase of ["initial", "terminal"] as const) {
+      const authoritativeFailure = recoveryReducer(initialRecoveryState, {
+        type: "failed",
+        message: `${phase} evidence failed`,
+        status: 503,
+        phase,
+      });
+      const streamFailure = recoveryReducer(authoritativeFailure, {
+        type: "failed",
+        message: "Recovery event stream disconnected.",
+        status: null,
+        phase: "events",
+      });
+
+      expect(streamFailure.error).toBe(`${phase} evidence failed`);
+      expect(streamFailure.errorPhase).toBe(phase);
+      expect(streamFailure.errorStatus).toBe(503);
+    }
+  });
+});
+
+describe("useRecovery event-stream recovery", () => {
+  it("keeps a typed capacity error when a concurrent authoritative snapshot finishes", async () => {
+    vi.useFakeTimers();
+    let resolveSnapshot: ((value: RecoverySnapshot) => void) | undefined;
+    const getRecovery = vi.fn(
+      () =>
+        new Promise<RecoverySnapshot>((resolve) => {
+          resolveSnapshot = resolve;
+        }),
+    );
+    const openEvents = vi
+      .fn<OpenEvents>()
+      .mockRejectedValue(capacityError());
+    const { result } = renderHook(() =>
+      useRecovery(recoveryId, { getRecovery, openEvents }),
+    );
+
+    await act(flushAsyncWork);
+    expect(result.current.errorPhase).toBe("events");
+    expect(result.current.error).toBe(
+      "The event stream is currently at capacity.",
+    );
+    expect(result.current.loading).toBe(true);
+
+    await act(async () => {
+      resolveSnapshot?.(snapshot("pending_approval"));
+      await flushAsyncWork();
+    });
+
+    expect(result.current.snapshot).toEqual(snapshot("pending_approval"));
+    expect(result.current.loading).toBe(false);
+    expect(result.current.errorPhase).toBe("events");
+    expect(result.current.eventsRetryAvailable).toBe(false);
+    expect(result.current.eventsRetryAfterSeconds).toBe(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(999);
+    });
+    expect(result.current.eventsRetryAvailable).toBe(false);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(result.current.eventsRetryAvailable).toBe(true);
+    expect(result.current.eventsRetryAfterSeconds).toBeNull();
+    expect(openEvents).toHaveBeenCalledOnce();
+  });
+
+  it("automatically reconnects boundedly after EOF with the accepted cursor", async () => {
+    const initial = snapshot("pending_approval");
+    const terminal = snapshot(
+      "closed_without_action",
+      "Closed without provider action.",
+    );
+    const receipt = declinedReceipt();
+    const first = event(1);
+    const last = { ...event(2), terminal: true };
+    const requests: RecoveryEventStreamRequest[] = [];
+    const openEvents = vi
+      .fn<OpenEvents>()
+      .mockImplementationOnce(async (request, handlers) => {
+        requests.push(request);
+        handlers.onOpen();
+        handlers.onEvent(first);
+        return { kind: "eof", lastSeq: 1, lastEvent: first };
+      })
+      .mockImplementationOnce(async (request, handlers) => {
+        requests.push(request);
+        handlers.onOpen();
+        handlers.onEvent(last);
+        return { kind: "terminal", lastSeq: 2, lastEvent: last };
+      });
+    const getRecovery = vi
+      .fn()
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce(terminal);
+    const getReceipt = vi.fn().mockResolvedValue(receipt);
+
+    const { result } = renderHook(() =>
+      useRecovery(recoveryId, {
+        getRecovery,
+        getReceipt,
+        openEvents,
+        eventReconnectDelayMs: 0,
+        eventReconnectAttempts: 2,
+      }),
+    );
+
+    await waitFor(() => expect(openEvents).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(result.current.receipt).toEqual(receipt));
+    expect(requests[0]).toMatchObject({ afterSeq: 0, lastEvent: null });
+    expect(requests[1]).toMatchObject({ afterSeq: 1, lastEvent: first });
+    expect(result.current.events).toEqual([first, last]);
+    expect(result.current.error).toBeNull();
+  });
+
+  it("bounds network retries and redacts the exhausted transport failure", async () => {
+    const openEvents = vi
+      .fn<OpenEvents>()
+      .mockRejectedValue(new TypeError("private loopback reset details"));
+    const getRecovery = vi.fn().mockResolvedValue(snapshot("pending_approval"));
+    const { result } = renderHook(() =>
+      useRecovery(recoveryId, {
+        getRecovery,
+        openEvents,
+        eventReconnectDelayMs: 0,
+        eventReconnectAttempts: 2,
+      }),
+    );
+
+    await waitFor(() => expect(openEvents).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(result.current.errorPhase).toBe("events"));
+    expect(result.current.snapshot).toEqual(snapshot("pending_approval"));
+    expect(result.current.error).toBe("Recovery event stream disconnected.");
+    expect(result.current.error).not.toContain("loopback");
+    expect(result.current.eventsRetryAvailable).toBe(true);
+  });
+
+  it("honors the capacity hint, coalesces manual retries, refreshes by GET, and retains the cursor until verified open", async () => {
+    vi.useFakeTimers();
+    const initial = snapshot("pending_approval");
+    const first = event(1);
+    let retryHandlers: RecoveryEventStreamHandlers | undefined;
+    let retryRequest: RecoveryEventStreamRequest | undefined;
+    const openEvents = vi
+      .fn<OpenEvents>()
+      .mockImplementationOnce(async (_request, handlers) => {
+        handlers.onOpen();
+        handlers.onEvent(first);
+        return { kind: "eof", lastSeq: 1, lastEvent: first };
+      })
+      .mockRejectedValueOnce(capacityError())
+      .mockImplementationOnce(
+        (request, handlers) =>
+          new Promise<RecoveryEventStreamResult>(() => {
+            retryRequest = request;
+            retryHandlers = handlers;
+          }),
+      );
+    const getRecovery = vi.fn().mockResolvedValue(initial);
+    const getReceipt = vi.fn();
+    const { result } = renderHook(() =>
+      useRecovery(recoveryId, {
+        getRecovery,
+        getReceipt,
+        openEvents,
+        eventReconnectDelayMs: 0,
+        eventReconnectAttempts: 1,
+      }),
+    );
+
+    await act(flushAsyncWork);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+      await flushAsyncWork();
+    });
+    expect(openEvents).toHaveBeenCalledTimes(2);
+    expect(result.current.errorPhase).toBe("events");
+    expect(result.current.events).toEqual([first]);
+    expect(result.current.eventsRetryAvailable).toBe(false);
+
+    act(() => {
+      result.current.retryEvents();
+      result.current.retryEvents();
+    });
+    await act(flushAsyncWork);
+    expect(getRecovery).toHaveBeenCalledOnce();
+    expect(openEvents).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(result.current.eventsRetryAvailable).toBe(true);
+
+    act(() => {
+      result.current.retryEvents();
+      result.current.retryEvents();
+    });
+    await act(flushAsyncWork);
+
+    expect(getRecovery).toHaveBeenCalledTimes(2);
+    expect(getReceipt).not.toHaveBeenCalled();
+    expect(openEvents).toHaveBeenCalledTimes(3);
+    expect(retryRequest).toMatchObject({
+      afterSeq: 1,
+      lastEvent: first,
+    });
+    expect(result.current.snapshot).toEqual(initial);
+    expect(result.current.events).toEqual([first]);
+    expect(result.current.errorPhase).toBe("events");
+    expect(result.current.eventsRetrying).toBe(true);
+
+    act(() => retryHandlers?.onOpen());
+    expect(result.current.error).toBeNull();
+    expect(result.current.errorPhase).toBeNull();
+    expect(result.current.eventsRetrying).toBe(false);
+  });
+
+  it("loads a terminal snapshot and receipt during manual retry before opening the retained stream", async () => {
+    vi.useFakeTimers();
+    const initial = snapshot("pending_approval");
+    const terminal = snapshot(
+      "closed_without_action",
+      "Closed without provider action.",
+    );
+    const receipt = declinedReceipt();
+    let retryHandlers: RecoveryEventStreamHandlers | undefined;
+    const openEvents = vi
+      .fn<OpenEvents>()
+      .mockRejectedValueOnce(capacityError())
+      .mockImplementationOnce(
+        (_request, handlers) =>
+          new Promise<RecoveryEventStreamResult>(() => {
+            retryHandlers = handlers;
+          }),
+      );
+    const getRecovery = vi
+      .fn()
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce(terminal);
+    const getReceipt = vi.fn().mockResolvedValue(receipt);
+    const { result } = renderHook(() =>
+      useRecovery(recoveryId, { getRecovery, getReceipt, openEvents }),
+    );
+
+    await act(flushAsyncWork);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    act(() => result.current.retryEvents());
+    await act(flushAsyncWork);
+
+    expect(getRecovery).toHaveBeenCalledTimes(2);
+    expect(getReceipt).toHaveBeenCalledOnce();
+    expect(result.current.snapshot).toEqual(terminal);
+    expect(result.current.receipt).toEqual(receipt);
+    expect(result.current.errorPhase).toBe("events");
+
+    act(() => retryHandlers?.onOpen());
+    expect(result.current.error).toBeNull();
+    expect(result.current.snapshot).toEqual(terminal);
+    expect(result.current.receipt).toEqual(receipt);
+  });
+
+  it("keeps the event retry path and retained evidence when the manual snapshot refresh fails", async () => {
+    vi.useFakeTimers();
+    const initial = snapshot("pending_approval");
+    const first = event(1);
+    const openEvents = vi
+      .fn<OpenEvents>()
+      .mockImplementationOnce(async (_request, handlers) => {
+        handlers.onOpen();
+        handlers.onEvent(first);
+        return { kind: "eof", lastSeq: 1, lastEvent: first };
+      })
+      .mockRejectedValueOnce(capacityError());
+    const getRecovery = vi
+      .fn()
+      .mockRejectedValue(new Error("private snapshot transport detail"));
+    const { result } = renderHook(() =>
+      useRecovery(recoveryId, {
+        initialSnapshot: initial,
+        getRecovery,
+        openEvents,
+        eventReconnectDelayMs: 0,
+        eventReconnectAttempts: 1,
+      }),
+    );
+
+    await act(flushAsyncWork);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+      await flushAsyncWork();
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(result.current.eventsRetryAvailable).toBe(true);
+
+    act(() => result.current.retryEvents());
+    await act(flushAsyncWork);
+
+    expect(result.current.snapshot).toEqual(initial);
+    expect(result.current.events).toEqual([first]);
+    expect(result.current.receipt).toBeNull();
+    expect(result.current.error).toBe(
+      "The event stream is currently at capacity.",
+    );
+    expect(result.current.errorPhase).toBe("events");
+    expect(result.current.eventsRetryAvailable).toBe(true);
+    expect(result.current.eventsRetrying).toBe(false);
+    expect(result.current.error).not.toContain("private");
+    expect(openEvents).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the event retry path and retained terminal evidence when the manual receipt refresh fails", async () => {
+    vi.useFakeTimers();
+    const terminal = snapshot(
+      "closed_without_action",
+      "Closed without provider action.",
+    );
+    const receipt = declinedReceipt();
+    const getRecovery = vi.fn().mockResolvedValue(terminal);
+    const getReceipt = vi
+      .fn()
+      .mockResolvedValueOnce(receipt)
+      .mockRejectedValueOnce(
+        new Error("private receipt transport detail"),
+      );
+    const openEvents = vi
+      .fn<OpenEvents>()
+      .mockRejectedValue(capacityError());
+    const { result } = renderHook(() =>
+      useRecovery(recoveryId, {
+        initialSnapshot: terminal,
+        getRecovery,
+        getReceipt,
+        openEvents,
+      }),
+    );
+
+    await act(flushAsyncWork);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(result.current.receipt).toEqual(receipt);
+    expect(result.current.eventsRetryAvailable).toBe(true);
+
+    act(() => result.current.retryEvents());
+    await act(flushAsyncWork);
+
+    expect(result.current.snapshot).toEqual(terminal);
+    expect(result.current.receipt).toEqual(receipt);
+    expect(result.current.events).toEqual([]);
+    expect(result.current.error).toBe(
+      "The event stream is currently at capacity.",
+    );
+    expect(result.current.errorPhase).toBe("events");
+    expect(result.current.eventsRetryAvailable).toBe(true);
+    expect(result.current.eventsRetrying).toBe(false);
+    expect(result.current.error).not.toContain("private");
+    expect(openEvents).toHaveBeenCalledOnce();
+  });
+
+  it("settles a manual retry and preserves the event failure when refreshed terminal evidence is inconsistent", async () => {
+    vi.useFakeTimers();
+    const terminal = snapshot(
+      "closed_without_action",
+      "Closed without provider action.",
+    );
+    const receipt = declinedReceipt();
+    const inconsistentReceipt = {
+      ...receipt,
+      rootTraceId: "qa_trace_mismatch",
     };
-    const onEvent = vi.fn();
-    const onError = vi.fn();
-    const disconnect = connectRecoveryEvents(
-      recoveryId,
-      { onEvent, onError },
-      () => source,
+    const getRecovery = vi.fn().mockResolvedValue(terminal);
+    const getReceipt = vi
+      .fn()
+      .mockResolvedValueOnce(receipt)
+      .mockResolvedValueOnce(inconsistentReceipt);
+    const openEvents = vi
+      .fn<OpenEvents>()
+      .mockRejectedValue(capacityError());
+    const { result } = renderHook(() =>
+      useRecovery(recoveryId, {
+        initialSnapshot: terminal,
+        getRecovery,
+        getReceipt,
+        openEvents,
+      }),
     );
-    const terminalEvent = { ...event(7), terminal: true };
 
-    source.onmessage?.(
-      new MessageEvent("message", { data: JSON.stringify(terminalEvent) }),
+    await act(flushAsyncWork);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(result.current.eventsRetryAvailable).toBe(true);
+
+    act(() => result.current.retryEvents());
+    await act(flushAsyncWork);
+
+    expect(result.current.snapshot).toEqual(terminal);
+    expect(result.current.receipt).toEqual(receipt);
+    expect(result.current.events).toEqual([]);
+    expect(result.current.error).toBe(
+      "The event stream is currently at capacity.",
     );
-    source.onerror?.(new Event("error"));
-    disconnect();
+    expect(result.current.errorPhase).toBe("events");
+    expect(result.current.eventsRetryAvailable).toBe(true);
+    expect(result.current.eventsRetrying).toBe(false);
+    expect(openEvents).toHaveBeenCalledOnce();
+  });
 
-    expect(onEvent).toHaveBeenCalledOnce();
-    expect(onEvent).toHaveBeenCalledWith(terminalEvent);
-    expect(close).toHaveBeenCalledOnce();
-    expect(onError).not.toHaveBeenCalled();
+  it("marks the generation stale before abort and fences late StrictMode-style callbacks", async () => {
+    let handlers: RecoveryEventStreamHandlers | undefined;
+    let streamSignal: AbortSignal | undefined;
+    const openEvents = vi.fn<OpenEvents>(
+      (request, nextHandlers) =>
+        new Promise(() => {
+          streamSignal = request.signal;
+          handlers = nextHandlers;
+        }),
+    );
+    const getRecovery = vi.fn().mockResolvedValue(snapshot("pending_approval"));
+    const getReceipt = vi.fn();
+    const view = renderHook(() =>
+      useRecovery(recoveryId, { getRecovery, getReceipt, openEvents }),
+    );
+    await waitFor(() => expect(view.result.current.snapshot).not.toBeNull());
+    const before = view.result.current;
+
+    view.unmount();
+    act(() => {
+      handlers?.onOpen();
+      handlers?.onEvent({ ...event(1), terminal: true });
+    });
+
+    expect(streamSignal?.aborted).toBe(true);
+    expect(view.result.current).toEqual(before);
+    expect(getReceipt).not.toHaveBeenCalled();
+  });
+
+  it("cancels an owned EOF reconnect timer on cleanup", async () => {
+    vi.useFakeTimers();
+    const openEvents = vi.fn<OpenEvents>().mockResolvedValue({
+      kind: "eof",
+      lastSeq: 0,
+      lastEvent: null,
+    });
+    const getRecovery = vi.fn().mockResolvedValue(snapshot("pending_approval"));
+    const view = renderHook(() =>
+      useRecovery(recoveryId, {
+        getRecovery,
+        openEvents,
+        eventReconnectDelayMs: 100,
+        eventReconnectAttempts: 2,
+      }),
+    );
+    await act(flushAsyncWork);
+    expect(openEvents).toHaveBeenCalledOnce();
+
+    view.unmount();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+
+    expect(openEvents).toHaveBeenCalledOnce();
   });
 });
 
@@ -225,10 +722,10 @@ describe("useRecovery authoritative terminal refresh", () => {
     const getRecovery = vi
       .fn()
       .mockRejectedValue(new HttpStatusError("Recovery request failed with status 404", 404));
-    const connectEvents = vi.fn(() => vi.fn());
+    const openEvents = pendingOpenEvents();
 
     const { result } = renderHook(() =>
-      useRecovery(recoveryId, { getRecovery, connectEvents }),
+      useRecovery(recoveryId, { getRecovery, openEvents }),
     );
 
     await waitFor(() => {
@@ -247,22 +744,23 @@ describe("useRecovery authoritative terminal refresh", () => {
       .mockResolvedValueOnce(initial)
       .mockResolvedValueOnce(terminal);
     const getReceipt = vi.fn().mockResolvedValue(receipt);
-    let handlers: RecoveryEventHandlers | undefined;
-    const disconnect = vi.fn();
-    const connectEvents = vi.fn(
-      (_activeRecoveryId: string, nextHandlers: RecoveryEventHandlers) => {
+    let handlers: RecoveryEventStreamHandlers | undefined;
+    let streamSignal: AbortSignal | undefined;
+    const openEvents = vi.fn<OpenEvents>(
+      (request, nextHandlers) => {
         handlers = nextHandlers;
-        return disconnect;
+        streamSignal = request.signal;
+        return new Promise(() => undefined);
       },
     );
 
     const { result, unmount } = renderHook(() =>
-      useRecovery(recoveryId, { getRecovery, getReceipt, connectEvents }),
+      useRecovery(recoveryId, { getRecovery, getReceipt, openEvents }),
     );
 
     await waitFor(() => expect(result.current.snapshot).toEqual(initial));
     const terminalEvent = {
-      ...event(8, "recovery.closed_without_action"),
+      ...event(1, "recovery.closed_without_action"),
       terminal: true,
     };
     act(() => {
@@ -279,7 +777,51 @@ describe("useRecovery authoritative terminal refresh", () => {
     expect(result.current.events).toEqual([terminalEvent]);
 
     unmount();
-    expect(disconnect).toHaveBeenCalledOnce();
+    expect(streamSignal?.aborted).toBe(true);
+  });
+
+  it("fences a late initial lookup failure after terminal evidence wins", async () => {
+    let rejectInitial: ((error: Error) => void) | undefined;
+    const initialLookup = new Promise<RecoverySnapshot>((_resolve, reject) => {
+      rejectInitial = reject;
+    });
+    const terminal = snapshot(
+      "closed_without_action",
+      "Closed without provider action.",
+    );
+    const receipt = declinedReceipt();
+    const terminalEvent = {
+      ...event(1, "recovery.closed_without_action"),
+      terminal: true,
+    };
+    const getRecovery = vi
+      .fn()
+      .mockReturnValueOnce(initialLookup)
+      .mockResolvedValueOnce(terminal);
+    const getReceipt = vi.fn().mockResolvedValue(receipt);
+    const openEvents = vi.fn<OpenEvents>(async (_request, handlers) => {
+      handlers.onOpen();
+      handlers.onEvent(terminalEvent);
+      return {
+        kind: "terminal",
+        lastSeq: terminalEvent.seq,
+        lastEvent: terminalEvent,
+      };
+    });
+    const { result } = renderHook(() =>
+      useRecovery(recoveryId, { getRecovery, getReceipt, openEvents }),
+    );
+
+    await waitFor(() => expect(result.current.receipt).toEqual(receipt));
+    await act(async () => {
+      rejectInitial?.(new Error("late initial failure"));
+      await flushAsyncWork();
+    });
+
+    expect(result.current.snapshot).toEqual(terminal);
+    expect(result.current.receipt).toEqual(receipt);
+    expect(result.current.error).toBeNull();
+    expect(result.current.errorPhase).toBeNull();
   });
 
   it("fetches a receipt for an already-terminal recovery on reload", async () => {
@@ -294,10 +836,10 @@ describe("useRecovery authoritative terminal refresh", () => {
     };
     const getRecovery = vi.fn().mockResolvedValue(terminal);
     const getReceipt = vi.fn().mockResolvedValue(receipt);
-    const connectEvents = vi.fn(() => vi.fn());
+    const openEvents = pendingOpenEvents();
 
     const { result } = renderHook(() =>
-      useRecovery(recoveryId, { getRecovery, getReceipt, connectEvents }),
+      useRecovery(recoveryId, { getRecovery, getReceipt, openEvents }),
     );
 
     await waitFor(() => {
@@ -332,25 +874,25 @@ describe("useRecovery authoritative terminal refresh", () => {
           .mockResolvedValueOnce(receipt);
       }
 
-      let handlers: RecoveryEventHandlers | undefined;
-      const connectEvents = vi.fn(
-        (_activeRecoveryId: string, nextHandlers: RecoveryEventHandlers) => {
+      let handlers: RecoveryEventStreamHandlers | undefined;
+      const openEvents = vi.fn<OpenEvents>(
+        (_request, nextHandlers) => {
           handlers = nextHandlers;
-          return vi.fn();
+          return new Promise(() => undefined);
         },
       );
       const { result } = renderHook(() =>
         useRecovery(recoveryId, {
           getRecovery,
           getReceipt,
-          connectEvents,
+          openEvents,
           terminalRetryDelayMs: 0,
         }),
       );
 
       await waitFor(() => expect(result.current.snapshot).toEqual(initial));
       const terminalEvent = {
-        ...event(9, "recovery.closed_without_action"),
+        ...event(1, "recovery.closed_without_action"),
         terminal: true,
       };
       act(() => handlers?.onEvent(terminalEvent));
@@ -388,13 +930,13 @@ describe("useRecovery authoritative terminal refresh", () => {
   ])("rejects a terminal $label", async ({ snapshot, receipt }) => {
     const getRecovery = vi.fn().mockResolvedValue(snapshot);
     const getReceipt = vi.fn().mockResolvedValue(receipt);
-    const connectEvents = vi.fn(() => vi.fn());
+    const openEvents = pendingOpenEvents();
 
     const { result, unmount } = renderHook(() =>
       useRecovery(recoveryId, {
         getRecovery,
         getReceipt,
-        connectEvents,
+        openEvents,
         terminalRetryDelayMs: 60_000,
       }),
     );
@@ -445,13 +987,13 @@ describe("useRecovery authoritative terminal refresh", () => {
     );
     const getRecovery = vi.fn().mockResolvedValue(terminal);
     const getReceipt = vi.fn().mockResolvedValue(receipt);
-    const connectEvents = vi.fn(() => vi.fn());
+    const openEvents = pendingOpenEvents();
 
     const { result, unmount } = renderHook(() =>
       useRecovery(recoveryId, {
         getRecovery,
         getReceipt,
-        connectEvents,
+        openEvents,
         terminalRetryDelayMs: 60_000,
       }),
     );
