@@ -43,6 +43,43 @@ function publicErrorResponse(
   );
 }
 
+const creationBudgetMessage =
+  "The public demo recovery creation budget is exhausted for today.";
+
+function creationBudgetResponse(
+  {
+    status = 429,
+    retryAfterSeconds = 12,
+    retryAfterHeader = String(retryAfterSeconds),
+    errorRecoveryId = null,
+    fallback = null,
+  }: {
+    status?: number;
+    retryAfterSeconds?: number;
+    retryAfterHeader?: string | null;
+    errorRecoveryId?: string | null;
+    fallback?: object | null;
+  } = {},
+): Response {
+  const headers = new Headers({ "Content-Type": "application/json" });
+  if (retryAfterHeader !== null) {
+    headers.set("Retry-After", retryAfterHeader);
+  }
+  return new Response(
+    JSON.stringify({
+      error: {
+        code: "creation_daily_budget_exceeded",
+        message: creationBudgetMessage,
+        requestId: "req_11111111111111111111111111111111",
+        recoveryId: errorRecoveryId,
+        retryAfterSeconds,
+        fallback,
+      },
+    }),
+    { status, headers },
+  );
+}
+
 function cancellationReceipt(executionCount = 0) {
   return {
     recoveryId,
@@ -340,6 +377,156 @@ describe("decision and receipt contracts", () => {
       },
     });
   });
+
+  it.each([
+    ["hotel", "sdk_stub"],
+    ["hotel", "replay_fixture"],
+    ["hotel", "openai_live"],
+    ["api-quota", "sdk_stub"],
+    ["api-quota", "replay_fixture"],
+  ] as const)(
+    "accepts the exact creation budget envelope for %s %s",
+    async (scenarioId, executionMode) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(creationBudgetResponse()),
+      );
+
+      const failure = await createRecovery(scenarioId, executionMode).catch(
+        (error: unknown) => error,
+      );
+
+      expect(failure).toBeInstanceOf(PublicApiError);
+      expect(failure).toMatchObject({
+        code: "creation_daily_budget_exceeded",
+        status: 429,
+        message: creationBudgetMessage,
+        recoveryId: null,
+        retryAfterSeconds: 12,
+        fallback: null,
+      });
+    },
+  );
+
+  it.each([
+    ["wrong status", () => creationBudgetResponse({ status: 503 })],
+    ["zero retry", () => creationBudgetResponse({ retryAfterSeconds: 0 })],
+    [
+      "retry above one day",
+      () => creationBudgetResponse({ retryAfterSeconds: 86_401 }),
+    ],
+    [
+      "missing Retry-After",
+      () => creationBudgetResponse({ retryAfterHeader: null }),
+    ],
+    [
+      "mismatched Retry-After",
+      () => creationBudgetResponse({ retryAfterHeader: "13" }),
+    ],
+    [
+      "non-null recovery",
+      () => creationBudgetResponse({ errorRecoveryId: recoveryId }),
+    ],
+    [
+      "fallback offer",
+      () =>
+        creationBudgetResponse({
+          fallback: {
+            kind: "show_replay_fixture",
+            scenarioId: "hotel",
+            executionMode: "replay_fixture",
+          },
+        }),
+    ],
+  ])("redacts a malformed creation budget envelope with %s", async (_label, response) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response()));
+
+    const failure = await createRecovery("hotel", "sdk_stub").catch(
+      (error: unknown) => error,
+    );
+
+    expect(failure).toBeInstanceOf(PublicApiError);
+    expect(failure).toMatchObject({
+      code: "unexpected_response",
+      recoveryId: null,
+      retryAfterSeconds: null,
+      fallback: null,
+    });
+    expect((failure as Error).message).toBe(
+      "The server returned an unexpected response.",
+    );
+  });
+
+  it("rejects the creation budget code outside the creation endpoint", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(creationBudgetResponse()),
+    );
+
+    const failure = await getHealth().catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(PublicApiError);
+    expect(failure).toMatchObject({
+      code: "unexpected_response",
+      status: 429,
+      recoveryId: null,
+      retryAfterSeconds: null,
+      fallback: null,
+    });
+  });
+
+  it("rejects the creation budget code for an unsupported quota live pair", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(creationBudgetResponse()),
+    );
+
+    const failure = await createRecovery("api-quota", "openai_live").catch(
+      (error: unknown) => error,
+    );
+
+    expect(failure).toMatchObject({
+      code: "unexpected_response",
+      status: 429,
+      recoveryId: null,
+      retryAfterSeconds: null,
+      fallback: null,
+    });
+  });
+
+  it.each([
+    ["future scenario with SDK", "future-scenario", "sdk_stub"],
+    ["future scenario with replay", "future-scenario", "replay_fixture"],
+    ["hotel with future mode", "hotel", "future-execution-mode"],
+  ] as const)(
+    "fails closed on creation budget for %s",
+    async (_label, scenarioId, executionMode) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(creationBudgetResponse()),
+      );
+
+      const failure = await createRecovery(
+        scenarioId as never,
+        executionMode as never,
+      ).catch((error: unknown) => error);
+
+      expect(failure).toBeInstanceOf(PublicApiError);
+      expect(failure).toMatchObject({
+        code: "unexpected_response",
+        status: 429,
+        recoveryId: null,
+        retryAfterSeconds: null,
+        fallback: null,
+      });
+      expect((failure as Error).message).toBe(
+        "The server returned an unexpected response.",
+      );
+      expect((failure as Error).message).not.toContain(
+        "creation budget is exhausted",
+      );
+    },
+  );
 
   it("accepts the exact live timeout envelopes for start and decision", async () => {
     vi.stubGlobal(

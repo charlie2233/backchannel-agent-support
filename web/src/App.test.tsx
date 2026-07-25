@@ -1,4 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "./App";
@@ -70,6 +71,29 @@ function publicErrorResponse(
       },
     },
     status,
+  );
+}
+
+function creationBudgetResponse(retryAfterSeconds = 27): Response {
+  return new Response(
+    JSON.stringify({
+      error: {
+        code: "creation_daily_budget_exceeded",
+        message:
+          "The public demo recovery creation budget is exhausted for today.",
+        requestId: "req_11111111111111111111111111111111",
+        recoveryId: null,
+        retryAfterSeconds,
+        fallback: null,
+      },
+    }),
+    {
+      status: 429,
+      headers: {
+        "Content-Type": "application/json",
+        "Retry-After": String(retryAfterSeconds),
+      },
+    },
   );
 }
 
@@ -255,6 +279,149 @@ function stubHealthWithUnavailableRecovery() {
 }
 
 describe("Backchannel console", () => {
+  it("surfaces a bounded automatic hotel creation budget failure without replay or evidence", async () => {
+    vi.useFakeTimers();
+    let resolveCreation: ((response: Response) => void) | undefined;
+    const creation = new Promise<Response>((resolve) => {
+      resolveCreation = resolve;
+    });
+    const createBodies: Array<Record<string, unknown>> = [];
+    const fetchMock = vi.fn().mockImplementation(
+      (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/health") {
+          return Promise.resolve(healthResponse(false, true));
+        }
+        if (url === "/api/recoveries") {
+          createBodies.push(
+            JSON.parse(String(init?.body)) as Record<string, unknown>,
+          );
+          return creation;
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      render(
+        <StrictMode>
+          <App />
+        </StrictMode>,
+      );
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(createBodies).toEqual([
+        { scenarioId: "hotel", executionMode: "sdk_stub" },
+      ]);
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+      await act(async () => {
+        resolveCreation?.(creationBudgetResponse());
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "The public demo recovery creation budget is exhausted for today. Try again in 27 seconds.",
+      );
+      expect(sessionStorage.getItem("backchannel.hotelRecovery.v1")).toBeNull();
+      expect(
+        screen.queryByText("Loading authoritative recovery…"),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Run replay fixture" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.getByText("No authoritative recovery evidence is available."),
+      ).toBeVisible();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(86_401_000);
+      });
+      expect(createBodies).toEqual([
+        { scenarioId: "hotel", executionMode: "sdk_stub" },
+      ]);
+      expect(sessionStorage.getItem("backchannel.hotelRecovery.v1")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    {
+      label: "live",
+      liveReady: true,
+      buttonName: "Run live recovery",
+      executionMode: "openai_live",
+    },
+    {
+      label: "replay",
+      liveReady: false,
+      buttonName: "Run replay fixture",
+      executionMode: "replay_fixture",
+    },
+  ] as const)(
+    "shows creation budget retry guidance for an explicit hotel $label attempt",
+    async ({ liveReady, buttonName, executionMode }) => {
+      const createBodies: Array<Record<string, unknown>> = [];
+      const fetchMock = vi.fn().mockImplementation(
+        (input: string | URL | Request, init?: RequestInit) => {
+          const url = String(input);
+          if (url === "/health") {
+            return Promise.resolve(healthResponse(liveReady, true));
+          }
+          if (url === "/api/recoveries") {
+            const body = JSON.parse(String(init?.body)) as Record<
+              string,
+              unknown
+            >;
+            createBodies.push(body);
+            return Promise.resolve(
+              body.executionMode === "sdk_stub"
+                ? jsonResponse(
+                    terminalSnapshot("closed_without_action"),
+                    201,
+                  )
+                : creationBudgetResponse(31),
+            );
+          }
+          if (url === `/api/recoveries/${recoveryId}/receipt`) {
+            return Promise.resolve(
+              jsonResponse(declinedReceipt("closed_without_action")),
+            );
+          }
+          throw new Error(`Unexpected request: ${url}`);
+        },
+      );
+      vi.stubGlobal("fetch", fetchMock);
+
+      render(<App />);
+      const button = await screen.findByRole("button", { name: buttonName });
+      await waitFor(() => expect(button).toBeEnabled());
+      fireEvent.click(button);
+
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "The public demo recovery creation budget is exhausted for today. Try again in 31 seconds.",
+      );
+      expect(
+        createBodies.filter(
+          (body) => body.executionMode === executionMode,
+        ),
+      ).toHaveLength(1);
+      expect(
+        screen.queryByRole("button", { name: "Run replay fixture" }),
+      ).not.toBeInTheDocument();
+      expect(sessionStorage.getItem("backchannel.hotelRecovery.v1")).toBe(
+        recoveryId,
+      );
+    },
+  );
+
   it.each([404, 422])(
     "does not replace a stored recovery or matching claim after status %s",
     async (status) => {

@@ -29,6 +29,29 @@ function health(sdkStubReady: boolean): Response {
   });
 }
 
+function creationBudgetResponse(retryAfterSeconds = 43): Response {
+  return new Response(
+    JSON.stringify({
+      error: {
+        code: "creation_daily_budget_exceeded",
+        message:
+          "The public demo recovery creation budget is exhausted for today.",
+        requestId: "req_11111111111111111111111111111111",
+        recoveryId: null,
+        retryAfterSeconds,
+        fallback: null,
+      },
+    }),
+    {
+      status: 429,
+      headers: {
+        "Content-Type": "application/json",
+        "Retry-After": String(retryAfterSeconds),
+      },
+    },
+  );
+}
+
 function snapshot(
   scenarioId: "hotel" | "api-quota",
   executionMode: "sdk_stub" | "replay_fixture",
@@ -149,6 +172,70 @@ afterEach(() => {
 });
 
 describe("explicit API quota runs", () => {
+  it.each([
+    ["SDK", "Run SDK stub trace", "sdk_stub"],
+    ["replay", "Replay recorded trace", "replay_fixture"],
+  ] as const)(
+    "shows creation budget retry guidance for an explicit quota %s attempt without fabricating a recovery",
+    async (_label, buttonName, executionMode) => {
+      sessionStorage.setItem("backchannel.hotelRecovery.v1", hotelRecoveryId);
+      const createBodies: Array<Record<string, unknown>> = [];
+      const fetchMock = vi.fn().mockImplementation(
+        (input: string | URL | Request, init?: RequestInit) => {
+          const url = String(input);
+          if (url === "/health") {
+            return Promise.resolve(health(true));
+          }
+          if (url === `/api/recoveries/${hotelRecoveryId}`) {
+            return Promise.resolve(
+              response(
+                snapshot("hotel", "replay_fixture", hotelRecoveryId),
+              ),
+            );
+          }
+          if (url === `/api/recoveries/${hotelRecoveryId}/receipt`) {
+            return Promise.resolve(
+              response(
+                receipt("hotel", "replay_fixture", hotelRecoveryId),
+              ),
+            );
+          }
+          if (url === "/api/recoveries") {
+            createBodies.push(
+              JSON.parse(String(init?.body)) as Record<string, unknown>,
+            );
+            return Promise.resolve(creationBudgetResponse());
+          }
+          throw new Error(`Unexpected request: ${url}`);
+        },
+      );
+      vi.stubGlobal("fetch", fetchMock);
+
+      render(<App />);
+      await screen.findByRole("heading", {
+        name: "Completed replay receipt",
+      });
+      selectQuota();
+      fireEvent.click(screen.getByRole("button", { name: buttonName }));
+
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "The public demo recovery creation budget is exhausted for today. Try again in 43 seconds.",
+      );
+      expect(createBodies).toEqual([
+        { scenarioId: "api-quota", executionMode },
+      ]);
+      expect(
+        screen.getByText("No authoritative recovery evidence is available."),
+      ).toBeVisible();
+      expect(screen.queryByText(quotaRecoveryId)).not.toBeInTheDocument();
+      expect(
+        fetchMock.mock.calls.filter(([input]) =>
+          String(input).includes(`/api/recoveries/${quotaRecoveryId}`),
+        ),
+      ).toHaveLength(0);
+    },
+  );
+
   it("keeps replay explicit and hides unavailable SDK/live/consent controls", async () => {
     const bodies: Array<Record<string, unknown>> = [];
     const fetchMock = vi.fn().mockImplementation(

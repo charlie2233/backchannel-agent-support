@@ -104,6 +104,21 @@ function safeQuotaStartError(error: unknown): Error {
   return new Error("Quota trace could not be started.");
 }
 
+function startErrorMessage(error: Error): string {
+  const retryGuidance =
+    error instanceof PublicApiError && error.retryAfterSeconds !== null
+      ? ` Try again in ${error.retryAfterSeconds} seconds.`
+      : "";
+  return `${error.message}${retryGuidance}`;
+}
+
+function isCreationBudgetError(error: Error | null): boolean {
+  return (
+    error instanceof PublicApiError &&
+    error.code === "creation_daily_budget_exceeded"
+  );
+}
+
 interface AutomaticDecisionRetry {
   recoveryId: string;
   request: DecisionRequest;
@@ -236,6 +251,7 @@ export default function App() {
     let disposed = false;
     const generation = selectionGeneration.current;
     setDefaultCreationPending(true);
+    setLiveStartError(null);
     const creation = createHotelRecoveryOnce();
     void creation
       .then((snapshot) => {
@@ -246,9 +262,10 @@ export default function App() {
         setCreatedSnapshot(snapshot);
         setHotelRecoveryId(snapshot.recoveryId);
       })
-      .catch(() => {
+      .catch((error: unknown) => {
         if (!disposed && generation === selectionGeneration.current) {
           setCreatedSnapshot(null);
+          setLiveStartError(safeLiveStartError(error));
         }
       })
       .finally(() => {
@@ -578,9 +595,11 @@ export default function App() {
   );
   const pendingDecision = readPendingDecision();
   const replayFallbackAvailable =
-    healthError ||
-    health?.liveReady === false ||
-    (liveStartError instanceof PublicApiError && liveStartError.fallback !== null);
+    !isCreationBudgetError(liveStartError) &&
+    (healthError ||
+      health?.liveReady === false ||
+      (liveStartError instanceof PublicApiError &&
+        liveStartError.fallback !== null));
   const unresolvedRecoveryActive =
     activeId === "hotel" &&
     (defaultCreationPending ||
@@ -703,13 +722,7 @@ export default function App() {
                 <p>Live mode is unavailable on this server.</p>
               ) : null}
               {liveStartError !== null ? (
-                <p role="alert">
-                  {liveStartError.message}
-                  {liveStartError instanceof PublicApiError &&
-                  liveStartError.retryAfterSeconds !== null
-                    ? ` Try again in ${liveStartError.retryAfterSeconds} seconds.`
-                    : ""}
-                </p>
+                <p role="alert">{startErrorMessage(liveStartError)}</p>
               ) : null}
               {replayFallbackAvailable ? (
                 <button
@@ -752,7 +765,7 @@ export default function App() {
                   : "Replay recorded trace"}
               </button>
               {quotaStartError !== null ? (
-                <p role="alert">{quotaStartError.message}</p>
+                <p role="alert">{startErrorMessage(quotaStartError)}</p>
               ) : null}
             </section>
           ) : null}

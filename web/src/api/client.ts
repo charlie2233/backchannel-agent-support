@@ -34,6 +34,7 @@ export type PublicErrorCode =
   | "live_cooldown"
   | "live_daily_budget_exceeded"
   | "live_capacity_reached"
+  | "creation_daily_budget_exceeded"
   | "resume_incompatible"
   | "already_decided"
   | "decision_id_conflict"
@@ -67,6 +68,8 @@ const publicMessages: Readonly<Record<PublicErrorCode, string>> = {
   live_cooldown: "Live mode is cooling down for this demo identity.",
   live_daily_budget_exceeded: "The live demo budget is exhausted for today.",
   live_capacity_reached: "The live demo is currently at capacity.",
+  creation_daily_budget_exceeded:
+    "The public demo recovery creation budget is exhausted for today.",
   resume_incompatible: "The saved decision cannot be resumed safely.",
   already_decided: "This recovery already has a terminal decision.",
   decision_id_conflict: "This decision identifier was already used.",
@@ -160,6 +163,7 @@ async function failedRequest(
   response: Response,
   options: {
     allowFallback?: boolean;
+    allowCreationBudget?: boolean;
     expectedRecoveryId?: string | null;
   } = {},
 ): Promise<PublicApiError> {
@@ -203,6 +207,20 @@ async function failedRequest(
     return unexpectedResponse(response.status);
   }
   const code = error.code as PublicErrorCode;
+  if (
+    code === "creation_daily_budget_exceeded" &&
+    (options.allowCreationBudget !== true ||
+      response.status !== 429 ||
+      error.recoveryId !== null ||
+      !Number.isInteger(error.retryAfterSeconds) ||
+      Number(error.retryAfterSeconds) < 1 ||
+      Number(error.retryAfterSeconds) > 86_400 ||
+      error.fallback !== null ||
+      response.headers.get("Retry-After") !==
+        String(error.retryAfterSeconds))
+  ) {
+    return unexpectedResponse(response.status);
+  }
   if (
     code === "live_timeout" &&
     (response.status !== 504 || error.retryAfterSeconds !== null)
@@ -461,6 +479,21 @@ export async function getRecovery(
   return recovery;
 }
 
+function isSupportedCreationPair(
+  scenarioId: ScenarioId,
+  executionMode: ExecutionMode,
+): boolean {
+  return (
+    (scenarioId === "hotel" &&
+      (executionMode === "sdk_stub" ||
+        executionMode === "replay_fixture" ||
+        executionMode === "openai_live")) ||
+    (scenarioId === "api-quota" &&
+      (executionMode === "sdk_stub" ||
+        executionMode === "replay_fixture"))
+  );
+}
+
 export async function createRecovery(
   scenarioId: ScenarioId,
   executionMode: ExecutionMode,
@@ -479,6 +512,10 @@ export async function createRecovery(
   if (!response.ok) {
     throw await failedRequest(response, {
       allowFallback: executionMode === "openai_live",
+      allowCreationBudget: isSupportedCreationPair(
+        scenarioId,
+        executionMode,
+      ),
       expectedRecoveryId: null,
     });
   }
