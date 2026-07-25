@@ -12,34 +12,53 @@ results from any sibling branch.
   `742e3caf2af5a9cce3cd8de242cf113424e8528f`
 - Evidence activation:
   `4a317e563c8d45bc45f676e465b01780b2b0be78`
+- Hosted validation successor:
+  `1289b773abe92bb2f5842f77e3c7f50c432352f4`
+- GitHub Actions:
+  [run 30174822102](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30174822102)
+- Result: `verify`
+  ([job 89721793096](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30174822102/job/89721793096))
+  reported `PASS`; `container-smoke`
+  ([job 89721989116](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30174822102/job/89721989116))
+  reported `PASS`. Both job annotation APIs returned `[]`.
 - `npm run capture:judge` reported `29 passed` against the clean capture source
   in Google Chrome 150.0.7871.186 and produced six manifest-bound PNGs at
   1440×1024 and 390×844.
 - `uv run pytest -q tests/domain/test_cleanup.py` reported `15 passed` on the
   capture source.
-- No Task25 hosted GitHub Actions run or job is recorded or verified in this
-  document. The focused local results above are not a full canonical local gate
-  and are not hosted proof for the activation.
+- The local exact-parent gate on `1289b77…` covered 29 capture contracts,
+  offline manifest verification, 292 web tests, 550 Python tests, TypeScript/Vite,
+  Ruff, strict MyPy over 34 source files, stub smoke, local deterministic-production
+  and deployed-readonly smokes, OpenAPI freshness, history-aware secret scan, Node
+  syntax, and diff checks.
+- Hosted `verify` ran the canonical check: 29 capture contracts,
+  `capture_manifest_valid`, 19 web test files / 292 tests, Ruff, strict MyPy over
+  34 source files, and 550 Python tests; it also ran stub smoke, OpenAPI verification,
+  and the history-aware secret scan.
+- Hosted `container-smoke` built the packaged Docker image, confirmed image user
+  `10001:10001`, and passed the offline `deterministic-qa` and `deployed-readonly`
+  profiles.
 
 ## Per-SHA proof matrix
 
 | Lane | Exact evidence | Status and boundary |
 | --- | --- | --- |
-| Local source and tests | Focused cleanup suite: 15 passed | **Verified locally** on capture source `742e3ca…`; not a full canonical gate or external proof |
+| Local source and tests | Exact-parent gate above | **Verified locally** on hosted successor `1289b77…`; not external proof |
 | Local final-build captures | [`docs/assets/final/manifest.json`](assets/final/manifest.json); six provenance-checked PNGs under [`docs/assets/final`](assets/final) | **Verified locally** on capture source `742e3ca…` in Google Chrome at 1440×1024 and 390×844; not container, deployment, live OpenAI, or release proof |
 | Live OpenAI | [`live-validation.md`](live-validation.md) records only a redacted invalid-key result | **Blocked / Unverified**; no valid `OPENAI_API_KEY`, one-run trace, or three consecutive successes |
 | Local Docker | No Docker-family runtime is installed on this Mac | **Unverified locally** |
-| GitHub CI/container | No Task25 Actions run or job recorded | **Blocked / Unverified** for activation `4a317e5…`; superseded prior evidence below is not inherited |
+| GitHub CI/container | Run 30174822102; `verify` and packaged `container-smoke` | **Verified** on successor `1289b77…`; both jobs passed with empty annotations, but this is not browser capture or public deployment proof |
 | Public deployment | No public application origin | **Blocked / Unverified** |
 | Tag/release | No release tag or GitHub release | **Blocked / Unverified** |
 
 ## Hosted container evidence boundary
 
-No current Task25 hosted container result is recorded. The superseded prior container
-job below proved only its prior activation's image build and non-root identity. It
-also covered two offline packaged smoke profiles. It did not prove local Docker,
-long-lived `/data` persistence, target-host durability/networking, abrupt host-loss
-or backup restoration, concurrent multi-container SQLite, or a public browser origin.
+The current hosted container job proves packaged image build, non-root image user
+`10001:10001`, and two offline packaged smoke profiles: `deterministic-qa` and
+`deployed-readonly`. It then cleans up. It does not prove local Docker, long-lived
+`/data` persistence, target-host durability/networking, abrupt host-loss or backup
+restoration, concurrent multi-container SQLite, a public browser origin, or live
+OpenAI.
 
 ## Capture contract
 
@@ -57,10 +76,10 @@ dimensions.
 
 Capture source `742e3ca…`; evidence activation `4a317e5…`. The browser capture was
 produced against the clean source SHA, and the activation successor added the captured
-files. This document does not claim that CI executed the browser capture or validated
-the activation because no current hosted CI run is recorded or verified. The six
-images prove only the local keyless SDK-stub final build; they do not prove live
-OpenAI, a public deployment, a container, a release, or a real provider mutation.
+files. Run 30174822102 validates hosted successor `1289b77…`.
+CI did not execute the browser capture. The six images prove only the local keyless
+SDK-stub final build; they do not prove live OpenAI, a public deployment, a container,
+a release, or a real provider mutation.
 
 A later documentation-only successor does not inherit a new browser claim. Keep the
 capture lane bound to `742e3ca…` unless `npm run capture:judge` is observed again on a

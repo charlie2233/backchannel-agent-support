@@ -38,6 +38,7 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
 
     assert manifest["sourceCommit"] in current_evidence
     assert "4a317e563c8d45bc45f676e465b01780b2b0be78" in current_evidence
+    assert "1289b773abe92bb2f5842f77e3c7f50c432352f4" in current_evidence
     assert runtime_input["digest"] in current_evidence
     assert f"{len(runtime_input['paths'])} runtime paths" in current_evidence
     assert f"{browser['name']} {browser['version']}" in current_evidence
@@ -59,16 +60,26 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
         "`uv run pytest -q tests/domain/test_cleanup.py` reported `15 passed`"
         in current_evidence
     )
-    assert (
-        "No Task25 hosted GitHub Actions run or job is recorded or verified"
-        in current_evidence
-    )
-    for unobserved_current_count in (
+    for evidence_id in ("30174822102", "89721793096", "89721989116"):
+        assert evidence_id in current_evidence
+    assert "Both job annotation APIs returned `[]`" in current_evidence
+    for observed_current_count in (
+        "29 capture contracts",
         "292 web tests",
-        "534 Python tests",
+        "19 web test files / 292 tests",
+        "550 Python tests",
         "strict MyPy over 34 source files",
     ):
-        assert unobserved_current_count not in current_evidence
+        assert observed_current_count in current_evidence
+    for hosted_container_fact in (
+        "`10001:10001`",
+        "`deterministic-qa`",
+        "`deployed-readonly`",
+    ):
+        assert hosted_container_fact in current_evidence
+    assert "CI did not execute the browser capture" in current_evidence
+    assert "No Task25 hosted GitHub Actions run or job" not in current_evidence
+    assert "No current Task25 hosted container result" not in current_evidence
 
     prior_capture = "7d9128a8171ddb4978d8f7b0debb9effce997e27"
     prior_activation = "576ba5e3dfd3d13b9f797c1c516c2352c4e40688"
@@ -344,7 +355,7 @@ def test_release_docs_cover_architecture_protocol_and_evidence_boundaries() -> N
         not in validation
     )
     assert "[`docs/assets/final/manifest.json`](assets/final/manifest.json)" in validation
-    assert "does not claim that CI executed the browser capture" in validation
+    assert "CI did not execute the browser capture" in validation
     assert "1440×1024" in validation
     assert "390×844" in validation
     for lane in (
