@@ -20,6 +20,63 @@ def _read(relative_path: str) -> str:
     return (ROOT / relative_path).read_text(encoding="utf-8")
 
 
+def _assert_validation_matches_current_capture(validation: str) -> None:
+    manifest = json.loads(_read("docs/assets/final/manifest.json"))
+    runtime_input = manifest["runtimeInput"]
+    browser = manifest["browser"]
+    environment = manifest["environment"]
+    artifacts = manifest["artifacts"]
+
+    historical_heading = "## Superseded historical hosted baseline"
+    assert historical_heading in validation
+    current_evidence, historical_evidence = validation.split(
+        historical_heading,
+        maxsplit=1,
+    )
+
+    assert manifest["sourceCommit"] in current_evidence
+    assert "576ba5e3dfd3d13b9f797c1c516c2352c4e40688" in current_evidence
+    assert runtime_input["digest"] in current_evidence
+    assert f"{len(runtime_input['paths'])} runtime paths" in current_evidence
+    assert f"{browser['name']} {browser['version']}" in current_evidence
+    browser_mode = "headless" if browser["headless"] else "headed"
+    assert f"`{browser['channel']}` channel in {browser_mode} mode" in current_evidence
+    assert f"capture profile `{manifest['captureProfile']}`" in current_evidence
+    environment_summary = " / ".join(
+        f"`{environment[key]}`"
+        for key in ("locale", "timezone", "reducedMotion", "colorScheme")
+    )
+    assert environment_summary in current_evidence
+    for width, height in {
+        (artifact["width"], artifact["height"]) for artifact in artifacts
+    }:
+        assert f"{width}×{height}" in current_evidence
+
+    for evidence_id in ("30162644778", "89690352979", "89690513333"):
+        assert evidence_id in current_evidence
+    assert "Both jobs passed with empty annotations" in current_evidence
+    for count in (
+        "29 capture contracts",
+        "292 web tests",
+        "534 Python tests",
+        "strict MyPy over 34 source files",
+    ):
+        assert count in current_evidence
+
+    historical_activation = "b57868005a3fe0869136f54472ee0098035a9099"
+    historical_run = "30140554792"
+    assert historical_activation not in current_evidence
+    assert historical_run not in current_evidence
+    assert historical_activation in historical_evidence
+    assert historical_run in historical_evidence
+    for obsolete in (
+        "85e1e8ec9147242adca311c4ba10ea8c1c3008dc",
+        "eeb6b87ce35ad04cb4c53d048c39fcbc8caf33bb62e142526e0f9aba544afb30",
+        "81 runtime paths",
+    ):
+        assert obsolete not in validation
+
+
 def test_package_wires_capture_contract_and_manifest_verifier_into_check() -> None:
     package = json.loads(_read("package.json"))
     scripts = package["scripts"]
@@ -209,14 +266,11 @@ def test_release_docs_cover_architecture_protocol_and_evidence_boundaries() -> N
 
     validation = _read("docs/validation.md")
     assert "`codex/backchannel-v0.3`" in validation
-    assert "85e1e8ec9147242adca311c4ba10ea8c1c3008dc" in validation
-    assert "b57868005a3fe0869136f54472ee0098035a9099" in validation
-    assert "30140554792" in validation
-    assert "89632837699" in validation
-    assert "89633002245" in validation
+    assert "## Current capture and evidence activation" in validation
+    assert "## Superseded historical hosted baseline" in validation
     assert (
-        "- Local exact-tree pre-activation gate covered 28 capture contracts, offline\n"
-        "  manifest verification, 224 web tests, 530 Python tests, Vite build, Ruff,\n"
+        "- Local exact-tree pre-activation gate covered 29 capture contracts, offline\n"
+        "  manifest verification, 292 web tests, 534 Python tests, Vite build, Ruff,\n"
         "  strict MyPy over 34 source files, stub smoke, local one-process\n"
         "  production/SSE/SIGTERM smoke, OpenAPI freshness, history-aware secret scan,\n"
         "  Node syntax, and diff checks.\n"
@@ -233,15 +287,6 @@ def test_release_docs_cover_architecture_protocol_and_evidence_boundaries() -> N
         not in validation
     )
     assert "[`docs/assets/final/manifest.json`](assets/final/manifest.json)" in validation
-    assert "eeb6b87ce35ad04cb4c53d048c39fcbc8caf33bb62e142526e0f9aba544afb30" in validation
-    assert "Google Chrome 150.0.7871.186" in validation
-    assert "81 runtime paths" in validation
-    assert "`keyless_sdk_stub`" in validation
-    assert "`en-US` / `UTC` / `reduce` / `light`" in validation
-    assert (
-        "Capture source `85e1e8e…`; activation and canonical CI "
-        "`b578680…`"
-    ) in validation
     assert "CI did not execute the browser capture" in validation
     assert "1440×1024" in validation
     assert "390×844" in validation
@@ -256,6 +301,7 @@ def test_release_docs_cover_architecture_protocol_and_evidence_boundaries() -> N
     ):
         assert lane in validation
     assert "Unverified" in validation
+    _assert_validation_matches_current_capture(validation)
 
 
 def test_judge_checklist_separates_three_paths_and_every_external_blocker() -> None:
