@@ -459,6 +459,7 @@ class PublicBoundaryMiddleware:
     """Enforce byte/media bounds and attach safe identity and response headers."""
 
     _JSON_ROUTES = frozenset({"/api/recoveries", "/api/demo/reset"})
+    _BODYLESS_METHODS = frozenset({"GET", "HEAD"})
     _UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
     _OWNER_SCOPED_SUCCESS_ROUTES = frozenset(
         {
@@ -486,9 +487,15 @@ class PublicBoundaryMiddleware:
         trusted_proxy_cidrs: tuple[str, ...],
         deployed: bool,
         allowed_origins: tuple[str, ...] = (),
+        body_read_timeout_seconds: float = 5.0,
     ) -> None:
+        if not 0 < body_read_timeout_seconds <= 30:
+            raise ValueError(
+                "Request body read timeout must be positive and at most 30 seconds"
+            )
         self.app = app
         self._max_body_bytes = max_body_bytes
+        self._body_read_timeout_seconds = body_read_timeout_seconds
         self._hasher = identity_hasher
         self._session_ttl_seconds = session_ttl_seconds
         self._cookie_codec = identity_hasher.demo_session_cookie_codec(
@@ -730,6 +737,17 @@ class PublicBoundaryMiddleware:
                 recovery_id=scoped_recovery_id,
             )
             return
+        bodyless_method = scope.get("method") in self._BODYLESS_METHODS
+        if bodyless_method and transfer_encodings:
+            await self._send_error(
+                send,
+                status_code=400,
+                code="invalid_request",
+                request_id=request_id,
+                response_headers=fixed_headers,
+                recovery_id=scoped_recovery_id,
+            )
+            return
         declared_length: int | None = None
         if content_lengths:
             raw_declared_length = content_lengths[0]
@@ -747,6 +765,16 @@ class PublicBoundaryMiddleware:
                 )
                 return
             declared_length = int(raw_declared_length)
+            if bodyless_method and declared_length > 0:
+                await self._send_error(
+                    send,
+                    status_code=400,
+                    code="invalid_request",
+                    request_id=request_id,
+                    response_headers=fixed_headers,
+                    recovery_id=scoped_recovery_id,
+                )
+                return
             if declared_length > self._max_body_bytes:
                 await self._send_error(
                     send,
@@ -760,26 +788,39 @@ class PublicBoundaryMiddleware:
 
         messages: list[Message] = []
         total = 0
-        while True:
-            message = await receive()
-            messages.append(message)
-            if message["type"] == "http.disconnect":
-                return
-            if message["type"] != "http.request":
-                continue
-            total += len(message.get("body", b""))
-            if total > self._max_body_bytes:
+        if not bodyless_method:
+            try:
+                async with asyncio.timeout(self._body_read_timeout_seconds):
+                    while True:
+                        message = await receive()
+                        messages.append(message)
+                        if message["type"] == "http.disconnect":
+                            return
+                        if message["type"] != "http.request":
+                            continue
+                        total += len(message.get("body", b""))
+                        if total > self._max_body_bytes:
+                            await self._send_error(
+                                send,
+                                status_code=413,
+                                code="request_too_large",
+                                request_id=request_id,
+                                response_headers=fixed_headers,
+                                recovery_id=scoped_recovery_id,
+                            )
+                            return
+                        if not message.get("more_body", False):
+                            break
+            except TimeoutError:
                 await self._send_error(
                     send,
-                    status_code=413,
-                    code="request_too_large",
+                    status_code=408,
+                    code="invalid_request",
                     request_id=request_id,
                     response_headers=fixed_headers,
                     recovery_id=scoped_recovery_id,
                 )
                 return
-            if not message.get("more_body", False):
-                break
 
         if declared_length is not None and declared_length != total:
             await self._send_error(

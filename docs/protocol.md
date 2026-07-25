@@ -76,6 +76,14 @@ and, for live mode, before the process-local live gate and separate live-only le
 The charge is retained if a later capacity, cooldown, upstream, or internal failure
 occurs.
 
+The public boundary rejects framed `GET` and `HEAD` requests before reading a body,
+and leaves ordinary bodyless requests available to downstream disconnect handling.
+Other request bodies are capped by byte count and by one cooperative whole-body
+read deadline. `BACKCHANNEL_REQUEST_BODY_READ_TIMEOUT_SECONDS` is an integer from 1
+through 30, with a default of 5. Deadline expiry returns the generic HTTP `408`
+`invalid_request` envelope before downstream routing, session identity issuance, or
+admission work begins.
+
 The independent session, IP, and global counters use UTC calendar days. Exhaustion
 returns HTTP `429`, code `creation_daily_budget_exceeded`, the generic message
 `The public demo recovery creation budget is exhausted for today.`, and matching

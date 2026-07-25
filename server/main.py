@@ -312,6 +312,9 @@ def create_app(
         trusted_proxy_cidrs=runtime_settings.trusted_proxy_cidrs,
         deployed=runtime_settings.deployed,
         allowed_origins=runtime_settings.cors_origins,
+        body_read_timeout_seconds=(
+            runtime_settings.request_body_read_timeout.total_seconds()
+        ),
     )
 
     @application.exception_handler(PublicApiException)

@@ -114,6 +114,29 @@ def _raw_boundary_request(
     return int(start["status"]), decoded, session_store, downstream_calls, observed_state
 
 
+def _raw_boundary_scope(
+    *,
+    headers: list[tuple[bytes, bytes]],
+    method: str,
+    path: str = "/raw-boundary-probe",
+) -> dict[str, object]:
+    return {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": method,
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode("ascii"),
+        "query_string": b"",
+        "root_path": "",
+        "headers": headers,
+        "client": ("127.0.0.1", 43123),
+        "server": ("testserver", 80),
+        "state": {},
+    }
+
+
 def _live_settings(**overrides: object) -> RuntimeSettings:
     values: dict[str, object] = {
         "live_ready": False,
@@ -124,6 +147,27 @@ def _live_settings(**overrides: object) -> RuntimeSettings:
     }
     values.update(overrides)
     return RuntimeSettings(**values)  # type: ignore[arg-type]
+
+
+def test_request_body_read_timeout_configuration_is_bounded(monkeypatch) -> None:
+    defaults = RuntimeSettings(live_ready=False)
+    assert defaults.request_body_read_timeout == timedelta(seconds=5)
+
+    monkeypatch.setenv("BACKCHANNEL_REQUEST_BODY_READ_TIMEOUT_SECONDS", "7")
+    assert RuntimeSettings.from_environment().request_body_read_timeout == timedelta(
+        seconds=7
+    )
+
+    for timeout in (timedelta(0), timedelta(seconds=31)):
+        with pytest.raises(ValueError, match="Request body read timeout.*1.*30"):
+            RuntimeSettings(live_ready=False, request_body_read_timeout=timeout)
+    for raw in ("0", "31"):
+        monkeypatch.setenv("BACKCHANNEL_REQUEST_BODY_READ_TIMEOUT_SECONDS", raw)
+        with pytest.raises(
+            ValueError,
+            match="BACKCHANNEL_REQUEST_BODY_READ_TIMEOUT_SECONDS",
+        ):
+            RuntimeSettings.from_environment()
 
 
 @pytest.mark.parametrize("route_path", ["/health", "/readyz"])
@@ -311,6 +355,247 @@ def test_raw_boundary_rejects_ambiguous_or_oversized_framing_before_side_effects
     assert response["error"]["code"] == expected_code  # type: ignore[index]
     assert downstream_calls == 0
     assert session_store.lookups == 0
+
+
+@pytest.mark.parametrize(
+    ("method", "headers"),
+    [
+        ("GET", [(b"content-length", b"1")]),
+        ("GET", [(b"transfer-encoding", b"chunked")]),
+        ("HEAD", [(b"content-length", b"1")]),
+        ("HEAD", [(b"transfer-encoding", b"chunked")]),
+    ],
+)
+def test_raw_boundary_rejects_framed_bodyless_requests_before_receive(
+    method: str,
+    headers: list[tuple[bytes, bytes]],
+) -> None:
+    downstream_calls = 0
+    receive_calls = 0
+    sent: list[dict[str, object]] = []
+
+    async def downstream(scope, receive, send) -> None:
+        del scope, receive, send
+        nonlocal downstream_calls
+        downstream_calls += 1
+
+    middleware = PublicBoundaryMiddleware(
+        downstream,
+        max_body_bytes=64,
+        identity_hasher=PublicIdentityHasher(
+            "test-identity-secret-that-is-at-least-32-bytes"
+        ),
+        session_ttl_seconds=3600,
+        trusted_proxy_cidrs=(),
+        deployed=False,
+    )
+
+    async def receive() -> dict[str, object]:
+        nonlocal receive_calls
+        receive_calls += 1
+        raise AssertionError("framed bodyless requests must fail before body reads")
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(message)
+
+    asyncio.run(
+        middleware(  # type: ignore[arg-type]
+            _raw_boundary_scope(headers=headers, method=method),
+            receive,
+            send,
+        )
+    )
+
+    start = next(message for message in sent if message["type"] == "http.response.start")
+    body = b"".join(
+        message.get("body", b"")
+        for message in sent
+        if message["type"] == "http.response.body"
+    )
+    assert start["status"] == 400
+    assert json.loads(body)["error"]["code"] == "invalid_request"
+    assert receive_calls == 0
+    assert downstream_calls == 0
+
+
+def test_raw_boundary_preserves_receive_for_ordinary_bodyless_get() -> None:
+    downstream_calls = 0
+    receive_calls = 0
+    downstream_message: dict[str, object] | None = None
+    sent: list[dict[str, object]] = []
+
+    async def downstream(scope, receive, send) -> None:
+        del scope
+        nonlocal downstream_calls, downstream_message
+        downstream_calls += 1
+        downstream_message = await receive()
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    middleware = PublicBoundaryMiddleware(
+        downstream,
+        max_body_bytes=64,
+        identity_hasher=PublicIdentityHasher(
+            "test-identity-secret-that-is-at-least-32-bytes"
+        ),
+        session_ttl_seconds=3600,
+        trusted_proxy_cidrs=(),
+        deployed=False,
+    )
+
+    async def receive() -> dict[str, object]:
+        nonlocal receive_calls
+        receive_calls += 1
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(message)
+
+    asyncio.run(
+        middleware(  # type: ignore[arg-type]
+            _raw_boundary_scope(headers=[], method="GET"),
+            receive,
+            send,
+        )
+    )
+
+    start = next(message for message in sent if message["type"] == "http.response.start")
+    assert start["status"] == 204
+    assert downstream_calls == 1
+    assert receive_calls == 1
+    assert downstream_message == {"type": "http.disconnect"}
+
+
+def test_raw_boundary_times_out_stalled_allowed_request_body_without_task_leak() -> None:
+    downstream_calls = 0
+    receive_calls = 0
+    stalled_receive_cancelled = False
+    sent: list[dict[str, object]] = []
+
+    async def downstream(scope, receive, send) -> None:
+        del scope, receive, send
+        nonlocal downstream_calls
+        downstream_calls += 1
+
+    middleware = PublicBoundaryMiddleware(
+        downstream,
+        max_body_bytes=64,
+        body_read_timeout_seconds=0.01,
+        identity_hasher=PublicIdentityHasher(
+            "test-identity-secret-that-is-at-least-32-bytes"
+        ),
+        session_ttl_seconds=3600,
+        trusted_proxy_cidrs=(),
+        deployed=False,
+    )
+    scope = _raw_boundary_scope(
+        headers=[
+            (b"content-type", b"application/json"),
+            (b"transfer-encoding", b"chunked"),
+        ],
+        method="POST",
+        path="/api/recoveries",
+    )
+
+    async def receive() -> dict[str, object]:
+        nonlocal receive_calls, stalled_receive_cancelled
+        receive_calls += 1
+        if receive_calls == 1:
+            return {"type": "http.request", "body": b"{", "more_body": True}
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            stalled_receive_cancelled = True
+            raise
+        raise AssertionError("unreachable")
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(message)
+
+    async def exercise() -> None:
+        async with asyncio.timeout(0.25):
+            await middleware(  # type: ignore[arg-type]
+                scope,
+                receive,
+                send,
+            )
+        assert len(asyncio.all_tasks()) == 1
+
+    asyncio.run(exercise())
+
+    start = next(message for message in sent if message["type"] == "http.response.start")
+    body = b"".join(
+        message.get("body", b"")
+        for message in sent
+        if message["type"] == "http.response.body"
+    )
+    assert start["status"] == 408
+    assert json.loads(body)["error"]["code"] == "invalid_request"
+    assert receive_calls == 2
+    assert stalled_receive_cancelled is True
+    assert downstream_calls == 0
+    assert "public_identity" not in scope["state"]  # type: ignore[operator]
+
+
+def test_raw_boundary_propagates_caller_cancellation_during_body_read() -> None:
+    stalled = asyncio.Event()
+    receive_cancelled = False
+    downstream_calls = 0
+    sent: list[dict[str, object]] = []
+
+    async def downstream(scope, receive, send) -> None:
+        del scope, receive, send
+        nonlocal downstream_calls
+        downstream_calls += 1
+
+    middleware = PublicBoundaryMiddleware(
+        downstream,
+        max_body_bytes=64,
+        body_read_timeout_seconds=0.2,
+        identity_hasher=PublicIdentityHasher(
+            "test-identity-secret-that-is-at-least-32-bytes"
+        ),
+        session_ttl_seconds=3600,
+        trusted_proxy_cidrs=(),
+        deployed=False,
+    )
+
+    async def receive() -> dict[str, object]:
+        nonlocal receive_cancelled
+        stalled.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            receive_cancelled = True
+            raise
+        raise AssertionError("unreachable")
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(message)
+
+    async def exercise() -> None:
+        task = asyncio.create_task(
+            middleware(  # type: ignore[arg-type]
+                _raw_boundary_scope(
+                    headers=[(b"content-type", b"application/json")],
+                    method="POST",
+                    path="/api/recoveries",
+                ),
+                receive,
+                send,
+            )
+        )
+        await stalled.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert len(asyncio.all_tasks()) == 1
+
+    asyncio.run(exercise())
+
+    assert receive_cancelled is True
+    assert downstream_calls == 0
+    assert sent == []
 
 
 def test_trusted_forwarding_is_bounded_unambiguous_and_right_to_left() -> None:

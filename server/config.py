@@ -39,6 +39,7 @@ class RuntimeSettings:
         repr=False,
     )
     max_request_body_bytes: int = 16 * 1024
+    request_body_read_timeout: timedelta = timedelta(seconds=5)
     live_max_concurrent: int = 1
     live_operation_timeout: timedelta = timedelta(seconds=60)
     live_cooldown: timedelta = timedelta(seconds=30)
@@ -66,6 +67,12 @@ class RuntimeSettings:
             )
         if self.max_request_body_bytes < 1:
             raise ValueError("Request body limit must be positive")
+        if not timedelta(seconds=1) <= self.request_body_read_timeout <= timedelta(
+            seconds=30
+        ):
+            raise ValueError(
+                "Request body read timeout must be between 1 and 30 seconds"
+            )
         if self.live_max_concurrent < 1:
             raise ValueError("Live concurrency must be positive")
         if not timedelta(seconds=1) <= self.live_operation_timeout <= timedelta(
@@ -201,6 +208,14 @@ class RuntimeSettings:
                 "BACKCHANNEL_MAX_REQUEST_BODY_BYTES",
                 16 * 1024,
                 minimum=1,
+            ),
+            request_body_read_timeout=timedelta(
+                seconds=integer(
+                    "BACKCHANNEL_REQUEST_BODY_READ_TIMEOUT_SECONDS",
+                    5,
+                    minimum=1,
+                    maximum=30,
+                )
             ),
             live_max_concurrent=integer(
                 "BACKCHANNEL_LIVE_MAX_CONCURRENT",
