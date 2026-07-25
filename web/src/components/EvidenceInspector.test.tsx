@@ -1026,6 +1026,28 @@ describe("EvidenceInspector exact consent", () => {
     expect(screen.getByText("call-server-742")).toBeInTheDocument();
   });
 
+  it("places the mobile non-execution boundary before secondary consent evidence", () => {
+    render(
+      <EvidenceInspector
+        mobile
+        open
+        scenario={recoveryScenarios[0]}
+        snapshot={pendingSnapshot()}
+      />,
+    );
+
+    const boundary = screen.getByText("Execution has not begun.").closest(
+      ".execution-boundary",
+    );
+    const evidence = screen.getByText("Booking").closest(".consent-evidence");
+
+    expect(boundary).not.toBeNull();
+    expect(evidence).not.toBeNull();
+    expect(
+      boundary!.compareDocumentPosition(evidence!) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
   it("renders every consent value from the supplied server snapshot", () => {
     render(
       <EvidenceInspector

@@ -90,6 +90,11 @@ model call nor a provider dispatch.
   closes it without action, releases any live lease without erasing cooldown or usage, and
   seals a zero-decision, zero-execution expiration receipt. The browser disables stale controls
   at the displayed deadline and refreshes server evidence instead of inventing the outcome.
+- Terminal receipt display is bound to the current authoritative snapshot's recovery, scenario,
+  execution mode, terminal status, trace, and model provenance. Snapshot and receipt reads each
+  have a 12-second owned deadline; timeout or unmount aborts the exact request, and retry always
+  refreshes the snapshot before requesting its receipt. Quota replay remains explicitly
+  non-executing, while only the matching SDK trace claims demo-adapter execution.
 - Compatible pending approvals survive a process restart; version or definition drift fails
   closed with `resume_incompatible`.
 - An unfinished durable decision claim can be continued before its authoritative expiry without

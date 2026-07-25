@@ -55,6 +55,8 @@ const RETRYABLE_RESUME_NOTICE =
 
 export const SAVED_RECOVERY_RESTORE_TIMEOUT_MS = 12_000;
 export const RECEIPT_REQUEST_TIMEOUT_MS = 12_000;
+const RECEIPT_LOAD_ERROR =
+  "The authoritative terminal receipt could not be loaded.";
 
 type HotelResumeState =
   | "checking"
@@ -75,6 +77,15 @@ interface HotelResumeRequest {
 interface ReceiptRequest {
   controller: AbortController;
   deadlineId: ReturnType<typeof setTimeout> | null;
+  bindingKey: string;
+  restoreFocusOnFailure: boolean;
+  active: boolean;
+}
+
+interface TerminalSnapshotRequest {
+  controller: AbortController;
+  deadlineId: ReturnType<typeof setTimeout> | null;
+  refreshKey: string | null;
   restoreFocusOnFailure: boolean;
   active: boolean;
 }
@@ -125,6 +136,49 @@ function serverStatusLabel(status: RecoveryStatus, hasPendingApproval: boolean):
   }
 }
 
+function receiptMatchesSnapshot(
+  receipt: RecoveryReceipt,
+  snapshot: RecoverySnapshot,
+): boolean {
+  if (!isTerminalRecoveryStatus(snapshot.status)) return false;
+  const expectedStatus =
+    snapshot.executionMode === "replay_fixture" && snapshot.status === "completed"
+      ? "simulated_completed"
+      : snapshot.status;
+  const provenanceMatches =
+    receipt.recoveryId === snapshot.recoveryId &&
+    receipt.executionMode === snapshot.executionMode &&
+    receipt.status === expectedStatus &&
+    receipt.rootTraceId === snapshot.rootTraceId &&
+    receipt.modelIds.length === snapshot.modelIds.length &&
+    receipt.modelIds.every((modelId, index) => modelId === snapshot.modelIds[index]);
+  if (!provenanceMatches) return false;
+  if (snapshot.scenarioId === "api-quota") {
+    return (
+      snapshot.status === "completed" &&
+      snapshot.executionMode !== "openai_live" &&
+      receipt.approvalCount === 0
+    );
+  }
+  return (
+    snapshot.scenarioId === "hotel" &&
+    (snapshot.status !== "completed" ||
+      snapshot.executionMode === "replay_fixture" ||
+      receipt.approvalCount === 1)
+  );
+}
+
+function receiptSnapshotKey(snapshot: RecoverySnapshot): string {
+  return JSON.stringify([
+    snapshot.recoveryId,
+    snapshot.scenarioId,
+    snapshot.executionMode,
+    snapshot.status,
+    snapshot.rootTraceId,
+    snapshot.modelIds,
+  ]);
+}
+
 function workspaceLabel(mode: RecoverySnapshot["executionMode"] | undefined): string {
   switch (mode) {
     case "openai_live": return "Live agent workspace";
@@ -136,6 +190,17 @@ function workspaceLabel(mode: RecoverySnapshot["executionMode"] | undefined): st
 
 function serverLifecycleDetails(snapshot: RecoverySnapshot): RecoveryScenario["lifecycleDetails"] {
   if (snapshot.scenarioId === "api-quota") {
+    if (snapshot.executionMode === "replay_fixture") {
+      return {
+        Detect: "Recorded quota demand exceeded the recorded baseline ceiling.",
+        Prove: "Recorded provider evidence proved the fixture's quota ceiling.",
+        Negotiate: "Recorded temporary US-region burst terms were replayed.",
+        Authorize: "Recorded delegated authority required zero human approvals.",
+        Execute: "No quota adapter execution occurred; this is a replay fixture.",
+        "Verify & seal":
+          "Recorded verification and permission-revocation evidence was replayed.",
+      };
+    }
     return {
       Detect: "Server detected demand of 1200 units above the 1000-unit baseline ceiling.",
       Prove: "Provider proved a 1000-unit baseline ceiling.",
@@ -241,10 +306,14 @@ export default function App() {
   const [receiptLoading, setReceiptLoading] = useState<Record<string, boolean>>({});
   const [receiptErrors, setReceiptErrors] = useState<Record<string, string>>({});
   const receiptRequestsRef = useRef(new Map<string, ReceiptRequest>());
-  const completedReceiptIdsRef = useRef(new Set<string>());
+  const completedReceiptBindingsRef = useRef(new Map<string, string>());
+  const hotelSnapshotRef = useRef<RecoverySnapshot | null>(null);
+  const quotaSnapshotRef = useRef<RecoverySnapshot | null>(null);
   const receiptRetryFocusRecoveryIdRef = useRef<string | null>(null);
   const receiptRetryButtonRef = useRef<HTMLButtonElement>(null);
-  const terminalRefreshesRef = useRef(new Set<string>());
+  const terminalSnapshotRequestsRef = useRef(
+    new Map<string, TerminalSnapshotRequest>(),
+  );
   const terminalRefreshCompletedRef = useRef(new Set<string>());
   const [evidenceOpen, setEvidenceOpen] = useState(false);
   const evidenceTriggerRef = useRef<HTMLButtonElement>(null);
@@ -252,6 +321,8 @@ export default function App() {
     hotelResumeState === "checking" ||
     hotelResumeState === "retryable" ||
     hotelResumeState === "retrying";
+  hotelSnapshotRef.current = hotelSnapshot;
+  quotaSnapshotRef.current = quotaSnapshot;
 
   const activeScenario =
     recoveryScenarios.find((scenario) => scenario.id === activeId) ?? recoveryScenarios[0];
@@ -470,14 +541,28 @@ export default function App() {
     }
   }, [retireReceiptRequest]);
 
-  const loadReceipt = useCallback((recoveryId: string, explicitRetry = false) => {
-    if (
-      receiptRequestsRef.current.get(recoveryId)?.active === true ||
-      completedReceiptIdsRef.current.has(recoveryId)
-    ) return;
+  const loadReceipt = useCallback((snapshot: RecoverySnapshot, explicitRetry = false) => {
+    const { recoveryId } = snapshot;
+    const bindingKey = receiptSnapshotKey(snapshot);
+    const existingRequest = receiptRequestsRef.current.get(recoveryId);
+    if (existingRequest?.active === true) {
+      if (existingRequest.bindingKey === bindingKey) return;
+      retireReceiptRequest(recoveryId, existingRequest, true);
+    }
+    const completedBinding = completedReceiptBindingsRef.current.get(recoveryId);
+    if (completedBinding === bindingKey) return;
+    if (completedBinding !== undefined) {
+      completedReceiptBindingsRef.current.delete(recoveryId);
+      setReceipts((current) => {
+        const next = { ...current };
+        delete next[recoveryId];
+        return next;
+      });
+    }
     const request: ReceiptRequest = {
       controller: new AbortController(),
       deadlineId: null,
+      bindingKey,
       restoreFocusOnFailure: explicitRetry,
       active: true,
     };
@@ -496,15 +581,27 @@ export default function App() {
       }
       setReceiptErrors((current) => ({
         ...current,
-        [recoveryId]: "The authoritative terminal receipt could not be loaded.",
+        [recoveryId]: RECEIPT_LOAD_ERROR,
       }));
       setReceiptLoading((current) => ({ ...current, [recoveryId]: false }));
     }, RECEIPT_REQUEST_TIMEOUT_MS);
 
     void getReceipt(recoveryId, request.controller.signal)
       .then((receipt) => {
+        const currentSnapshot =
+          snapshot.scenarioId === "hotel"
+            ? hotelSnapshotRef.current
+            : quotaSnapshotRef.current;
+        if (
+          currentSnapshot === null ||
+          currentSnapshot.recoveryId !== recoveryId ||
+          receiptSnapshotKey(currentSnapshot) !== request.bindingKey ||
+          !receiptMatchesSnapshot(receipt, currentSnapshot)
+        ) {
+          throw new Error("Receipt does not match the authoritative recovery snapshot");
+        }
         if (!retireReceiptRequest(recoveryId, request, false)) return;
-        completedReceiptIdsRef.current.add(recoveryId);
+        completedReceiptBindingsRef.current.set(recoveryId, request.bindingKey);
         setReceipts((current) => ({ ...current, [recoveryId]: receipt }));
         setReceiptLoading((current) => ({ ...current, [recoveryId]: false }));
       })
@@ -515,11 +612,132 @@ export default function App() {
         }
         setReceiptErrors((current) => ({
           ...current,
-          [recoveryId]: "The authoritative terminal receipt could not be loaded.",
+          [recoveryId]: RECEIPT_LOAD_ERROR,
         }));
         setReceiptLoading((current) => ({ ...current, [recoveryId]: false }));
       });
   }, [retireReceiptRequest]);
+
+  const retireTerminalSnapshotRequest = useCallback((
+    recoveryId: string,
+    request: TerminalSnapshotRequest,
+    abort: boolean,
+  ): boolean => {
+    if (
+      !request.active ||
+      terminalSnapshotRequestsRef.current.get(recoveryId) !== request
+    ) {
+      return false;
+    }
+    request.active = false;
+    if (request.deadlineId !== null) {
+      clearTimeout(request.deadlineId);
+      request.deadlineId = null;
+    }
+    terminalSnapshotRequestsRef.current.delete(recoveryId);
+    if (abort && !request.controller.signal.aborted) request.controller.abort();
+    return true;
+  }, []);
+
+  const abortTerminalSnapshotRequests = useCallback(() => {
+    for (const [recoveryId, request] of terminalSnapshotRequestsRef.current) {
+      retireTerminalSnapshotRequest(recoveryId, request, true);
+    }
+  }, [retireTerminalSnapshotRequest]);
+
+  const loadTerminalSnapshot = useCallback((
+    sourceSnapshot: RecoverySnapshot,
+    {
+      explicitRetry = false,
+      refreshKey = null,
+    }: {
+      explicitRetry?: boolean;
+      refreshKey?: string | null;
+    } = {},
+  ) => {
+    const { recoveryId, scenarioId } = sourceSnapshot;
+    if (terminalSnapshotRequestsRef.current.get(recoveryId)?.active === true) {
+      return;
+    }
+    const request: TerminalSnapshotRequest = {
+      controller: new AbortController(),
+      deadlineId: null,
+      refreshKey,
+      restoreFocusOnFailure: explicitRetry,
+      active: true,
+    };
+    terminalSnapshotRequestsRef.current.set(recoveryId, request);
+    if (explicitRetry) {
+      setReceiptLoading((current) => ({ ...current, [recoveryId]: true }));
+      setReceiptErrors((current) => {
+        const next = { ...current };
+        delete next[recoveryId];
+        return next;
+      });
+    }
+
+    const failCurrentRequest = () => {
+      if (!retireTerminalSnapshotRequest(recoveryId, request, true)) return;
+      if (request.restoreFocusOnFailure) {
+        receiptRetryFocusRecoveryIdRef.current = recoveryId;
+      }
+      setReceiptErrors((current) => ({
+        ...current,
+        [recoveryId]: RECEIPT_LOAD_ERROR,
+      }));
+      setReceiptLoading((current) => ({
+        ...current,
+        [recoveryId]: false,
+      }));
+    };
+
+    request.deadlineId = setTimeout(
+      failCurrentRequest,
+      RECEIPT_REQUEST_TIMEOUT_MS,
+    );
+    void getRecovery(recoveryId, request.controller.signal)
+      .then((snapshot) => {
+        if (
+          !request.active ||
+          terminalSnapshotRequestsRef.current.get(recoveryId) !== request
+        ) {
+          return;
+        }
+        const currentSnapshot =
+          scenarioId === "hotel"
+            ? hotelSnapshotRef.current
+            : quotaSnapshotRef.current;
+        if (
+          !appMountedRef.current ||
+          currentSnapshot?.recoveryId !== recoveryId ||
+          snapshot.scenarioId !== scenarioId ||
+          !isTerminalRecoveryStatus(snapshot.status)
+        ) {
+          throw new Error(
+            "Terminal evidence refresh did not match the current recovery",
+          );
+        }
+        if (!retireTerminalSnapshotRequest(recoveryId, request, false)) return;
+        if (request.refreshKey !== null) {
+          terminalRefreshCompletedRef.current.add(request.refreshKey);
+        }
+        if (scenarioId === "hotel") {
+          hotelSnapshotRef.current = snapshot;
+          setHotelSnapshot((current) =>
+            current?.recoveryId === recoveryId ? snapshot : current,
+          );
+        } else {
+          quotaSnapshotRef.current = snapshot;
+          setQuotaSnapshot((current) =>
+            current?.recoveryId === recoveryId ? snapshot : current,
+          );
+        }
+        void loadReceipt(snapshot, explicitRetry);
+      })
+      .catch(() => {
+        failCurrentRequest();
+      });
+  }, [loadReceipt, retireTerminalSnapshotRequest]);
 
   const startQuota = useCallback(async () => {
     if (quotaStartedRef.current) return;
@@ -907,14 +1125,19 @@ export default function App() {
       receiptRetryFocusRecoveryIdRef.current = null;
       abortHotelResumeRequest();
       abortReceiptRequests();
+      abortTerminalSnapshotRequests();
     };
-  }, [abortHotelResumeRequest, abortReceiptRequests]);
+  }, [
+    abortHotelResumeRequest,
+    abortReceiptRequests,
+    abortTerminalSnapshotRequests,
+  ]);
 
   useEffect(() => {
     const terminalSnapshots = [hotelSnapshot, quotaSnapshot];
     for (const snapshot of terminalSnapshots) {
       if (snapshot !== null && isTerminalRecoveryStatus(snapshot.status)) {
-        void loadReceipt(snapshot.recoveryId);
+        void loadReceipt(snapshot);
       }
     }
   }, [hotelSnapshot, loadReceipt, quotaSnapshot]);
@@ -941,33 +1164,12 @@ export default function App() {
   useEffect(() => {
     if (terminalEvent === undefined || activeSnapshot === null) return;
     const refreshKey = `${terminalEvent.recoveryId}:${terminalEvent.seq}`;
-    if (
-      terminalRefreshesRef.current.has(refreshKey) ||
-      terminalRefreshCompletedRef.current.has(refreshKey)
-    ) return;
-    terminalRefreshesRef.current.add(refreshKey);
-    const scenarioId = activeSnapshot.scenarioId;
-    const requestedRecoveryId = terminalEvent.recoveryId;
-    void getRecovery(requestedRecoveryId)
-      .then((snapshot) => {
-        if (snapshot.scenarioId !== scenarioId) return;
-        terminalRefreshCompletedRef.current.add(refreshKey);
-        if (scenarioId === "hotel") {
-          setHotelSnapshot((current) =>
-            current?.recoveryId === requestedRecoveryId ? snapshot : current,
-          );
-        } else {
-          setQuotaSnapshot((current) =>
-            current?.recoveryId === requestedRecoveryId ? snapshot : current,
-          );
-        }
-      })
-      .catch(() => {
-        // The event remains visible; no terminal snapshot claim is synthesized.
-      })
-      .finally(() => terminalRefreshesRef.current.delete(refreshKey));
-    void loadReceipt(requestedRecoveryId);
-  }, [activeSnapshot, loadReceipt, terminalEvent]);
+    if (terminalRefreshCompletedRef.current.has(refreshKey)) return;
+    if (isTerminalRecoveryStatus(activeSnapshot.status)) {
+      void loadReceipt(activeSnapshot);
+    }
+    loadTerminalSnapshot(activeSnapshot, { refreshKey });
+  }, [activeSnapshot, loadReceipt, loadTerminalSnapshot, terminalEvent]);
 
   const activeScenarioView = useMemo<RecoveryScenario>(() => {
     if (activeSnapshot !== null) {
@@ -1014,7 +1216,7 @@ export default function App() {
       current?.recoveryId === requestedRecoveryId ? snapshot : current,
     );
     if (isTerminalRecoveryStatus(snapshot.status)) {
-      void loadReceipt(snapshot.recoveryId);
+      void loadReceipt(snapshot);
     }
   }, [hotelSnapshot, loadReceipt]);
 
@@ -1024,8 +1226,14 @@ export default function App() {
       : deriveRuntimePresentation(health, activeSnapshot),
     [activeSnapshot, health],
   );
-  const activeReceipt =
+  const storedActiveReceipt =
     activeSnapshot === null ? null : receipts[activeSnapshot.recoveryId] ?? null;
+  const activeReceipt =
+    activeSnapshot !== null &&
+    storedActiveReceipt !== null &&
+    receiptMatchesSnapshot(storedActiveReceipt, activeSnapshot)
+      ? storedActiveReceipt
+      : null;
   const activeReceiptLoading =
     activeSnapshot === null ? false : receiptLoading[activeSnapshot.recoveryId] === true;
   const activeReceiptError =
@@ -1315,22 +1523,14 @@ export default function App() {
             activeSnapshot === null
               ? undefined
               : () => {
-                  const { recoveryId, scenarioId } = activeSnapshot;
-                  void getRecovery(recoveryId)
-                    .then((snapshot) => {
-                      if (snapshot.scenarioId !== scenarioId) return;
-                      if (scenarioId === "hotel") {
-                        setHotelSnapshot((current) =>
-                          current?.recoveryId === recoveryId ? snapshot : current,
-                        );
-                      } else {
-                        setQuotaSnapshot((current) =>
-                          current?.recoveryId === recoveryId ? snapshot : current,
-                        );
-                      }
-                    })
-                    .catch(() => {});
-                  void loadReceipt(recoveryId, true);
+                  const refreshKey =
+                    terminalEvent?.recoveryId === activeSnapshot.recoveryId
+                      ? `${terminalEvent.recoveryId}:${terminalEvent.seq}`
+                      : null;
+                  loadTerminalSnapshot(activeSnapshot, {
+                    explicitRetry: true,
+                    refreshKey,
+                  });
                 }
           }
           returnFocusRef={evidenceTriggerRef}

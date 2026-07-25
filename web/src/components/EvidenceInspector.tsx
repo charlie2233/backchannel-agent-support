@@ -628,6 +628,18 @@ export function EvidenceInspector({
           <span className="status-symbol status-symbol--pending_approval" aria-hidden="true" />
           <div><span>Status</span><strong>Pending approval</strong></div>
         </div>
+        <div className="execution-boundary" aria-live="polite">
+          <strong>
+            {decisionExpired
+              ? "Consent deadline reached — checking the authoritative outcome"
+              : "Execution has not begun."}
+          </strong>
+          <p>
+            {decisionExpired
+              ? "Decision controls are disabled while the server confirms whether a decision claim won."
+              : "The server will recheck this exact consent immediately before dispatch."}
+          </p>
+        </div>
         <dl className="evidence-list consent-evidence">
           <div><dt>Booking</dt><dd className="mono">{terms.bookingId}</dd></div>
           <div><dt>Replacement</dt><dd>{terms.replacement.fromRoomType} → {terms.replacement.toRoomType}</dd></div>
@@ -645,18 +657,6 @@ export function EvidenceInspector({
           <div><dt>Delegated authority</dt><dd>Satisfied</dd></div>
           <div><dt>Pending tool-call ID</dt><dd className="mono">{approval.toolCallId}</dd></div>
         </dl>
-        <div className="execution-boundary" aria-live="polite">
-          <strong>
-            {decisionExpired
-              ? "Consent deadline reached — checking the authoritative outcome"
-              : "Execution has not begun."}
-          </strong>
-          <p>
-            {decisionExpired
-              ? "Decision controls are disabled while the server confirms whether a decision claim won."
-              : "The server will recheck this exact consent immediately before dispatch."}
-          </p>
-        </div>
         <TechnicalEvidence defaultOpen={!mobile} entries={technicalEntries} />
         {error === null ? null : <p role="alert">{error}</p>}
         <p className="decision-status" aria-live="polite">{statusMessage}</p>

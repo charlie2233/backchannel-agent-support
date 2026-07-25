@@ -39,6 +39,7 @@ npm --workspace web exec -- vitest run src/components/EvidenceInspector.test.tsx
 npm --workspace web exec -- vitest run src/api/client.test.ts src/App.explicitLive.test.tsx
 npm --workspace web exec -- vitest run src/api/events.test.ts src/hooks/useRecovery.test.tsx
 npm --workspace web exec -- vitest run src/App.explicitLive.test.tsx src/recoverySession.test.ts
+npm --workspace web exec -- vitest run src/App.receiptDeadline.test.tsx
 ```
 
 It proves foreign snapshot/SSE/receipt/approve/decline all match an absent recovery's generic
@@ -101,6 +102,11 @@ access-check ordering, synchronous snapshot/SSE/receipt/decision truth, bounded 
 stable `remedy_expired` retries, conservative claimed approve/decline terminalization, canonical
 completed-execution reconciliation after expiry, and fake-timer controls that refresh once
 without posting a stale decision or continuing after unmount.
+The terminal-receipt browser suite proves separate finite snapshot and receipt deadlines,
+exact abort ownership across timeout, retry, StrictMode, and unmount, snapshot-before-receipt
+retry ordering, suppression of late and superseded same-ID results, recovery/mode/status/trace/
+model correlation before storage and render, and truthful separation between non-executing quota
+replay evidence and the deterministic SDK demo-adapter trace.
 The decision-resume suites prove a minimal mutually exclusive claimed view, full stored-request
 fingerprint verification, session authorization before JSON or claim inspection, exact empty
 requests, stored approve/decline continuation, zero-dispatch declines, completed-response replay,

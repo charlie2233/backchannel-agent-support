@@ -22,8 +22,14 @@ The browser validates the public response shape but never invents provenance or 
 state. A created recovery returns a typed snapshot. Its `recoveryId` selects one persisted,
 ordered event stream; native `EventSource` reconnects with `Last-Event-ID`, and the server
 replays later rows before waiting for new commits. Terminal events close the stream, after
-which the UI fetches the authoritative snapshot and receipt. The authorized cursor header may
-occur at most once and accepts ASCII digits only in the SQLite-safe numeric range
+which the UI refreshes the authoritative snapshot before accepting its receipt. Both reads have
+separate 12-second deadlines, abort ownership, stale-settlement suppression, and an explicit
+retry that never posts a decision or starts a replacement recovery. A receipt is rendered only
+when its recovery ID, scenario semantics, execution mode, terminal-status mapping, root trace,
+and ordered model IDs match the current snapshot; a superseding same-ID snapshot retires the
+older receipt request. Quota replay copy states that no adapter ran, while matching SDK evidence
+retains its simulated execution claim. The authorized cursor header may occur at most once and
+accepts ASCII digits only in the SQLite-safe numeric range
 `0..9223372036854775807`; leading zeroes are allowed.
 
 Event delivery uses a lock-protected, fail-fast admission controller. The defaults admit at
