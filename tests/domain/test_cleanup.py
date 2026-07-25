@@ -4,8 +4,9 @@ import asyncio
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
-from threading import Barrier, Event
+from threading import Barrier, Event, Thread, current_thread
 from threading import enumerate as enumerate_threads
+from typing import Any
 
 import pytest
 
@@ -239,29 +240,43 @@ def test_periodic_cleanup_keeps_event_loop_live_during_sqlite_writer_contention(
     store = SQLiteStore(database_path)
     writer_lock_held = Event()
     release_writer = Event()
-    cleanup_started = Event()
-    cleanup_finished = Event()
+    cleanup_write_attempted = Event()
     cleanup_results: list[int] = []
+    cleanup_workers: list[Thread] = []
 
     def hold_writer_lock() -> None:
         connection = sqlite3.connect(database_path, timeout=1)
         try:
             connection.execute("BEGIN IMMEDIATE")
             writer_lock_held.set()
-            cleanup_started.wait(timeout=2)
-            release_writer.wait(timeout=1)
+            release_writer.wait(timeout=2)
             connection.rollback()
         finally:
             writer_lock_held.clear()
             connection.close()
 
-    original_cleanup = store.cleanup_terminal_recoveries
+    class CleanupConnection(sqlite3.Connection):
+        def execute(
+            self,
+            sql: str,
+            parameters: Any = (),
+            /,
+        ) -> sqlite3.Cursor:
+            if sql == "BEGIN IMMEDIATE":
+                cleanup_write_attempted.set()
+            return super().execute(sql, parameters)
 
-    def tracked_cleanup(*, cutoff: datetime, batch_size: int) -> int:
-        cleanup_started.set()
-        return original_cleanup(cutoff=cutoff, batch_size=batch_size)
+    def cleanup_connect() -> sqlite3.Connection:
+        connection = sqlite3.connect(
+            database_path,
+            timeout=10,
+            factory=CleanupConnection,
+        )
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        return connection
 
-    store.cleanup_terminal_recoveries = tracked_cleanup  # type: ignore[method-assign]
+    store._connect = cleanup_connect  # type: ignore[method-assign]
     service = RecoveryCleanupService(
         store=store,
         ttl=timedelta(days=7),
@@ -271,9 +286,9 @@ def test_periodic_cleanup_keeps_event_loop_live_during_sqlite_writer_contention(
     original_run_once = service.run_once
 
     def tracked_run_once() -> int:
+        cleanup_workers.append(current_thread())
         result = original_run_once()
         cleanup_results.append(result)
-        cleanup_finished.set()
         return result
 
     service.run_once = tracked_run_once  # type: ignore[method-assign]
@@ -283,16 +298,26 @@ def test_periodic_cleanup_keeps_event_loop_live_during_sqlite_writer_contention(
         cleanup_task = service.task
         assert cleanup_task is not None
 
-        while not cleanup_started.is_set():
+        while not cleanup_write_attempted.is_set():
             await asyncio.sleep(0)
         assert writer_lock_held.is_set()
-        assert not cleanup_finished.is_set()
+        assert cleanup_results == []
 
-        release_writer.set()
-        while not cleanup_finished.is_set():
+        shutdown_task = asyncio.create_task(service.shutdown())
+        await asyncio.sleep(0)
+        assert not shutdown_task.done()
+
+        async def loop_probe() -> bool:
             await asyncio.sleep(0)
+            return writer_lock_held.is_set() and not shutdown_task.done()
 
-        await service.shutdown()
+        try:
+            assert await asyncio.wait_for(loop_probe(), timeout=1)
+        finally:
+            release_writer.set()
+            await asyncio.wait_for(shutdown_task, timeout=2)
+
+        assert cleanup_results == [0]
         assert cleanup_task.done()
         assert service.task is None
         assert not service.running
@@ -309,7 +334,11 @@ def test_periodic_cleanup_keeps_event_loop_live_during_sqlite_writer_contention(
             release_writer.set()
         writer.result(timeout=2)
 
-    assert cleanup_results == [0]
+    assert len(cleanup_workers) == 1
+    cleanup_worker = cleanup_workers[0]
+    assert cleanup_worker.name.startswith("asyncio_")
+    assert not cleanup_worker.is_alive()
+    assert cleanup_worker not in enumerate_threads()
     assert not any(
         thread.name.startswith("cleanup-writer") for thread in enumerate_threads()
     )
