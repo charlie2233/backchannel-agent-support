@@ -291,6 +291,140 @@ describe("browser recovery-creation idempotency", () => {
     ).toBeNull();
   });
 
+  it("shows the safe quota capacity message and explicitly retries the same intent", async () => {
+    const message =
+      "Recovery creation is temporarily at capacity. Existing starts can still be retried; try a new start later.";
+    const postBodies: CreationIntent[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/health") return Promise.resolve(liveHealth());
+        if (url === "/api/recoveries") {
+          const body = readPostBody(init);
+          postBodies.push(body);
+          return Promise.resolve(
+            postBodies.length === 1
+              ? jsonResponse(
+                  {
+                    code: "creation_capacity",
+                    message,
+                    requestId: "0123456789abcdef0123456789abcdef",
+                  },
+                  429,
+                )
+              : jsonResponse(quotaSnapshot(), 201),
+          );
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+
+    render(<App />);
+    const quotaAction = await screen.findByRole(
+      "button",
+      { name: /API quota recovery/i },
+      { timeout: 10_000 },
+    );
+    await waitFor(() => expect(quotaAction).toBeEnabled());
+    fireEvent.click(quotaAction);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(message);
+    expect(postBodies).toHaveLength(1);
+    const storedIntent = JSON.parse(
+      window.sessionStorage.getItem(API_QUOTA_CREATION_INTENT_KEY) ?? "null",
+    ) as CreationIntent;
+    expect(storedIntent).toEqual(postBodies[0]);
+    expect(document.body).not.toHaveTextContent(storedIntent.clientRequestId);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Retry quota recovery" }),
+    );
+    expect(
+      await screen.findByText("Idempotent quota recovery accepted."),
+    ).toBeVisible();
+    expect(postBodies).toHaveLength(2);
+    expect(postBodies[1]).toEqual(storedIntent);
+    expect(
+      window.sessionStorage.getItem(API_QUOTA_CREATION_INTENT_KEY),
+    ).toBeNull();
+  });
+
+  it("abandons a conflicting quota intent only on explicit fresh start", async () => {
+    const message =
+      "This recovery start no longer matches its original request. No additional run was started.";
+    const postBodies: CreationIntent[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/health") return Promise.resolve(liveHealth());
+        if (url === "/api/recoveries") {
+          const body = readPostBody(init);
+          postBodies.push(body);
+          return Promise.resolve(
+            postBodies.length === 1
+              ? jsonResponse(
+                  {
+                    code: "idempotency_conflict",
+                    message,
+                    requestId: "0123456789abcdef0123456789abcdef",
+                  },
+                  409,
+                )
+              : jsonResponse(quotaSnapshot(), 201),
+          );
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+
+    render(<App />);
+    const quotaAction = await screen.findByRole(
+      "button",
+      { name: /API quota recovery/i },
+      { timeout: 10_000 },
+    );
+    await waitFor(() => expect(quotaAction).toBeEnabled());
+    fireEvent.click(quotaAction);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(message);
+    expect(postBodies).toHaveLength(1);
+    const conflicted = JSON.parse(
+      window.sessionStorage.getItem(API_QUOTA_CREATION_INTENT_KEY) ?? "null",
+    ) as CreationIntent;
+    expect(conflicted).toEqual(postBodies[0]);
+    expect(
+      screen.queryByRole("button", { name: "Retry quota recovery" }),
+    ).not.toBeInTheDocument();
+    const startNew = screen.getByRole("button", {
+      name: "Start a new quota recovery",
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(postBodies).toHaveLength(1);
+    expect(document.body).not.toHaveTextContent(conflicted.clientRequestId);
+
+    fireEvent.click(startNew);
+    expect(
+      await screen.findByText("Idempotent quota recovery accepted."),
+    ).toBeVisible();
+    expect(postBodies).toHaveLength(2);
+    expect(postBodies[1]).toMatchObject({
+      scenarioId: "api-quota",
+      executionMode: "sdk_stub",
+      clientRequestId: expect.stringMatching(REQUEST_ID_PATTERN),
+    });
+    expect(postBodies[1].clientRequestId).not.toBe(
+      conflicted.clientRequestId,
+    );
+    expect(
+      window.sessionStorage.getItem(API_QUOTA_CREATION_INTENT_KEY),
+    ).toBeNull();
+  });
+
   it("rotates the ID when a definitive live admission rejection falls back to replay", async () => {
     const postBodies: CreationIntent[] = [];
     const intentsAtPost: Array<CreationIntent | null> = [];
@@ -360,20 +494,29 @@ describe("browser recovery-creation idempotency", () => {
       code: "idempotency_conflict",
       message:
         "This recovery start no longer matches its original request. No additional run was started.",
+      status: 409,
     },
     {
       code: "creation_pending",
       message:
         "Recovery creation is still in progress. Retry the same start shortly.",
+      status: 409,
     },
     {
       code: "creation_outcome_unknown",
       message:
         "The recovery start outcome could not be confirmed. No replacement run was started.",
+      status: 409,
+    },
+    {
+      code: "creation_capacity",
+      message:
+        "Recovery creation is temporarily at capacity. Existing starts can still be retried; try a new start later.",
+      status: 429,
     },
   ] as const)(
-    "surfaces $code without retrying, falling back, or leaking the key",
-    async ({ code, message }) => {
+    "surfaces $code without automatic retry, fallback, or key leakage",
+    async ({ code, message, status }) => {
       const postBodies: CreationIntent[] = [];
       vi.stubGlobal(
         "fetch",
@@ -389,7 +532,7 @@ describe("browser recovery-creation idempotency", () => {
                   message,
                   requestId: "0123456789abcdef0123456789abcdef",
                 },
-                409,
+                status,
               ),
             );
           }
@@ -432,6 +575,12 @@ describe("browser recovery-creation idempotency", () => {
         expect(
           screen.getByRole("button", { name: "Retry recovery start" }),
         ).toBeVisible();
+        fireEvent.click(
+          screen.getByRole("button", { name: "Retry recovery start" }),
+        );
+        await waitFor(() => expect(postBodies).toHaveLength(2));
+        expect(postBodies[1]).toEqual(postBodies[0]);
+        expect(readHotelCreationIntent()).toEqual(postBodies[0]);
       }
     },
   );

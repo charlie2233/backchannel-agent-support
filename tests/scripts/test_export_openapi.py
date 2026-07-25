@@ -178,6 +178,157 @@ def test_recovery_creation_documents_exact_idempotency_conflict_envelopes() -> N
     }
 
 
+def test_recovery_creation_documents_only_exact_reachable_429_envelopes() -> None:
+    schema = json.loads(_exporter().render_openapi())
+
+    response = schema["paths"]["/api/recoveries"]["post"]["responses"]["429"]
+
+    assert response == {
+        "description": (
+            "A new recovery start would exceed creation-ledger capacity, or a live "
+            "start would exceed live admission, cooldown, or daily-budget policy."
+        ),
+        "content": {
+            "application/json": {
+                "schema": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["code", "message", "requestId"],
+                            "properties": {
+                                "code": {
+                                    "type": "string",
+                                    "enum": ["creation_capacity"],
+                                },
+                                "message": {
+                                    "type": "string",
+                                    "enum": [
+                                        "Recovery creation is temporarily at capacity. "
+                                        "Existing starts can still be retried; try a "
+                                        "new start later."
+                                    ],
+                                },
+                                "requestId": {
+                                    "type": "string",
+                                    "pattern": "^[0-9a-f]{32}$",
+                                },
+                            },
+                        },
+                        {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": [
+                                "code",
+                                "message",
+                                "requestId",
+                                "fallbackExecutionMode",
+                            ],
+                            "properties": {
+                                "code": {
+                                    "type": "string",
+                                    "enum": ["live_capacity"],
+                                },
+                                "message": {
+                                    "type": "string",
+                                    "enum": [
+                                        "Live recovery is currently at capacity. A "
+                                        "replay fixture is starting automatically; "
+                                        "you can rerun it explicitly."
+                                    ],
+                                },
+                                "requestId": {
+                                    "type": "string",
+                                    "pattern": "^[0-9a-f]{32}$",
+                                },
+                                "fallbackExecutionMode": {
+                                    "type": "string",
+                                    "enum": ["replay_fixture"],
+                                },
+                            },
+                        },
+                        {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": [
+                                "code",
+                                "message",
+                                "requestId",
+                                "fallbackExecutionMode",
+                            ],
+                            "properties": {
+                                "code": {
+                                    "type": "string",
+                                    "enum": ["cooldown"],
+                                },
+                                "message": {
+                                    "type": "string",
+                                    "enum": [
+                                        "Please wait before starting another live "
+                                        "recovery. A replay fixture is starting "
+                                        "automatically; you can rerun it explicitly."
+                                    ],
+                                },
+                                "requestId": {
+                                    "type": "string",
+                                    "pattern": "^[0-9a-f]{32}$",
+                                },
+                                "fallbackExecutionMode": {
+                                    "type": "string",
+                                    "enum": ["replay_fixture"],
+                                },
+                            },
+                        },
+                        {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": [
+                                "code",
+                                "message",
+                                "requestId",
+                                "fallbackExecutionMode",
+                            ],
+                            "properties": {
+                                "code": {
+                                    "type": "string",
+                                    "enum": ["daily_budget"],
+                                },
+                                "message": {
+                                    "type": "string",
+                                    "enum": [
+                                        "The daily live demo budget is currently "
+                                        "reached. A replay fixture is starting "
+                                        "automatically; you can rerun it explicitly."
+                                    ],
+                                },
+                                "requestId": {
+                                    "type": "string",
+                                    "pattern": "^[0-9a-f]{32}$",
+                                },
+                                "fallbackExecutionMode": {
+                                    "type": "string",
+                                    "enum": ["replay_fixture"],
+                                },
+                            },
+                        },
+                    ]
+                }
+            }
+        },
+    }
+    assert "headers" not in response
+    alternatives = response["content"]["application/json"]["schema"]["oneOf"]
+    assert [
+        alternative["properties"]["code"]["enum"]
+        for alternative in alternatives
+    ] == [
+        ["creation_capacity"],
+        ["live_capacity"],
+        ["cooldown"],
+        ["daily_budget"],
+    ]
+
+
 def test_private_recovery_operations_document_one_generic_not_found_boundary() -> None:
     schema = json.loads(_exporter().render_openapi())
     operations = (

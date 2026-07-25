@@ -5,6 +5,7 @@ import logging
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
@@ -266,6 +267,10 @@ def test_live_admission_messages_match_the_public_client_allowlist(
         ("max_event_streams_per_recovery", 1_025),
         ("event_stream_retry_seconds", 0),
         ("event_stream_retry_seconds", 301),
+        ("max_recovery_creations_per_session", 0),
+        ("max_recovery_creations_per_session", 4_097),
+        ("max_recovery_creations_global", 0),
+        ("max_recovery_creations_global", 100_001),
         ("demo_session_lifetime_seconds", 0),
         ("demo_session_lifetime_seconds", 604_801),
     ],
@@ -300,6 +305,38 @@ def test_event_stream_limits_have_bounded_defaults_and_environment_overrides(
     assert configured.max_concurrent_event_streams == 12
     assert configured.max_event_streams_per_recovery == 3
     assert configured.event_stream_retry_seconds == 7
+
+
+def test_creation_limits_have_bounded_defaults_and_environment_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    defaults = RuntimeSettings(live_ready=False)
+    assert defaults.max_recovery_creations_per_session == 32
+    assert defaults.max_recovery_creations_global == 2_048
+
+    monkeypatch.setenv("BACKCHANNEL_MAX_RECOVERY_CREATIONS_PER_SESSION", "12")
+    monkeypatch.setenv("BACKCHANNEL_MAX_RECOVERY_CREATIONS_GLOBAL", "120")
+    configured = RuntimeSettings.from_environment()
+    assert configured.max_recovery_creations_per_session == 12
+    assert configured.max_recovery_creations_global == 120
+
+
+def test_env_example_publishes_canonical_creation_capacity_defaults() -> None:
+    example = (
+        Path(__file__).resolve().parents[2] / ".env.example"
+    ).read_text(encoding="utf-8")
+
+    assert "BACKCHANNEL_MAX_RECOVERY_CREATIONS_PER_SESSION=32\n" in example
+    assert "BACKCHANNEL_MAX_RECOVERY_CREATIONS_GLOBAL=2048\n" in example
+
+
+def test_per_session_creation_limit_cannot_exceed_global_limit() -> None:
+    with pytest.raises(ValueError, match="max_recovery_creations_per_session"):
+        RuntimeSettings(
+            live_ready=False,
+            max_recovery_creations_per_session=33,
+            max_recovery_creations_global=32,
+        )
 
 
 def test_per_recovery_event_stream_limit_cannot_exceed_process_limit() -> None:

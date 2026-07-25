@@ -42,7 +42,7 @@ scope that cannot recover the earlier binding.
 
 The additive `recovery_creations` ledger reserves the eventual recovery UUID before work
 starts. A short SQLite `BEGIN IMMEDIATE` transaction returns exactly one of owner, ready,
-pending, conflict, or unknown; no transaction remains open across replay, Agents SDK, live
+pending, conflict, unknown, or capacity; no transaction remains open across replay, Agents SDK, live
 model, or provider work. SDK and live owners pass the reserved UUID into orchestration.
 Replay owners reserve the canonical fixture UUID, preserving one shared fixture while access
 remains separately bound to each signed session. Each claim also stores the opaque session
@@ -60,6 +60,38 @@ reservation, so an explicit later retry can safely attempt admission again. Demo
 or unknown claim; reset can be retried after the owner resolves it or the signed session
 expires. Ready claims remain resettable.
 
+The exact request-key lookup and all of those retry semantics run before capacity accounting.
+Only a row-absent key counts rows whose `expires_at` is later than the transaction time, then
+atomically inserts or refuses. The defaults are 32 unexpired claims per signed session and
+2,048 globally; the bounded environment settings are
+`BACKCHANNEL_MAX_RECOVERY_CREATIONS_PER_SESSION` and
+`BACKCHANNEL_MAX_RECOVERY_CREATIONS_GLOBAL`, and the former cannot exceed the latter. Every
+unexpired reserved, started, ready, and unknown row counts. Expired rows do not count even if
+bounded cleanup has not deleted them yet.
+
+A new key that would exceed either bound returns `429` with only this fixed envelope and
+per-request correlation; it has no `Retry-After` header:
+
+```json
+{"code":"creation_capacity","message":"Recovery creation is temporarily at capacity. Existing starts can still be retried; try a new start later.","requestId":"<32-lowercase-hex>"}
+```
+
+The denied start itself stores no request digest or reserved UUID and performs no
+orchestration, live admission, budget accounting, or recovery mutation. Ordinary bounded
+pre-claim maintenance still runs before capacity is evaluated and may delete unrelated
+expired creation rows, expire unrelated pending approvals, or clean unrelated terminal
+recoveries. The capacity envelope discloses no raw client token, keyed digest, reserved UUID,
+fallback, count, or limit. The endpoint's exact 429 schema is a `oneOf` containing this
+no-fallback envelope plus the reachable `live_capacity`, `cooldown`, and `daily_budget`
+live-admission envelopes, each with `fallbackExecutionMode: "replay_fixture"`.
+`live_unavailable` remains a 422 outcome and is not a 429 alternative.
+
+The browser retains the same-tab tuple and offers an explicit same-key retry for capacity,
+pending, and unknown outcomes; the deterministic quota scenario uses the fixed safe message
+instead of server-authored text. An idempotency conflict is permanent for that tuple, so quota
+offers **Start a new quota recovery** instead. Nothing is cleared or posted automatically;
+that explicit action clears only the matching conflicted tuple and creates a fresh UUID intent.
+
 Evidence, not status alone, controls ready and reconciliation responses. Exact replay retries
 call `ReplayEngine.start` and its canonical snapshot/event/receipt validator; partial or
 tampered fixtures become `creation_outcome_unknown`. SDK/live hotel creation requires either
@@ -75,6 +107,10 @@ mutation while a caller-owned claim is reserved, started, or unknown. Once the o
 it to ready, successful reset removes the caller's creation claims and access only; claims and
 access belonging to another session, including another session sharing the canonical replay,
 remain.
+
+Known admission abandonment deletes an untouched reserved claim and successful reset deletes
+ready claims, so both release capacity. An unresolved reset is refused without mutation, and
+terminal recovery cleanup alone does not release a still-unexpired claim.
 
 ## Bounded event-stream admission
 

@@ -55,6 +55,22 @@ status/receipt/event evidence cannot become ready; authoritative terminal eviden
 reconciled; claim expiry matches the signed cookie; cleanup is bounded and runs per-create,
 at startup, and periodically; and reset removes only the caller session's claims while
 preserving another session's shared replay claim.
+It also proves bounded integer configuration and the session-not-greater-than-global
+relationship; atomic per-session and cross-store global enforcement over every unexpired
+status; exact-key retry bypass at saturation; expired cleanup backlog exclusion; release after
+known admission abandonment and successful ready reset; reset-refusal slot preservation for
+reserved, started, and unknown claims; terminal-cleanup slot preservation; and exact
+`429 creation_capacity` denied-start privacy: the denied start itself has zero orchestration,
+admission, budget, recovery, or ledger-insert side effects. Ordinary bounded pre-claim
+maintenance may still mutate unrelated expired creation rows, pending approvals, or terminal
+recoveries. A 30-row expired backlog proves expired rows do not count independently of the
+25-row per-request cleanup batch.
+OpenAPI tests require the exact four-alternative 429 `oneOf`: no-fallback creation capacity,
+plus `live_capacity`, `cooldown`, and `daily_budget` with replay fallback; `live_unavailable`
+is excluded. Browser tests accept creation capacity only at 429, retain the same-tab intent,
+and expose an explicit same-key hotel or quota retry. Quota conflict remains inert until the
+user explicitly abandons only the matching tuple and starts a fresh UUID; arbitrary response
+text is never surfaced.
 The result is same-session request deduplication, not exactly-once external-provider proof.
 The readiness suite proves required schema checks plus the trigger-free probe's exact visible and
 hidden column/primary-key shape, full singleton row and binary value, one committed generation

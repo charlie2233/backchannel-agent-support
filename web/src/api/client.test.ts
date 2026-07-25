@@ -206,6 +206,60 @@ describe("createRecovery public errors", () => {
       );
     },
   );
+
+  it("returns the exact typed creation-capacity error only at HTTP 429", async () => {
+    const message =
+      "Recovery creation is temporarily at capacity. Existing starts can still be retried; try a new start later.";
+    expect(RECOVERY_CREATION_MESSAGES.creation_capacity).toBe(message);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            code: "creation_capacity",
+            message,
+            requestId: "0123456789abcdef0123456789abcdef",
+          }),
+          { status: 429 },
+        ),
+      ),
+    );
+
+    await expect(
+      createRecovery("hotel", "sdk_stub", CLIENT_REQUEST_ID),
+    ).rejects.toEqual(
+      expect.objectContaining<Partial<RecoveryCreationError>>({
+        name: "RecoveryCreationError",
+        code: "creation_capacity",
+        message,
+        requestId: "0123456789abcdef0123456789abcdef",
+      }),
+    );
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            code: "creation_capacity",
+            message,
+            requestId: "0123456789abcdef0123456789abcdef",
+          }),
+          { status: 409 },
+        ),
+      ),
+    );
+    const wrongStatus = await createRecovery(
+      "hotel",
+      "sdk_stub",
+      CLIENT_REQUEST_ID,
+    ).catch((error: unknown) => error);
+    expect(wrongStatus).toBeInstanceOf(Error);
+    expect(wrongStatus).not.toBeInstanceOf(RecoveryCreationError);
+    expect((wrongStatus as Error).message).toBe(
+      "Recovery creation failed with status 409",
+    );
+  });
 });
 
 describe("postDecision public errors", () => {

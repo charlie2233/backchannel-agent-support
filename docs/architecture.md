@@ -73,6 +73,20 @@ Changed payloads fail with `idempotency_conflict`, active contenders receive
 `creation_pending`, and uncertain post-start outcomes fail closed as
 `creation_outcome_unknown` without launching a replacement.
 
+Only row-absent claims enter the capacity gate inside that same `BEGIN IMMEDIATE`
+transaction. Defaults allow 32 unexpired creation rows for one signed session and 2,048
+globally; `BACKCHANNEL_MAX_RECOVERY_CREATIONS_PER_SESSION` and
+`BACKCHANNEL_MAX_RECOVERY_CREATIONS_GLOBAL` configure bounded integers, with the session
+limit no greater than the global limit. Reserved, started, ready, and unknown rows all count
+while their signed-session expiry is in the future, even if their recovery has become
+terminal. Expired rows never count, including while bounded cleanup is still draining them.
+An exact existing key is evaluated first and therefore remains retryable at capacity.
+The denied start itself returns exact `429 creation_capacity` without an insert, recovery,
+orchestration, live-admission, or budget side effect and without `Retry-After`, capacity
+counts, limits, fallback metadata, or internal identifiers. Ordinary bounded pre-claim
+maintenance runs before capacity evaluation and may mutate unrelated expired creation rows,
+pending approvals, or terminal recoveries.
+
 Ready and reconciled claims do not trust a recovery status alone. Replay retries pass through
 the canonical fixture/event/receipt integrity validator. Hotel SDK/live results require either
 valid pending or claimed consent evidence, or a terminal mode-matched receipt. SDK quota
@@ -88,6 +102,11 @@ mutation while the caller session has a reserved, started, or unknown creation c
 retried after the owner resolves or the signed session expires. A ready claim is resettable.
 Successful reset deletes only the caller session's claims and access; another session's claim
 and access to a shared canonical replay remain intact.
+
+Known live-admission rejection deletes an untouched reservation and releases its capacity.
+Successful reset releases ready claims, but unresolved reset is refused without mutation and
+ordinary terminal-recovery cleanup does not delete a still-unexpired creation claim. Signed
+session expiry plus bounded creation-ledger cleanup is the remaining release path.
 
 SQLite persists the pending Agents SDK state envelope, consent evidence, decision claim,
 provider execution record, event ledger, receipt, and opaque recovery-access association. A

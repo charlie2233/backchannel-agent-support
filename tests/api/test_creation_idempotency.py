@@ -9,7 +9,7 @@ from pathlib import Path
 from threading import Event, Lock
 from types import SimpleNamespace
 from typing import Any, cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi import FastAPI
@@ -30,7 +30,7 @@ from server.models import (
     ScenarioId,
 )
 from server.orchestrator import RecoveryOrchestrator
-from server.replay.engine import replay_recovery_id
+from server.replay.engine import ReplayEngine, replay_recovery_id
 from server.replay.loader import ScenarioLoader
 from server.store import ResetCreationPendingError, SQLiteStore
 
@@ -53,6 +53,10 @@ _CREATION_MESSAGES = {
     "creation_outcome_unknown": (
         "The recovery start outcome could not be confirmed. "
         "No replacement run was started."
+    ),
+    "creation_capacity": (
+        "Recovery creation is temporarily at capacity. Existing starts can still "
+        "be retried; try a new start later."
     ),
 }
 
@@ -438,7 +442,8 @@ def _assert_creation_error(
     *,
     code: str,
 ) -> str:
-    assert response.status_code == 409
+    expected_status = 429 if code == "creation_capacity" else 409
+    assert response.status_code == expected_status
     body = response.json()
     assert set(body) == {"code", "message", "requestId"}
     assert body["code"] == code
@@ -446,6 +451,31 @@ def _assert_creation_error(
     assert _REQUEST_ID_PATTERN.fullmatch(body["requestId"]) is not None
     assert response.headers["cache-control"] == "no-store"
     return str(body["message"])
+
+
+def _claim_creation(
+    store: SQLiteStore,
+    *,
+    request_key: str,
+    session_key: str,
+    now: datetime,
+    expires_at: datetime | None = None,
+    request_fingerprint: str = "f" * 64,
+    max_per_session: int = 32,
+    max_global: int = 2_048,
+) -> Any:
+    return store.claim_recovery_creation(
+        request_key=request_key,
+        request_fingerprint=request_fingerprint,
+        scenario_id=ScenarioId.HOTEL,
+        execution_mode=ExecutionMode.SDK_STUB,
+        reserved_recovery_id=str(uuid4()),
+        session_key=session_key,
+        expires_at=expires_at or now + timedelta(days=1),
+        max_per_session=max_per_session,
+        max_global=max_global,
+        now=now,
+    )
 
 
 def _assert_reset_creation_pending(response: Any) -> None:
@@ -1155,6 +1185,19 @@ def test_store_reset_rolls_back_without_mutation_for_unresolved_creation(
             "SELECT released_at FROM live_admissions WHERE session_key = ?",
             (session_key,),
         ).fetchone() == (None,)
+    blocked = store.claim_recovery_creation(
+        request_key="e" * 64,
+        request_fingerprint="f" * 64,
+        scenario_id=ScenarioId.HOTEL,
+        execution_mode=ExecutionMode.SDK_STUB,
+        reserved_recovery_id=str(uuid4()),
+        session_key=session_key,
+        expires_at=started_at + timedelta(days=1),
+        max_per_session=1,
+        max_global=1,
+        now=started_at,
+    )
+    assert blocked.disposition == "capacity"
     store.close()
 
 
@@ -1293,6 +1336,397 @@ def test_expired_creation_claim_cleanup_is_bounded_and_session_scoped(
             "SELECT session_key FROM recovery_creations"
         ).fetchall()
     assert remaining == [(sessions[2],)]
+    store.close()
+
+
+def test_store_enforces_session_and_global_creation_capacity(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "creation-capacity.sqlite3")
+    now = datetime(2026, 7, 24, tzinfo=UTC)
+    first_session = "1" * 64
+    second_session = "2" * 64
+    third_session = "3" * 64
+
+    first = _claim_creation(
+        store,
+        request_key="a" * 64,
+        session_key=first_session,
+        now=now,
+        max_per_session=1,
+        max_global=2,
+    )
+    session_full = _claim_creation(
+        store,
+        request_key="b" * 64,
+        session_key=first_session,
+        now=now,
+        max_per_session=1,
+        max_global=2,
+    )
+    second = _claim_creation(
+        store,
+        request_key="c" * 64,
+        session_key=second_session,
+        now=now,
+        max_per_session=1,
+        max_global=2,
+    )
+    globally_full = _claim_creation(
+        store,
+        request_key="d" * 64,
+        session_key=third_session,
+        now=now,
+        max_per_session=1,
+        max_global=2,
+    )
+
+    assert first.disposition == second.disposition == "owner"
+    assert session_full.disposition == globally_full.disposition == "capacity"
+    assert _scalar(
+        tmp_path / "creation-capacity.sqlite3",
+        "SELECT COUNT(*) FROM recovery_creations",
+    ) == 2
+    store.close()
+
+
+@pytest.mark.parametrize(
+    ("stored_status", "retry_fingerprint", "expected_retry"),
+    [
+        ("reserved", "f" * 64, "pending"),
+        ("started", "f" * 64, "pending"),
+        ("ready", "f" * 64, "unknown"),
+        ("unknown", "f" * 64, "unknown"),
+        ("reserved", "e" * 64, "conflict"),
+    ],
+)
+def test_exact_creation_key_semantics_bypass_capacity_for_every_status(
+    tmp_path: Path,
+    *,
+    stored_status: str,
+    retry_fingerprint: str,
+    expected_retry: str,
+) -> None:
+    database_path = tmp_path / f"exact-capacity-{stored_status}-{expected_retry}.sqlite3"
+    store = SQLiteStore(database_path)
+    now = datetime(2026, 7, 24, tzinfo=UTC)
+    request_key = "a" * 64
+    session_key = "b" * 64
+    expires_at = now + timedelta(days=1)
+    owner = _claim_creation(
+        store,
+        request_key=request_key,
+        session_key=session_key,
+        now=now,
+        expires_at=expires_at,
+        max_per_session=1,
+        max_global=1,
+    )
+    assert owner.disposition == "owner"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "UPDATE recovery_creations SET status = ? WHERE request_key = ?",
+            (stored_status, request_key),
+        )
+
+    retry = _claim_creation(
+        store,
+        request_key=request_key,
+        request_fingerprint=retry_fingerprint,
+        session_key=session_key,
+        now=now + timedelta(seconds=1),
+        expires_at=expires_at,
+        max_per_session=1,
+        max_global=1,
+    )
+    new_key = _claim_creation(
+        store,
+        request_key="c" * 64,
+        session_key=session_key,
+        now=now + timedelta(seconds=1),
+        expires_at=expires_at,
+        max_per_session=1,
+        max_global=1,
+    )
+
+    assert retry.disposition == expected_retry
+    assert new_key.disposition == "capacity"
+    assert _scalar(database_path, "SELECT COUNT(*) FROM recovery_creations") == 1
+    store.close()
+
+
+def test_expired_creation_backlog_does_not_consume_capacity(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "expired-capacity.sqlite3"
+    store = SQLiteStore(database_path)
+    now = datetime(2026, 7, 24, tzinfo=UTC)
+    expired_claims = [
+        _claim_creation(
+            store,
+            request_key=f"{index:064x}",
+            session_key="b" * 64,
+            now=now,
+            expires_at=now + timedelta(seconds=1),
+            max_per_session=32,
+            max_global=32,
+        )
+        for index in range(1, 31)
+    ]
+    replacement = _claim_creation(
+        store,
+        request_key="f" * 64,
+        session_key="b" * 64,
+        now=now + timedelta(seconds=2),
+        expires_at=now + timedelta(days=1),
+        max_per_session=1,
+        max_global=1,
+    )
+
+    assert {claim.disposition for claim in expired_claims} == {"owner"}
+    assert replacement.disposition == "owner"
+    assert _scalar(database_path, "SELECT COUNT(*) FROM recovery_creations") == 31
+    store.close()
+
+
+def test_terminal_recovery_cleanup_does_not_release_unexpired_creation_capacity(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "terminal-cleanup-capacity.sqlite3"
+    store = SQLiteStore(database_path)
+    now = datetime(2026, 7, 24, tzinfo=UTC)
+    session_key = "b" * 64
+    request_key = "a" * 64
+    request_fingerprint = "f" * 64
+    loader = ScenarioLoader()
+    scenario = loader.get(ScenarioId.HOTEL)
+    recovery_id = replay_recovery_id(scenario)
+    claim = store.claim_recovery_creation(
+        request_key=request_key,
+        request_fingerprint=request_fingerprint,
+        scenario_id=ScenarioId.HOTEL,
+        execution_mode=ExecutionMode.REPLAY_FIXTURE,
+        reserved_recovery_id=recovery_id,
+        session_key=session_key,
+        expires_at=now + timedelta(days=1),
+        max_per_session=1,
+        max_global=1,
+        now=now,
+    )
+    assert claim.disposition == "owner"
+    store.mark_recovery_creation_started(
+        request_key=request_key,
+        request_fingerprint=request_fingerprint,
+        now=now,
+    )
+    created = ReplayEngine(store, loader).start(
+        ScenarioId.HOTEL,
+        execution_mode=ExecutionMode.REPLAY_FIXTURE,
+        session_key=session_key,
+    )
+    store.mark_recovery_creation_ready(
+        request_key=request_key,
+        request_fingerprint=request_fingerprint,
+        recovery_id=created.recovery_id,
+        session_key=session_key,
+        now=now,
+    )
+
+    deleted = store.delete_terminal_recoveries(
+        updated_before=now + timedelta(days=7),
+        batch_size=1,
+    )
+    blocked = _claim_creation(
+        store,
+        request_key="c" * 64,
+        session_key=session_key,
+        now=now + timedelta(seconds=1),
+        expires_at=now + timedelta(days=1),
+        max_per_session=1,
+        max_global=1,
+    )
+
+    assert deleted == 1
+    assert blocked.disposition == "capacity"
+    assert _scalar(database_path, "SELECT COUNT(*) FROM recovery_creations") == 1
+    store.close()
+
+
+def test_global_creation_capacity_is_atomic_across_store_instances(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "atomic-global-capacity.sqlite3"
+    stores = (SQLiteStore(database_path), SQLiteStore(database_path))
+    now = datetime(2026, 7, 24, tzinfo=UTC)
+    barrier = Event()
+
+    def claim(index: int) -> str:
+        barrier.wait(timeout=5)
+        result = _claim_creation(
+            stores[index],
+            request_key=("a" if index == 0 else "b") * 64,
+            session_key=("c" if index == 0 else "d") * 64,
+            now=now,
+            max_per_session=1,
+            max_global=1,
+        )
+        return result.disposition
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(claim, index) for index in range(2)]
+        barrier.set()
+        dispositions = sorted(future.result(timeout=10) for future in futures)
+
+    assert dispositions == ["capacity", "owner"]
+    assert _scalar(database_path, "SELECT COUNT(*) FROM recovery_creations") == 1
+    for store in stores:
+        store.close()
+
+
+def test_abandon_and_ready_reset_release_creation_capacity(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "released-capacity.sqlite3"
+    store = SQLiteStore(database_path)
+    now = datetime(2026, 7, 24, tzinfo=UTC)
+    session_key = "b" * 64
+    reserved = _claim_creation(
+        store,
+        request_key="a" * 64,
+        session_key=session_key,
+        now=now,
+        max_per_session=1,
+        max_global=1,
+    )
+    assert reserved.disposition == "owner"
+    assert store.abandon_reserved_recovery_creation(
+        request_key="a" * 64,
+        request_fingerprint="f" * 64,
+    )
+    ready = _claim_creation(
+        store,
+        request_key="c" * 64,
+        session_key=session_key,
+        now=now,
+        max_per_session=1,
+        max_global=1,
+    )
+    assert ready.disposition == "owner"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "UPDATE recovery_creations SET status = 'ready' WHERE request_key = ?",
+            ("c" * 64,),
+        )
+
+    store.reset(session_key)
+    after_reset = _claim_creation(
+        store,
+        request_key="d" * 64,
+        session_key=session_key,
+        now=now,
+        max_per_session=1,
+        max_global=1,
+    )
+    assert after_reset.disposition == "owner"
+    store.close()
+
+
+def test_public_creation_capacity_is_exact_and_has_no_start_side_effects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "public-capacity.sqlite3"
+    attempts = _Attempts()
+    store = _CountingStore(database_path, attempts)
+    settings = RuntimeSettings(
+        live_ready=False,
+        identity_hash_secret=_IDENTITY_SECRET,
+        max_recovery_creations_per_session=1,
+        max_recovery_creations_global=1,
+    )
+    generated_ids = iter(
+        (
+            UUID("11111111-2222-4333-8444-555555555555"),
+            UUID("99999999-8888-4777-8666-555555555555"),
+            UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"),
+        )
+    )
+    monkeypatch.setattr(server_main, "uuid4", lambda: next(generated_ids))
+    raw_first = "capacity-first-raw-token"
+    raw_denied = "capacity-denied-raw-token"
+    client = TestClient(
+        _create_test_app(
+            settings,
+            store=store,
+            orchestrator=_RecordingOrchestrator(store, attempts),
+        )
+    )
+
+    accepted = client.post("/api/recoveries", json=_payload(raw_first))
+    denied = client.post("/api/recoveries", json=_payload(raw_denied))
+    exact_retry = client.post("/api/recoveries", json=_payload(raw_first))
+
+    assert accepted.status_code == 201
+    _assert_creation_error(denied, code="creation_capacity")
+    assert exact_retry.status_code == 201
+    assert exact_retry.json() == accepted.json()
+    assert set(denied.json()) == {"code", "message", "requestId"}
+    assert "retry-after" not in denied.headers
+    assert "fallbackExecutionMode" not in denied.text
+    assert "count" not in denied.text.lower()
+    assert "limit" not in denied.text.lower()
+    assert attempts.orchestrations == 1
+    assert attempts.admission_checks == attempts.budget_checks == 0
+    assert _scalar(database_path, "SELECT COUNT(*) FROM recoveries") == 1
+    assert _scalar(database_path, "SELECT COUNT(*) FROM recovery_creations") == 1
+    _assert_raw_key_absent(
+        raw_denied,
+        database_path=database_path,
+        responses=[denied, exact_retry],
+    )
+    denied_reserved_id = "99999999-8888-4777-8666-555555555555"
+    assert denied_reserved_id not in _database_dump(database_path)
+    assert denied_reserved_id not in denied.text
+    assert denied_reserved_id not in repr(dict(denied.headers))
+    assert "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" not in _database_dump(
+        database_path
+    )
+    store.close()
+
+
+def test_known_live_admission_denial_releases_creation_capacity(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "admission-release-capacity.sqlite3"
+    attempts = _Attempts()
+    store = _CountingStore(database_path, attempts)
+    settings = RuntimeSettings(
+        live_ready=False,
+        identity_hash_secret=_IDENTITY_SECRET,
+        max_recovery_creations_per_session=1,
+        max_recovery_creations_global=1,
+    )
+    client = TestClient(
+        _create_test_app(
+            settings,
+            store=store,
+            orchestrator=_RecordingOrchestrator(store, attempts),
+        )
+    )
+
+    denied = client.post(
+        "/api/recoveries",
+        json=_payload("known-live-denial", execution_mode="openai_live"),
+    )
+    accepted = client.post(
+        "/api/recoveries",
+        json=_payload("after-live-denial", execution_mode="sdk_stub"),
+    )
+
+    assert denied.status_code == 422
+    assert accepted.status_code == 201
+    assert attempts.orchestrations == 1
+    assert _scalar(database_path, "SELECT COUNT(*) FROM recovery_creations") == 1
     store.close()
 
 

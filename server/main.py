@@ -226,6 +226,10 @@ _CREATION_ERROR_MESSAGES = {
         "The recovery start outcome could not be confirmed. "
         "No replacement run was started."
     ),
+    "creation_capacity": (
+        "Recovery creation is temporarily at capacity. Existing starts can still "
+        "be retried; try a new start later."
+    ),
 }
 _RECOVERY_CREATION_CONFLICT_RESPONSE: dict[str, Any] = {
     "description": (
@@ -269,6 +273,85 @@ _RECOVERY_CREATION_CONFLICT_RESPONSE: dict[str, Any] = {
                         },
                     }
                     for code, message in _CREATION_ERROR_MESSAGES.items()
+                    if code != "creation_capacity"
+                ]
+            }
+        }
+    },
+}
+_RECOVERY_CREATION_CAPACITY_RESPONSE: dict[str, Any] = {
+    "description": (
+        "A new recovery start would exceed creation-ledger capacity, or a live "
+        "start would exceed live admission, cooldown, or daily-budget policy."
+    ),
+    "content": {
+        "application/json": {
+            "schema": {
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["code", "message", "requestId"],
+                        "properties": {
+                            "code": {
+                                "type": "string",
+                                "enum": ["creation_capacity"],
+                            },
+                            "message": {
+                                "type": "string",
+                                "enum": [
+                                    _CREATION_ERROR_MESSAGES[
+                                        "creation_capacity"
+                                    ]
+                                ],
+                            },
+                            "requestId": {
+                                "type": "string",
+                                "pattern": "^[0-9a-f]{32}$",
+                            },
+                        },
+                    },
+                    *[
+                        {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": [
+                                "code",
+                                "message",
+                                "requestId",
+                                "fallbackExecutionMode",
+                            ],
+                            "properties": {
+                                "code": {
+                                    "type": "string",
+                                    "enum": [live_code.value],
+                                },
+                                "message": {
+                                    "type": "string",
+                                    "enum": [
+                                        LiveAdmissionError(
+                                            live_code
+                                        ).public_message
+                                    ],
+                                },
+                                "requestId": {
+                                    "type": "string",
+                                    "pattern": "^[0-9a-f]{32}$",
+                                },
+                                "fallbackExecutionMode": {
+                                    "type": "string",
+                                    "enum": [
+                                        ExecutionMode.REPLAY_FIXTURE.value
+                                    ],
+                                },
+                            },
+                        }
+                        for live_code in (
+                            LiveAdmissionCode.LIVE_CAPACITY,
+                            LiveAdmissionCode.COOLDOWN,
+                            LiveAdmissionCode.DAILY_BUDGET,
+                        )
+                    ],
                 ]
             }
         }
@@ -976,7 +1059,11 @@ def create_app(
             )
         response = _public_error_response(
             request,
-            status_code=status.HTTP_409_CONFLICT,
+            status_code=(
+                status.HTTP_429_TOO_MANY_REQUESTS
+                if error.code == "creation_capacity"
+                else status.HTTP_409_CONFLICT
+            ),
             code=error.code,
             message=_CREATION_ERROR_MESSAGES[error.code],
         )
@@ -1102,6 +1189,9 @@ def create_app(
         status_code=status.HTTP_201_CREATED,
         responses={
             status.HTTP_409_CONFLICT: _RECOVERY_CREATION_CONFLICT_RESPONSE,
+            status.HTTP_429_TOO_MANY_REQUESTS: (
+                _RECOVERY_CREATION_CAPACITY_RESPONSE
+            ),
         },
     )
     async def create_recovery(
@@ -1167,9 +1257,15 @@ def create_app(
             reserved_recovery_id=reserved_recovery_id,
             session_key=identity.session_key,
             expires_at=identity.session_expires_at,
+            max_per_session=(
+                runtime_settings.max_recovery_creations_per_session
+            ),
+            max_global=runtime_settings.max_recovery_creations_global,
         )
-        request.state.recovery_id = claim.recovery_id
 
+        if claim.disposition == "capacity":
+            raise _RecoveryCreationPublicError("creation_capacity")
+        request.state.recovery_id = claim.recovery_id
         if claim.disposition == "conflict":
             raise _RecoveryCreationPublicError("idempotency_conflict")
         if claim.disposition == "pending":

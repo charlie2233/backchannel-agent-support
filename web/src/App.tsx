@@ -216,6 +216,10 @@ export default function App() {
   const [quotaSnapshot, setQuotaSnapshot] = useState<RecoverySnapshot | null>(null);
   const [quotaLoading, setQuotaLoading] = useState(false);
   const [quotaError, setQuotaError] = useState<string | null>(null);
+  const [quotaCreationErrorCode, setQuotaCreationErrorCode] =
+    useState<RecoveryCreationCode | null>(null);
+  const [quotaConflictingIntent, setQuotaConflictingIntent] =
+    useState<PendingRecoveryCreation | null>(null);
   const quotaStartedRef = useRef(false);
   const appMountedRef = useRef(false);
   const hotelStartGenerationRef = useRef(0);
@@ -529,6 +533,7 @@ export default function App() {
     quotaStartedRef.current = true;
     setQuotaLoading(true);
     setQuotaError(null);
+    setQuotaCreationErrorCode(null);
     try {
       const snapshot = await createRecovery(
         "api-quota",
@@ -538,14 +543,43 @@ export default function App() {
       if (!appMountedRef.current) return;
       setQuotaSnapshot(snapshot);
       clearMatchingPendingRecoveryCreation(intent);
-    } catch {
+      setQuotaConflictingIntent(null);
+    } catch (error: unknown) {
       if (!appMountedRef.current) return;
       quotaStartedRef.current = false;
-      setQuotaError("The deterministic quota trace could not be loaded.");
+      const creationCode =
+        error instanceof RecoveryCreationError ? error.code : null;
+      setQuotaCreationErrorCode(creationCode);
+      setQuotaConflictingIntent(
+        creationCode === "idempotency_conflict" ? intent : null,
+      );
+      setQuotaError(
+        error instanceof RecoveryCreationError
+          ? error.message
+          : "The deterministic quota trace could not be loaded.",
+      );
     } finally {
       if (appMountedRef.current) setQuotaLoading(false);
     }
   }, [beginPendingCreation]);
+
+  const startNewQuotaAfterConflict = useCallback(() => {
+    if (
+      quotaCreationErrorCode !== "idempotency_conflict" ||
+      quotaConflictingIntent === null ||
+      !clearMatchingPendingRecoveryCreation(quotaConflictingIntent)
+    ) {
+      return;
+    }
+    setQuotaConflictingIntent(null);
+    setQuotaCreationErrorCode(null);
+    setQuotaError(null);
+    void startQuota();
+  }, [
+    quotaConflictingIntent,
+    quotaCreationErrorCode,
+    startQuota,
+  ]);
 
   const selectScenario = useCallback(
     (scenarioId: ScenarioId) => {
@@ -1205,7 +1239,26 @@ export default function App() {
               </div>
             </section>
           ) : null}
-          {activeId === "api-quota" && quotaError !== null ? <p role="alert">{quotaError}</p> : null}
+          {activeId === "api-quota" && quotaError !== null ? (
+            <section className="live-start" aria-live="polite">
+              <p role="alert">{quotaError}</p>
+              <button
+                type="button"
+                disabled={quotaLoading}
+                onClick={
+                  quotaCreationErrorCode === "idempotency_conflict"
+                    ? startNewQuotaAfterConflict
+                    : () => void startQuota()
+                }
+              >
+                {quotaCreationErrorCode === "idempotency_conflict"
+                  ? "Start a new quota recovery"
+                  : quotaLoading
+                    ? "Retrying quota recovery…"
+                    : "Retry quota recovery"}
+              </button>
+            </section>
+          ) : null}
           {activeId === "hotel" && hotelStartError !== null ? <p role="alert">{hotelStartError}</p> : null}
           <section className="recovery-heading" aria-labelledby="recovery-title">
             <div>

@@ -33,6 +33,8 @@ export const RECOVERY_CREATION_MESSAGES = {
     "Recovery creation is still in progress. Retry the same start shortly.",
   creation_outcome_unknown:
     "The recovery start outcome could not be confirmed. No replacement run was started.",
+  creation_capacity:
+    "Recovery creation is temporarily at capacity. Existing starts can still be retried; try a new start later.",
 } as const;
 
 export type LiveAdmissionCode = keyof typeof LIVE_ADMISSION_MESSAGES;
@@ -263,7 +265,6 @@ function readRecoveryCreationError(
   status: number,
 ): RecoveryCreationError | null {
   if (
-    status !== 409 ||
     !isRecord(value) ||
     !hasExactKeys(value, ["code", "message", "requestId"]) ||
     !isRecoveryCreationCode(value.code) ||
@@ -271,6 +272,10 @@ function readRecoveryCreationError(
     typeof value.requestId !== "string" ||
     !/^[0-9a-f]{32}$/.test(value.requestId)
   ) {
+    return null;
+  }
+  const expectedStatus = value.code === "creation_capacity" ? 429 : 409;
+  if (status !== expectedStatus) {
     return null;
   }
   return new RecoveryCreationError(value.code, value.requestId);

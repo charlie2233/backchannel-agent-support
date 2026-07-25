@@ -16,6 +16,12 @@ from pydantic import JsonValue
 
 from server.agents.schemas import CommitRemedyArguments
 from server.agents.versioning import remedy_action_digest
+from server.config import (
+    DEFAULT_MAX_RECOVERY_CREATIONS_GLOBAL,
+    DEFAULT_MAX_RECOVERY_CREATIONS_PER_SESSION,
+    MAX_RECOVERY_CREATIONS_GLOBAL,
+    MAX_RECOVERY_CREATIONS_PER_SESSION,
+)
 from server.digest import remedy_consent_digest
 from server.models import (
     OPENAI_LIVE_BOUNDARY,
@@ -274,6 +280,7 @@ RecoveryCreationDisposition = Literal[
     "pending",
     "unknown",
     "conflict",
+    "capacity",
 ]
 
 
@@ -1906,6 +1913,8 @@ class SQLiteStore:
         reserved_recovery_id: str,
         session_key: str,
         expires_at: datetime,
+        max_per_session: int = DEFAULT_MAX_RECOVERY_CREATIONS_PER_SESSION,
+        max_global: int = DEFAULT_MAX_RECOVERY_CREATIONS_GLOBAL,
         stale_after: timedelta = RECOVERY_CREATION_STALE_AFTER,
         now: datetime | None = None,
     ) -> RecoveryCreationClaim:
@@ -1919,6 +1928,25 @@ class SQLiteStore:
         self._require_creation_recovery_id(reserved_recovery_id)
         self._require_opaque_session_key(session_key)
         self._require_creation_time(expires_at, name="expires_at")
+        if (
+            not isinstance(max_per_session, int)
+            or isinstance(max_per_session, bool)
+            or not 1 <= max_per_session <= MAX_RECOVERY_CREATIONS_PER_SESSION
+        ):
+            raise ValueError(
+                "max_per_session must be between "
+                f"1 and {MAX_RECOVERY_CREATIONS_PER_SESSION}"
+            )
+        if (
+            not isinstance(max_global, int)
+            or isinstance(max_global, bool)
+            or not 1 <= max_global <= MAX_RECOVERY_CREATIONS_GLOBAL
+        ):
+            raise ValueError(
+                f"max_global must be between 1 and {MAX_RECOVERY_CREATIONS_GLOBAL}"
+            )
+        if max_per_session > max_global:
+            raise ValueError("max_per_session cannot exceed max_global")
         if stale_after <= timedelta(0):
             raise ValueError("Creation claim stale interval must be positive")
         current = now or self._now()
@@ -1939,6 +1967,31 @@ class SQLiteStore:
                 (request_key,),
             ).fetchone()
             if row is None:
+                capacity = connection.execute(
+                    """
+                    SELECT
+                        COUNT(*) AS global_count,
+                        COALESCE(
+                            SUM(CASE WHEN session_key = ? THEN 1 ELSE 0 END),
+                            0
+                        ) AS session_count
+                    FROM recovery_creations
+                    WHERE expires_at > ?
+                    """,
+                    (session_key, current_text),
+                ).fetchone()
+                if capacity is None:
+                    raise RuntimeError("Recovery creation capacity could not be read")
+                if (
+                    cast(int, capacity["session_count"]) >= max_per_session
+                    or cast(int, capacity["global_count"]) >= max_global
+                ):
+                    return RecoveryCreationClaim(
+                        disposition="capacity",
+                        recovery_id=reserved_recovery_id,
+                        scenario_id=scenario_id,
+                        execution_mode=execution_mode,
+                    )
                 connection.execute(
                     """
                     INSERT INTO recovery_creations (

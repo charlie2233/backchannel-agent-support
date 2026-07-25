@@ -74,6 +74,14 @@ model call nor a provider dispatch.
 - When demo reset is enabled, it refuses with `409 reset_creation_pending` and makes no
   mutation while the signed session has a reserved, started, or unknown creation claim. Reset
   can be retried after the owner resolves the claim or the signed session expires.
+- New creation intents are atomically bounded to 32 unexpired ledger rows per signed session
+  and 2,048 globally by default. Operators can configure those bounded values with
+  `BACKCHANNEL_MAX_RECOVERY_CREATIONS_PER_SESSION` and
+  `BACKCHANNEL_MAX_RECOVERY_CREATIONS_GLOBAL` (the session limit cannot exceed the global
+  limit). Every unexpired reserved, started, ready, or unknown claim counts. At capacity, only
+  a new key receives exact `429 creation_capacity`; an existing key still reaches its normal
+  retry result, with no extra orchestration, admission, or budget work. The same-tab UI keeps
+  that intent for an explicit same-key retry.
 - Hotel execution pauses at the Agents SDK `commit_remedy` interruption. Consent displays
   exact terms, a UTC expiry, and a canonical `sha256:` digest.
 - Approval rechecks the digest, interruption, expiry, hard constraints, and delegated

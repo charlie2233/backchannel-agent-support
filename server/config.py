@@ -13,6 +13,10 @@ DEVELOPMENT_CORS_ORIGINS = (
     "http://127.0.0.1:5173",
 )
 DEVELOPMENT_IDENTITY_HASH_SECRET = "backchannel-local-development-identity-key"
+DEFAULT_MAX_RECOVERY_CREATIONS_PER_SESSION = 32
+DEFAULT_MAX_RECOVERY_CREATIONS_GLOBAL = 2_048
+MAX_RECOVERY_CREATIONS_PER_SESSION = 4_096
+MAX_RECOVERY_CREATIONS_GLOBAL = 100_000
 
 
 def _environment_bool(name: str, *, default: bool = False) -> bool:
@@ -71,6 +75,10 @@ class RuntimeSettings:
     max_concurrent_event_streams: int = 16
     max_event_streams_per_recovery: int = 4
     event_stream_retry_seconds: int = 5
+    max_recovery_creations_per_session: int = (
+        DEFAULT_MAX_RECOVERY_CREATIONS_PER_SESSION
+    )
+    max_recovery_creations_global: int = DEFAULT_MAX_RECOVERY_CREATIONS_GLOBAL
     deployed_mode: bool = False
     deployed_cors_origins: tuple[str, ...] = ()
     trusted_proxy_enabled: bool = False
@@ -132,6 +140,16 @@ class RuntimeSettings:
                 1,
                 300,
             ),
+            "max_recovery_creations_per_session": (
+                self.max_recovery_creations_per_session,
+                1,
+                MAX_RECOVERY_CREATIONS_PER_SESSION,
+            ),
+            "max_recovery_creations_global": (
+                self.max_recovery_creations_global,
+                1,
+                MAX_RECOVERY_CREATIONS_GLOBAL,
+            ),
             "demo_session_lifetime_seconds": (
                 self.demo_session_lifetime_seconds,
                 1,
@@ -150,6 +168,14 @@ class RuntimeSettings:
             raise ValueError(
                 "max_event_streams_per_recovery cannot exceed "
                 "max_concurrent_event_streams"
+            )
+        if (
+            self.max_recovery_creations_per_session
+            > self.max_recovery_creations_global
+        ):
+            raise ValueError(
+                "max_recovery_creations_per_session cannot exceed "
+                "max_recovery_creations_global"
             )
 
         if not self.demo_session_cookie_name or any(
@@ -251,6 +277,14 @@ class RuntimeSettings:
             event_stream_retry_seconds=_environment_int(
                 "BACKCHANNEL_EVENT_STREAM_RETRY_SECONDS",
                 default=5,
+            ),
+            max_recovery_creations_per_session=_environment_int(
+                "BACKCHANNEL_MAX_RECOVERY_CREATIONS_PER_SESSION",
+                default=DEFAULT_MAX_RECOVERY_CREATIONS_PER_SESSION,
+            ),
+            max_recovery_creations_global=_environment_int(
+                "BACKCHANNEL_MAX_RECOVERY_CREATIONS_GLOBAL",
+                default=DEFAULT_MAX_RECOVERY_CREATIONS_GLOBAL,
             ),
             deployed_mode=_environment_bool("BACKCHANNEL_DEPLOYED_MODE"),
             deployed_cors_origins=_environment_origins("BACKCHANNEL_CORS_ORIGINS"),

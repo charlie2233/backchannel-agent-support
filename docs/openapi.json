@@ -941,6 +941,146 @@
               }
             },
             "description": "Validation Error"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "enum": [
+                            "creation_capacity"
+                          ],
+                          "type": "string"
+                        },
+                        "message": {
+                          "enum": [
+                            "Recovery creation is temporarily at capacity. Existing starts can still be retried; try a new start later."
+                          ],
+                          "type": "string"
+                        },
+                        "requestId": {
+                          "pattern": "^[0-9a-f]{32}$",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message",
+                        "requestId"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "enum": [
+                            "live_capacity"
+                          ],
+                          "type": "string"
+                        },
+                        "fallbackExecutionMode": {
+                          "enum": [
+                            "replay_fixture"
+                          ],
+                          "type": "string"
+                        },
+                        "message": {
+                          "enum": [
+                            "Live recovery is currently at capacity. A replay fixture is starting automatically; you can rerun it explicitly."
+                          ],
+                          "type": "string"
+                        },
+                        "requestId": {
+                          "pattern": "^[0-9a-f]{32}$",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message",
+                        "requestId",
+                        "fallbackExecutionMode"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "enum": [
+                            "cooldown"
+                          ],
+                          "type": "string"
+                        },
+                        "fallbackExecutionMode": {
+                          "enum": [
+                            "replay_fixture"
+                          ],
+                          "type": "string"
+                        },
+                        "message": {
+                          "enum": [
+                            "Please wait before starting another live recovery. A replay fixture is starting automatically; you can rerun it explicitly."
+                          ],
+                          "type": "string"
+                        },
+                        "requestId": {
+                          "pattern": "^[0-9a-f]{32}$",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message",
+                        "requestId",
+                        "fallbackExecutionMode"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "enum": [
+                            "daily_budget"
+                          ],
+                          "type": "string"
+                        },
+                        "fallbackExecutionMode": {
+                          "enum": [
+                            "replay_fixture"
+                          ],
+                          "type": "string"
+                        },
+                        "message": {
+                          "enum": [
+                            "The daily live demo budget is currently reached. A replay fixture is starting automatically; you can rerun it explicitly."
+                          ],
+                          "type": "string"
+                        },
+                        "requestId": {
+                          "pattern": "^[0-9a-f]{32}$",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message",
+                        "requestId",
+                        "fallbackExecutionMode"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "A new recovery start would exceed creation-ledger capacity, or a live start would exceed live admission, cooldown, or daily-budget policy."
           }
         },
         "summary": "Create Recovery"
