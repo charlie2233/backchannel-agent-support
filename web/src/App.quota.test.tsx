@@ -14,6 +14,22 @@ function response(body: unknown, status = 200): Response {
   });
 }
 
+function pendingEventStream(signal: AbortSignal | null | undefined): Promise<Response> {
+  if (signal === null || signal === undefined) {
+    return Promise.reject(new Error("Event stream request did not include an abort signal"));
+  }
+  return new Promise<Response>((_resolve, reject) => {
+    const rejectAbort = () => {
+      reject(new DOMException("The operation was aborted.", "AbortError"));
+    };
+    if (signal.aborted) {
+      rejectAbort();
+      return;
+    }
+    signal.addEventListener("abort", rejectAbort, { once: true });
+  });
+}
+
 function health(sdkStubReady: boolean): Response {
   return response({
     backend: "stub",
@@ -186,6 +202,9 @@ describe("explicit API quota runs", () => {
               ),
             );
           }
+          if (url === `/api/recoveries/${hotelRecoveryId}/events`) {
+            return pendingEventStream(init?.signal);
+          }
           if (url === `/api/recoveries/${hotelRecoveryId}/receipt`) {
             return Promise.resolve(
               response(
@@ -205,13 +224,18 @@ describe("explicit API quota runs", () => {
       vi.stubGlobal("fetch", fetchMock);
 
       render(<App />);
-      await screen.findByRole("heading", {
-        name: "Completed replay receipt",
-      });
+      await screen.findByRole(
+        "heading",
+        {
+          name: "Completed replay receipt",
+        },
+        { timeout: 3_000 },
+      );
       selectQuota();
-      fireEvent.click(screen.getByRole("button", { name: buttonName }));
+      const quotaControls = screen.getByLabelText("Quota execution controls");
+      fireEvent.click(within(quotaControls).getByRole("button", { name: buttonName }));
 
-      expect(await screen.findByRole("alert")).toHaveTextContent(
+      expect(await within(quotaControls).findByRole("alert")).toHaveTextContent(
         "The public demo recovery creation budget is exhausted for today. Try again in 43 seconds.",
       );
       expect(createBodies).toEqual([
