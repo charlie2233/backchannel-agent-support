@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "sourceCommit": "85e1e8ec9147242adca311c4ba10ea8c1c3008dc",
+  "sourceCommit": "ff670a9f5e7de93dff2317d025dece94ed4de4e9",
   "runtimeInput": {
     "algorithm": "sha256",
-    "digest": "eeb6b87ce35ad04cb4c53d048c39fcbc8caf33bb62e142526e0f9aba544afb30",
+    "digest": "83f63eb7f65b2f362b343ccc2c3729bcf9bdf54614fa7e974f5cf52d1838f476",
     "paths": [
       ".node-version",
       "e2e/capture-manifest.mjs",
@@ -48,6 +48,7 @@
       "web/index.html",
       "web/package.json",
       "web/src/App.a11y.test.tsx",
+      "web/src/App.eventStream.test.tsx",
       "web/src/App.firstPaint.test.tsx",
       "web/src/App.quota.test.tsx",
       "web/src/App.test.tsx",
@@ -55,6 +56,7 @@
       "web/src/App.tsx",
       "web/src/api/client.test.ts",
       "web/src/api/client.ts",
+      "web/src/api/events.test.ts",
       "web/src/api/events.ts",
       "web/src/api/quotaContract.test.ts",
       "web/src/components/AppHeader.tsx",
@@ -104,7 +106,7 @@
   "artifacts": [
     {
       "filename": "desktop-consent.png",
-      "sha256": "eb335028894bf9ed122a16a258da0c9e8234471bb074e1c244997e01ce99e2dd",
+      "sha256": "c7d88d54669ca4d34e03ea2d508c6076f890c6d87457957a3d00a259a2fb43b3",
       "width": 1440,
       "height": 1024,
       "scenarioId": "hotel",
@@ -113,7 +115,7 @@
     },
     {
       "filename": "desktop-completed.png",
-      "sha256": "c284bab9a0d70876cae283b37c6dbd4ad009f6893aa3908e06989b1554d713e3",
+      "sha256": "f3faad38b16410ee0e3e6f47a6cb49c5c638fdff6e4cc36134b5b37fb427c011",
       "width": 1440,
       "height": 1024,
       "scenarioId": "hotel",
@@ -122,7 +124,7 @@
     },
     {
       "filename": "desktop-declined.png",
-      "sha256": "c1f2e7073a76eb7b9b8142e23c6fd02c0a8168e61745749175524d4315c48c3e",
+      "sha256": "2951769f2956e5d4b08c5bc30cbbf9e5497935b007812a6bdf82b2d207ccd9be",
       "width": 1440,
       "height": 1024,
       "scenarioId": "hotel",
@@ -140,7 +142,7 @@
     },
     {
       "filename": "mobile-completed.png",
-      "sha256": "620e90a1c272c5d267d912a38adadbbd097c408df1fc1e2169a94f0b133414f1",
+      "sha256": "38a524faeae4862fbcafea99e9d10370a42d0fe527ce6d5e7871046b0006d0f5",
       "width": 390,
       "height": 844,
       "scenarioId": "hotel",
@@ -149,7 +151,7 @@
     },
     {
       "filename": "mobile-declined.png",
-      "sha256": "7feb919c8368199caa07be7e9c85ad1cf133b686f628c98dcb867c7874c249f4",
+      "sha256": "1510d98631cbf7c8647b73359aeace274956dff8678954c059e1c6968b66af4b",
       "width": 390,
       "height": 844,
       "scenarioId": "hotel",
