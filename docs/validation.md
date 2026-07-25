@@ -55,16 +55,22 @@ status/receipt/event evidence cannot become ready; authoritative terminal eviden
 reconciled; claim expiry matches the signed cookie; cleanup is bounded and runs per-create,
 at startup, and periodically; and reset removes only the caller session's claims while
 preserving another session's shared replay claim.
-It also proves bounded integer configuration and the session-not-greater-than-global
-relationship; atomic per-session and cross-store global enforcement over every unexpired
-status; exact-key retry bypass at saturation; expired cleanup backlog exclusion; release after
-known admission abandonment and successful ready reset; reset-refusal slot preservation for
+It also proves bounded integer configuration, independent default and override behavior for
+the opaque-IP gate, and the session-not-greater-than-global relationship; atomic per-session,
+per-IP, and cross-store global enforcement over every unexpired status; same-key retry after
+IP mobility and saturation without rewriting the stored correlation; expired cleanup backlog
+exclusion; opaque legacy-row backfill without claim invalidation; release after known
+admission abandonment and successful ready reset; reset-refusal slot preservation for
 reserved, started, and unknown claims; terminal-cleanup slot preservation; and exact
 `429 creation_capacity` denied-start privacy: the denied start itself has zero orchestration,
 admission, budget, recovery, or ledger-insert side effects. Ordinary bounded pre-claim
 maintenance may still mutate unrelated expired creation rows, pending approvals, or terminal
 recoveries. A 30-row expired backlog proves expired rows do not count independently of the
-25-row per-request cleanup batch.
+25-row per-request cleanup batch. Fresh signed-cookie sessions from one TestClient address
+prove the shared-IP gate while a different address still succeeds; assertions cover only
+64-character HMAC correlations in SQLite and no raw address in the database or response.
+These are deterministic direct-peer tests, not a unique-user, NAT-fairness, or target-proxy
+topology claim.
 OpenAPI tests require the exact four-alternative 429 `oneOf`: no-fallback creation capacity,
 plus `live_capacity`, `cooldown`, and `daily_budget` with replay fallback; `live_unavailable`
 is excluded. Browser tests accept creation capacity only at 429, retain the same-tab intent,

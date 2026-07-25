@@ -14,8 +14,10 @@ DEVELOPMENT_CORS_ORIGINS = (
 )
 DEVELOPMENT_IDENTITY_HASH_SECRET = "backchannel-local-development-identity-key"
 DEFAULT_MAX_RECOVERY_CREATIONS_PER_SESSION = 32
+DEFAULT_MAX_RECOVERY_CREATIONS_PER_IP = 128
 DEFAULT_MAX_RECOVERY_CREATIONS_GLOBAL = 2_048
 MAX_RECOVERY_CREATIONS_PER_SESSION = 4_096
+MAX_RECOVERY_CREATIONS_PER_IP = 100_000
 MAX_RECOVERY_CREATIONS_GLOBAL = 100_000
 
 
@@ -78,6 +80,7 @@ class RuntimeSettings:
     max_recovery_creations_per_session: int = (
         DEFAULT_MAX_RECOVERY_CREATIONS_PER_SESSION
     )
+    max_recovery_creations_per_ip: int = DEFAULT_MAX_RECOVERY_CREATIONS_PER_IP
     max_recovery_creations_global: int = DEFAULT_MAX_RECOVERY_CREATIONS_GLOBAL
     deployed_mode: bool = False
     deployed_cors_origins: tuple[str, ...] = ()
@@ -144,6 +147,11 @@ class RuntimeSettings:
                 self.max_recovery_creations_per_session,
                 1,
                 MAX_RECOVERY_CREATIONS_PER_SESSION,
+            ),
+            "max_recovery_creations_per_ip": (
+                self.max_recovery_creations_per_ip,
+                1,
+                MAX_RECOVERY_CREATIONS_PER_IP,
             ),
             "max_recovery_creations_global": (
                 self.max_recovery_creations_global,
@@ -285,6 +293,10 @@ class RuntimeSettings:
             max_recovery_creations_per_session=_environment_int(
                 "BACKCHANNEL_MAX_RECOVERY_CREATIONS_PER_SESSION",
                 default=DEFAULT_MAX_RECOVERY_CREATIONS_PER_SESSION,
+            ),
+            max_recovery_creations_per_ip=_environment_int(
+                "BACKCHANNEL_MAX_RECOVERY_CREATIONS_PER_IP",
+                default=DEFAULT_MAX_RECOVERY_CREATIONS_PER_IP,
             ),
             max_recovery_creations_global=_environment_int(
                 "BACKCHANNEL_MAX_RECOVERY_CREATIONS_GLOBAL",

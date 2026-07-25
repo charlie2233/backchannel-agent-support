@@ -18,7 +18,9 @@ Creating a recovery also binds it to the signed, HttpOnly opaque demo session in
 That access association is committed in the same SQLite transaction as a new SDK/live recovery
 or, for replay, only after the canonical snapshot, events, and receipt have passed integrity
 validation. The durable association contains only `recoveryId` and a keyed session correlation
-value; the raw cookie, nonce, client address, API key, and authorization headers are not stored.
+value; the raw cookie, nonce, client address, API key, and authorization headers are not stored
+in the application SQLite tables. HTTP server and access logs are outside this persistence
+boundary and may contain client addresses according to the Uvicorn/operator logging setup.
 
 The recovery snapshot, SSE stream, receipt, and decision endpoint require the same valid
 session. Authorization runs before SSE cursor parsing, live-lease renewal, consent validation,
@@ -46,7 +48,9 @@ pending, conflict, unknown, or capacity; no transaction remains open across repl
 model, or provider work. SDK and live owners pass the reserved UUID into orchestration.
 Replay owners reserve the canonical fixture UUID, preserving one shared fixture while access
 remains separately bound to each signed session. Each claim also stores the opaque session
-correlation and exact signed-cookie expiry.
+correlation, opaque HMAC IP correlation observed when the key is first reserved, and exact
+signed-cookie expiry. The creation ledger stores no raw address; transport and access logs
+remain outside that SQLite claim.
 
 An exact ready retry returns `201` with the current authoritative snapshot and consumes no
 additional orchestration, live admission, or budget unit. A changed scenario or mode returns
@@ -61,15 +65,19 @@ or unknown claim; reset can be retried after the owner resolves it or the signed
 expires. Ready claims remain resettable.
 
 The exact request-key lookup and all of those retry semantics run before capacity accounting.
-Only a row-absent key counts rows whose `expires_at` is later than the transaction time, then
-atomically inserts or refuses. The defaults are 32 unexpired claims per signed session and
-2,048 globally; the bounded environment settings are
-`BACKCHANNEL_MAX_RECOVERY_CREATIONS_PER_SESSION` and
-`BACKCHANNEL_MAX_RECOVERY_CREATIONS_GLOBAL`, and the former cannot exceed the latter. Every
+It does not compare or rewrite the stored IP correlation, so the same signed session and key
+remain retryable after IP mobility even when the new IP is saturated. Only a row-absent key
+counts rows whose `expires_at` is later than the transaction time, then atomically inserts or
+refuses. The defaults are 32 unexpired claims per signed session, 128 per opaque IP
+correlation, and 2,048 globally; the bounded environment settings are
+`BACKCHANNEL_MAX_RECOVERY_CREATIONS_PER_SESSION`,
+`BACKCHANNEL_MAX_RECOVERY_CREATIONS_PER_IP`, and
+`BACKCHANNEL_MAX_RECOVERY_CREATIONS_GLOBAL`. The IP gate is independent; only the session
+limit cannot exceed the global limit, and whichever independent gate is lower wins. Every
 unexpired reserved, started, ready, and unknown row counts. Expired rows do not count even if
 bounded cleanup has not deleted them yet.
 
-A new key that would exceed either bound returns `429` with only this fixed envelope and
+A new key that would exceed any bound returns `429` with only this fixed envelope and
 per-request correlation; it has no `Retry-After` header:
 
 ```json
@@ -85,6 +93,15 @@ fallback, count, or limit. The endpoint's exact 429 schema is a `oneOf` containi
 no-fallback envelope plus the reachable `live_capacity`, `cooldown`, and `daily_budget`
 live-admission envelopes, each with `fallbackExecutionMode: "replay_fixture"`.
 `live_unavailable` remains a 422 outcome and is not a 429 alternative.
+
+The per-IP gate is defense-in-depth abuse resistance, not authentication, a unique-user
+limit, or a fairness guarantee. Shared NATs can group unrelated users. The direct network peer
+is canonical unless trusted-proxy mode and its explicit CIDR allowlist are enabled; only then
+can a validated forwarded chain select the correlated address. The identity secret HMACs that
+value before creation-ledger persistence. Legacy creation rows are backfilled with their
+already-opaque session correlation as `ip_key`, preserving exact-key claim semantics without
+introducing a raw address into SQLite or invalidating a claim. This privacy boundary does not
+claim that Uvicorn or infrastructure access logs omit client addresses.
 
 The browser retains the same-tab tuple and offers an explicit same-key retry for capacity,
 pending, and unknown outcomes; the deterministic quota scenario uses the fixed safe message

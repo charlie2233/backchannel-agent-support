@@ -196,6 +196,7 @@ _READY_SCHEMA_COLUMNS = {
             "request_key",
             "request_fingerprint",
             "session_key",
+            "ip_key",
             "scenario_id",
             "execution_mode",
             "recovery_id",
@@ -671,6 +672,54 @@ def _store_schema_is_ready(
             }
             if not required_columns.issubset(actual_columns):
                 return False
+        creation_ip_column = next(
+            (
+                row
+                for row in connection.execute(
+                    'PRAGMA table_xinfo("recovery_creations")'
+                ).fetchall()
+                if str(row[1]) == "ip_key"
+            ),
+            None,
+        )
+        creation_schema_row = connection.execute(
+            """
+            SELECT sql
+            FROM main.sqlite_master
+            WHERE type = 'table' AND name = 'recovery_creations'
+            """
+        ).fetchone()
+        normalized_creation_schema = (
+            "".join(str(creation_schema_row[0]).lower().split())
+            if creation_schema_row is not None
+            and creation_schema_row[0] is not None
+            else ""
+        )
+        if (
+            creation_ip_column is None
+            or str(creation_ip_column[2]).upper() != "TEXT"
+            or int(creation_ip_column[3]) != 1
+            or int(creation_ip_column[6]) != 0
+            or (
+                "ip_keytextnotnullcheck(length(ip_key)=64)"
+                not in normalized_creation_schema
+            )
+        ):
+            return False
+        if (
+            connection.execute(
+                """
+                SELECT 1
+                FROM recovery_creations
+                WHERE typeof(ip_key) <> 'text'
+                   OR length(ip_key) <> 64
+                   OR ip_key GLOB '*[^0-9a-f]*'
+                LIMIT 1
+                """
+            ).fetchone()
+            is not None
+        ):
+            return False
         access_columns = [
             (str(row[1]), int(row[5]))
             for row in connection.execute(
@@ -1256,10 +1305,12 @@ def create_app(
             execution_mode=payload.execution_mode,
             reserved_recovery_id=reserved_recovery_id,
             session_key=identity.session_key,
+            ip_key=identity.ip_key,
             expires_at=identity.session_expires_at,
             max_per_session=(
                 runtime_settings.max_recovery_creations_per_session
             ),
+            max_per_ip=runtime_settings.max_recovery_creations_per_ip,
             max_global=runtime_settings.max_recovery_creations_global,
         )
 

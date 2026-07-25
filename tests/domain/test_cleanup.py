@@ -98,6 +98,7 @@ def _create_scoped_creation_claim(
         execution_mode=ExecutionMode.SDK_STUB,
         reserved_recovery_id=str(uuid4()),
         session_key=session_key,
+        ip_key="a" * 64,
         expires_at=expires_at,
         now=created_at,
     )

@@ -74,18 +74,28 @@ Changed payloads fail with `idempotency_conflict`, active contenders receive
 `creation_outcome_unknown` without launching a replacement.
 
 Only row-absent claims enter the capacity gate inside that same `BEGIN IMMEDIATE`
-transaction. Defaults allow 32 unexpired creation rows for one signed session and 2,048
-globally; `BACKCHANNEL_MAX_RECOVERY_CREATIONS_PER_SESSION` and
-`BACKCHANNEL_MAX_RECOVERY_CREATIONS_GLOBAL` configure bounded integers, with the session
-limit no greater than the global limit. Reserved, started, ready, and unknown rows all count
-while their signed-session expiry is in the future, even if their recovery has become
-terminal. Expired rows never count, including while bounded cleanup is still draining them.
-An exact existing key is evaluated first and therefore remains retryable at capacity.
+transaction. Defaults allow 32 unexpired creation rows for one signed session, 128 for one
+opaque HMAC IP correlation, and 2,048 globally;
+`BACKCHANNEL_MAX_RECOVERY_CREATIONS_PER_SESSION`,
+`BACKCHANNEL_MAX_RECOVERY_CREATIONS_PER_IP`, and
+`BACKCHANNEL_MAX_RECOVERY_CREATIONS_GLOBAL` configure bounded integers, with only the session
+limit constrained not to exceed the global limit. Reserved, started, ready, and unknown rows
+all count while their signed-session expiry is in the future, even if their recovery has
+become terminal. Expired rows never count, including while bounded cleanup is still draining
+them. An exact existing key is evaluated first and therefore remains retryable at capacity;
+IP mobility neither rewrites nor invalidates its first-reservation IP correlation.
 The denied start itself returns exact `429 creation_capacity` without an insert, recovery,
 orchestration, live-admission, or budget side effect and without `Retry-After`, capacity
 counts, limits, fallback metadata, or internal identifiers. Ordinary bounded pre-claim
 maintenance runs before capacity evaluation and may mutate unrelated expired creation rows,
 pending approvals, or terminal recoveries.
+
+The IP gate persists only the 64-character keyed correlation already derived by the public
+controls layer, never a raw peer or forwarded address. It is a defense-in-depth abuse boundary,
+not identity or guaranteed per-user fairness: shared NATs can share one gate. The direct peer
+is used unless trusted-proxy mode is explicitly enabled with matching proxy CIDRs. Legacy
+rows are backfilled from their opaque session correlation so upgrades preserve claim
+dispositions without fabricating or exposing historical addresses.
 
 Ready and reconciled claims do not trust a recovery status alone. Replay retries pass through
 the canonical fixture/event/receipt integrity validator. Hotel SDK/live results require either

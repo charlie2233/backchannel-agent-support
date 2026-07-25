@@ -458,10 +458,12 @@ def _claim_creation(
     *,
     request_key: str,
     session_key: str,
+    ip_key: str = "a" * 64,
     now: datetime,
     expires_at: datetime | None = None,
     request_fingerprint: str = "f" * 64,
     max_per_session: int = 32,
+    max_per_ip: int = 128,
     max_global: int = 2_048,
 ) -> Any:
     return store.claim_recovery_creation(
@@ -471,8 +473,10 @@ def _claim_creation(
         execution_mode=ExecutionMode.SDK_STUB,
         reserved_recovery_id=str(uuid4()),
         session_key=session_key,
+        ip_key=ip_key,
         expires_at=expires_at or now + timedelta(days=1),
         max_per_session=max_per_session,
+        max_per_ip=max_per_ip,
         max_global=max_global,
         now=now,
     )
@@ -529,9 +533,292 @@ def test_creation_ledger_binds_claims_to_opaque_session_expiry(
         }
 
     assert columns["session_key"] == ("TEXT", True)
+    assert columns["ip_key"] == ("TEXT", True)
     assert columns["expires_at"] == ("TEXT", True)
     assert "recovery_creations_session_idx" in indexes
+    assert "recovery_creations_ip_expiry_idx" in indexes
     assert "recovery_creations_expiry_idx" in indexes
+    store.close()
+
+
+def test_creation_ledger_database_rejects_noncanonical_ip_key_lengths(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "creation-ip-constraints.sqlite3"
+    store = SQLiteStore(database_path)
+    now = datetime(2026, 7, 24, tzinfo=UTC)
+    owner = _claim_creation(
+        store,
+        request_key="a" * 64,
+        session_key="b" * 64,
+        ip_key="c" * 64,
+        now=now,
+    )
+    assert owner.disposition == "owner"
+
+    for invalid_ip_key in (None, "d" * 63, "e" * 65):
+        with (
+            sqlite3.connect(database_path) as connection,
+            pytest.raises(sqlite3.IntegrityError),
+        ):
+            connection.execute(
+                "UPDATE recovery_creations SET ip_key = ?",
+                (invalid_ip_key,),
+            )
+
+    with sqlite3.connect(database_path) as connection:
+        stored_ip_key = connection.execute(
+            "SELECT ip_key FROM recovery_creations"
+        ).fetchone()
+    assert stored_ip_key == ("c" * 64,)
+    store.close()
+
+
+def test_legacy_creation_ledger_backfills_opaque_ip_key_without_invalidating_claim(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "legacy-creation-ledger.sqlite3"
+    request_key = "a" * 64
+    request_fingerprint = "b" * 64
+    session_key = "c" * 64
+    recovery_id = "11111111-2222-4333-8444-555555555555"
+    created_at = datetime(2026, 7, 24, tzinfo=UTC)
+    expires_at = created_at + timedelta(days=1)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE recovery_creations (
+                request_key TEXT PRIMARY KEY,
+                request_fingerprint TEXT NOT NULL,
+                session_key TEXT NOT NULL,
+                scenario_id TEXT NOT NULL,
+                execution_mode TEXT NOT NULL,
+                recovery_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO recovery_creations (
+                request_key, request_fingerprint, session_key, scenario_id,
+                execution_mode, recovery_id, status, created_at, updated_at,
+                expires_at
+            ) VALUES (?, ?, ?, 'hotel', 'sdk_stub', ?, 'reserved', ?, ?, ?)
+            """,
+            (
+                request_key,
+                request_fingerprint,
+                session_key,
+                recovery_id,
+                created_at.isoformat(),
+                created_at.isoformat(),
+                expires_at.isoformat(),
+            ),
+        )
+
+    store = SQLiteStore(database_path)
+    retry = store.claim_recovery_creation(
+        request_key=request_key,
+        request_fingerprint=request_fingerprint,
+        scenario_id=ScenarioId.HOTEL,
+        execution_mode=ExecutionMode.SDK_STUB,
+        reserved_recovery_id=str(uuid4()),
+        session_key=session_key,
+        ip_key="d" * 64,
+        expires_at=expires_at,
+        now=created_at + timedelta(seconds=1),
+    )
+    with sqlite3.connect(database_path) as connection:
+        stored_ip_key = connection.execute(
+            "SELECT ip_key FROM recovery_creations WHERE request_key = ?",
+            (request_key,),
+        ).fetchone()
+
+    assert retry.disposition == "pending"
+    assert stored_ip_key == (session_key,)
+    store.close()
+
+
+def test_interrupted_ip_migration_rebuilds_canonical_schema_and_preserves_claims(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "interrupted-ip-migration.sqlite3"
+    created_at = datetime(2026, 7, 24, tzinfo=UTC)
+    expires_at = created_at + timedelta(days=1)
+    rows = [
+        (
+            "a" * 64,
+            "d" * 64,
+            "1" * 64,
+            "4" * 64,
+            "11111111-2222-4333-8444-555555555555",
+        ),
+        (
+            "b" * 64,
+            "e" * 64,
+            "2" * 64,
+            None,
+            "22222222-3333-4444-8555-666666666666",
+        ),
+        (
+            "c" * 64,
+            "f" * 64,
+            "3" * 64,
+            "z" * 64,
+            "33333333-4444-4555-8666-777777777777",
+        ),
+    ]
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE recovery_creations (
+                request_key TEXT PRIMARY KEY,
+                request_fingerprint TEXT NOT NULL,
+                session_key TEXT NOT NULL,
+                ip_key TEXT,
+                scenario_id TEXT NOT NULL,
+                execution_mode TEXT NOT NULL,
+                recovery_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.executemany(
+            """
+            INSERT INTO recovery_creations (
+                request_key, request_fingerprint, session_key, ip_key,
+                scenario_id, execution_mode, recovery_id, status,
+                created_at, updated_at, expires_at
+            ) VALUES (?, ?, ?, ?, 'hotel', 'sdk_stub', ?, 'reserved', ?, ?, ?)
+            """,
+            [
+                (
+                    request_key,
+                    request_fingerprint,
+                    session_key,
+                    ip_key,
+                    recovery_id,
+                    created_at.isoformat(),
+                    created_at.isoformat(),
+                    expires_at.isoformat(),
+                )
+                for (
+                    request_key,
+                    request_fingerprint,
+                    session_key,
+                    ip_key,
+                    recovery_id,
+                ) in rows
+            ],
+        )
+
+    store = SQLiteStore(database_path)
+    with sqlite3.connect(database_path) as connection:
+        ip_column = next(
+            row
+            for row in connection.execute(
+                "PRAGMA table_info(recovery_creations)"
+            ).fetchall()
+            if row[1] == "ip_key"
+        )
+        table_sql = str(
+            connection.execute(
+                """
+                SELECT sql
+                FROM sqlite_master
+                WHERE type = 'table' AND name = 'recovery_creations'
+                """
+            ).fetchone()[0]
+        )
+        stored_rows = connection.execute(
+            """
+            SELECT request_key, request_fingerprint, session_key, ip_key,
+                   recovery_id, status, created_at, updated_at, expires_at
+            FROM recovery_creations
+            ORDER BY request_key
+            """
+        ).fetchall()
+        indexes = {
+            str(row[1])
+            for row in connection.execute(
+                "PRAGMA index_list(recovery_creations)"
+            ).fetchall()
+        }
+
+    assert (ip_column[2], ip_column[3]) == ("TEXT", 1)
+    assert (
+        "ip_keytextnotnullcheck(length(ip_key)=64)"
+        in "".join(table_sql.lower().split())
+    )
+    assert [row[3] for row in stored_rows] == [
+        "4" * 64,
+        "2" * 64,
+        "3" * 64,
+    ]
+    assert [
+        (
+            row[0],
+            row[1],
+            row[2],
+            row[4],
+            row[5],
+            row[6],
+            row[7],
+            row[8],
+        )
+        for row in stored_rows
+    ] == [
+        (
+            request_key,
+            request_fingerprint,
+            session_key,
+            recovery_id,
+            "reserved",
+            created_at.isoformat(),
+            created_at.isoformat(),
+            expires_at.isoformat(),
+        )
+        for (
+            request_key,
+            request_fingerprint,
+            session_key,
+            _ip_key,
+            recovery_id,
+        ) in rows
+    ]
+    assert {
+        "recovery_creations_status_updated_idx",
+        "recovery_creations_session_idx",
+        "recovery_creations_ip_expiry_idx",
+        "recovery_creations_expiry_idx",
+    }.issubset(indexes)
+
+    for (
+        request_key,
+        request_fingerprint,
+        session_key,
+        _ip_key,
+        _recovery_id,
+    ) in rows:
+        retry = store.claim_recovery_creation(
+            request_key=request_key,
+            request_fingerprint=request_fingerprint,
+            scenario_id=ScenarioId.HOTEL,
+            execution_mode=ExecutionMode.SDK_STUB,
+            reserved_recovery_id=str(uuid4()),
+            session_key=session_key,
+            ip_key="9" * 64,
+            expires_at=expires_at,
+            now=created_at + timedelta(seconds=1),
+        )
+        assert retry.disposition == "pending"
     store.close()
 
 
@@ -1147,6 +1434,7 @@ def test_store_reset_rolls_back_without_mutation_for_unresolved_creation(
         execution_mode=ExecutionMode.SDK_STUB,
         reserved_recovery_id=reserved_recovery_id,
         session_key=session_key,
+        ip_key="a" * 64,
         expires_at=started_at + timedelta(days=1),
         now=started_at,
     )
@@ -1192,6 +1480,7 @@ def test_store_reset_rolls_back_without_mutation_for_unresolved_creation(
         execution_mode=ExecutionMode.SDK_STUB,
         reserved_recovery_id=str(uuid4()),
         session_key=session_key,
+        ip_key="a" * 64,
         expires_at=started_at + timedelta(days=1),
         max_per_session=1,
         max_global=1,
@@ -1220,6 +1509,7 @@ def test_stale_reserved_or_started_claim_becomes_permanently_unknown(
         execution_mode=ExecutionMode.SDK_STUB,
         reserved_recovery_id=recovery_id,
         session_key=session_key,
+        ip_key="a" * 64,
         expires_at=started_at + timedelta(days=1),
         now=started_at,
     )
@@ -1238,6 +1528,7 @@ def test_stale_reserved_or_started_claim_becomes_permanently_unknown(
         execution_mode=ExecutionMode.SDK_STUB,
         reserved_recovery_id=str(uuid4()),
         session_key=session_key,
+        ip_key="a" * 64,
         expires_at=started_at + timedelta(days=1),
         stale_after=timedelta(seconds=1),
         now=started_at + timedelta(seconds=1),
@@ -1249,6 +1540,7 @@ def test_stale_reserved_or_started_claim_becomes_permanently_unknown(
         execution_mode=ExecutionMode.SDK_STUB,
         reserved_recovery_id=str(uuid4()),
         session_key=session_key,
+        ip_key="a" * 64,
         expires_at=started_at + timedelta(days=1),
         now=started_at + timedelta(seconds=2),
     )
@@ -1276,6 +1568,7 @@ def test_future_dated_creation_claim_fails_closed_instead_of_remaining_pending(
         execution_mode=ExecutionMode.SDK_STUB,
         reserved_recovery_id=recovery_id,
         session_key=session_key,
+        ip_key="a" * 64,
         expires_at=started_at + timedelta(days=2),
         now=started_at,
     )
@@ -1293,6 +1586,7 @@ def test_future_dated_creation_claim_fails_closed_instead_of_remaining_pending(
         execution_mode=ExecutionMode.SDK_STUB,
         reserved_recovery_id=str(uuid4()),
         session_key=session_key,
+        ip_key="a" * 64,
         expires_at=started_at + timedelta(days=2),
         now=started_at + timedelta(seconds=1),
     )
@@ -1317,6 +1611,7 @@ def test_expired_creation_claim_cleanup_is_bounded_and_session_scoped(
             execution_mode=ExecutionMode.SDK_STUB,
             reserved_recovery_id=str(uuid4()),
             session_key=session_key,
+            ip_key="a" * 64,
             expires_at=created_at + timedelta(seconds=index),
             now=created_at,
         )
@@ -1388,6 +1683,206 @@ def test_store_enforces_session_and_global_creation_capacity(
         "SELECT COUNT(*) FROM recovery_creations",
     ) == 2
     store.close()
+
+
+def test_public_creation_capacity_bounds_fresh_sessions_by_opaque_ip(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "public-ip-capacity.sqlite3"
+    store = SQLiteStore(database_path)
+    settings = RuntimeSettings(
+        live_ready=False,
+        identity_hash_secret=_IDENTITY_SECRET,
+        max_recovery_creations_per_session=8,
+        max_recovery_creations_per_ip=2,
+        max_recovery_creations_global=8,
+    )
+    app = _create_test_app(settings, store=store)
+    shared_ip = "198.51.100.21"
+    different_ip = "203.0.113.22"
+
+    with TestClient(app, client=(shared_ip, 50_000)) as client:
+        accepted = []
+        for request_id in ("same-ip-one", "same-ip-two"):
+            client.cookies.clear()
+            accepted.append(
+                client.post(
+                    "/api/recoveries",
+                    json=_payload(
+                        request_id,
+                        scenario_id="api-quota",
+                        execution_mode="replay_fixture",
+                    ),
+                )
+            )
+        client.cookies.clear()
+        denied = client.post(
+            "/api/recoveries",
+            json=_payload(
+                "same-ip-denied",
+                scenario_id="api-quota",
+                execution_mode="replay_fixture",
+            ),
+        )
+    with TestClient(app, client=(different_ip, 50_000)) as other_client:
+        other = other_client.post(
+            "/api/recoveries",
+            json=_payload(
+                "different-ip-owner",
+                scenario_id="api-quota",
+                execution_mode="replay_fixture",
+            ),
+        )
+
+    assert [response.status_code for response in accepted] == [201, 201]
+    _assert_creation_error(denied, code="creation_capacity")
+    assert "retry-after" not in denied.headers
+    assert other.status_code == 201
+    with sqlite3.connect(database_path) as connection:
+        ip_keys = [
+            str(row[0])
+            for row in connection.execute(
+                "SELECT ip_key FROM recovery_creations ORDER BY request_key"
+            ).fetchall()
+        ]
+    assert len(ip_keys) == 3
+    assert len(set(ip_keys)) == 2
+    assert all(re.fullmatch(r"[0-9a-f]{64}", ip_key) for ip_key in ip_keys)
+    _assert_raw_key_absent(
+        shared_ip,
+        database_path=database_path,
+        responses=[*accepted, denied, other],
+    )
+    _assert_raw_key_absent(
+        different_ip,
+        database_path=database_path,
+        responses=[*accepted, denied, other],
+    )
+    store.close()
+
+
+def test_exact_creation_retry_bypasses_new_ip_capacity_after_ip_mobility(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "creation-ip-mobility.sqlite3"
+    store = SQLiteStore(database_path)
+    settings = RuntimeSettings(
+        live_ready=False,
+        identity_hash_secret=_IDENTITY_SECRET,
+        max_recovery_creations_per_session=4,
+        max_recovery_creations_per_ip=1,
+        max_recovery_creations_global=4,
+    )
+    app = _create_test_app(settings, store=store)
+    first_ip = "198.51.100.31"
+    moved_ip = "203.0.113.32"
+    payload = _payload(
+        "mobile-exact-key",
+        scenario_id="api-quota",
+        execution_mode="replay_fixture",
+    )
+
+    with TestClient(app, client=(first_ip, 50_000)) as first_client:
+        first = first_client.post("/api/recoveries", json=payload)
+        raw_cookie = first_client.cookies.get(_COOKIE_NAME)
+    assert isinstance(raw_cookie, str)
+    with sqlite3.connect(database_path) as connection:
+        original_row = connection.execute(
+            "SELECT request_key, ip_key FROM recovery_creations"
+        ).fetchone()
+    assert original_row is not None
+    original_request_key, original_ip_key = original_row
+
+    with TestClient(app, client=(moved_ip, 50_000)) as moved_client:
+        saturated = moved_client.post(
+            "/api/recoveries",
+            json=_payload(
+                "moved-ip-owner",
+                scenario_id="api-quota",
+                execution_mode="replay_fixture",
+            ),
+        )
+        moved_client.cookies.clear()
+        _attach_session(moved_client, raw_cookie)
+        exact_retry = moved_client.post("/api/recoveries", json=payload)
+
+    assert first.status_code == saturated.status_code == exact_retry.status_code == 201
+    assert exact_retry.json() == first.json()
+    with sqlite3.connect(database_path) as connection:
+        stored_ip_key = connection.execute(
+            "SELECT ip_key FROM recovery_creations WHERE request_key = ?",
+            (original_request_key,),
+        ).fetchone()
+        row_count = connection.execute(
+            "SELECT COUNT(*) FROM recovery_creations"
+        ).fetchone()
+    assert stored_ip_key == (original_ip_key,)
+    assert row_count == (2,)
+    store.close()
+
+
+def test_expired_same_ip_creation_backlog_does_not_consume_capacity(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "expired-ip-capacity.sqlite3"
+    store = SQLiteStore(database_path)
+    now = datetime(2026, 7, 24, tzinfo=UTC)
+    ip_key = "a" * 64
+    expired = _claim_creation(
+        store,
+        request_key="b" * 64,
+        session_key="c" * 64,
+        ip_key=ip_key,
+        now=now,
+        expires_at=now + timedelta(seconds=1),
+        max_per_ip=1,
+    )
+    replacement = _claim_creation(
+        store,
+        request_key="d" * 64,
+        session_key="e" * 64,
+        ip_key=ip_key,
+        now=now + timedelta(seconds=2),
+        expires_at=now + timedelta(days=1),
+        max_per_ip=1,
+    )
+
+    assert expired.disposition == replacement.disposition == "owner"
+    assert _scalar(database_path, "SELECT COUNT(*) FROM recovery_creations") == 2
+    store.close()
+
+
+def test_per_ip_creation_capacity_is_atomic_across_store_instances(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "atomic-ip-capacity.sqlite3"
+    stores = (SQLiteStore(database_path), SQLiteStore(database_path))
+    now = datetime(2026, 7, 24, tzinfo=UTC)
+    barrier = Event()
+
+    def claim(index: int) -> str:
+        barrier.wait(timeout=5)
+        result = _claim_creation(
+            stores[index],
+            request_key=("a" if index == 0 else "b") * 64,
+            session_key=("c" if index == 0 else "d") * 64,
+            ip_key="e" * 64,
+            now=now,
+            max_per_session=1,
+            max_per_ip=1,
+            max_global=2,
+        )
+        return result.disposition
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(claim, index) for index in range(2)]
+        barrier.set()
+        dispositions = sorted(future.result(timeout=10) for future in futures)
+
+    assert dispositions == ["capacity", "owner"]
+    assert _scalar(database_path, "SELECT COUNT(*) FROM recovery_creations") == 1
+    for store in stores:
+        store.close()
 
 
 @pytest.mark.parametrize(
@@ -1508,6 +2003,7 @@ def test_terminal_recovery_cleanup_does_not_release_unexpired_creation_capacity(
         execution_mode=ExecutionMode.REPLAY_FIXTURE,
         reserved_recovery_id=recovery_id,
         session_key=session_key,
+        ip_key="a" * 64,
         expires_at=now + timedelta(days=1),
         max_per_session=1,
         max_global=1,

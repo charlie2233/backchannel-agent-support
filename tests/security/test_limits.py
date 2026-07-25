@@ -269,6 +269,8 @@ def test_live_admission_messages_match_the_public_client_allowlist(
         ("event_stream_retry_seconds", 301),
         ("max_recovery_creations_per_session", 0),
         ("max_recovery_creations_per_session", 4_097),
+        ("max_recovery_creations_per_ip", 0),
+        ("max_recovery_creations_per_ip", 100_001),
         ("max_recovery_creations_global", 0),
         ("max_recovery_creations_global", 100_001),
         ("demo_session_lifetime_seconds", 0),
@@ -312,13 +314,24 @@ def test_creation_limits_have_bounded_defaults_and_environment_overrides(
 ) -> None:
     defaults = RuntimeSettings(live_ready=False)
     assert defaults.max_recovery_creations_per_session == 32
+    assert defaults.max_recovery_creations_per_ip == 128
     assert defaults.max_recovery_creations_global == 2_048
 
     monkeypatch.setenv("BACKCHANNEL_MAX_RECOVERY_CREATIONS_PER_SESSION", "12")
+    monkeypatch.setenv("BACKCHANNEL_MAX_RECOVERY_CREATIONS_PER_IP", "48")
     monkeypatch.setenv("BACKCHANNEL_MAX_RECOVERY_CREATIONS_GLOBAL", "120")
     configured = RuntimeSettings.from_environment()
     assert configured.max_recovery_creations_per_session == 12
+    assert configured.max_recovery_creations_per_ip == 48
     assert configured.max_recovery_creations_global == 120
+
+    independent = RuntimeSettings(
+        live_ready=False,
+        max_recovery_creations_per_session=1,
+        max_recovery_creations_per_ip=128,
+        max_recovery_creations_global=1,
+    )
+    assert independent.max_recovery_creations_per_ip == 128
 
 
 def test_env_example_publishes_canonical_creation_capacity_defaults() -> None:
@@ -327,6 +340,7 @@ def test_env_example_publishes_canonical_creation_capacity_defaults() -> None:
     ).read_text(encoding="utf-8")
 
     assert "BACKCHANNEL_MAX_RECOVERY_CREATIONS_PER_SESSION=32\n" in example
+    assert "BACKCHANNEL_MAX_RECOVERY_CREATIONS_PER_IP=128\n" in example
     assert "BACKCHANNEL_MAX_RECOVERY_CREATIONS_GLOBAL=2048\n" in example
 
 

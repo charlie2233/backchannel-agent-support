@@ -18,8 +18,10 @@ from server.agents.schemas import CommitRemedyArguments
 from server.agents.versioning import remedy_action_digest
 from server.config import (
     DEFAULT_MAX_RECOVERY_CREATIONS_GLOBAL,
+    DEFAULT_MAX_RECOVERY_CREATIONS_PER_IP,
     DEFAULT_MAX_RECOVERY_CREATIONS_PER_SESSION,
     MAX_RECOVERY_CREATIONS_GLOBAL,
+    MAX_RECOVERY_CREATIONS_PER_IP,
     MAX_RECOVERY_CREATIONS_PER_SESSION,
 )
 from server.digest import remedy_consent_digest
@@ -229,6 +231,7 @@ CREATE TABLE IF NOT EXISTS recovery_creations (
     request_key TEXT PRIMARY KEY,
     request_fingerprint TEXT NOT NULL,
     session_key TEXT NOT NULL CHECK (length(session_key) = 64),
+    ip_key TEXT NOT NULL CHECK (length(ip_key) = 64),
     scenario_id TEXT NOT NULL CHECK (scenario_id IN ('hotel', 'api-quota')),
     execution_mode TEXT NOT NULL CHECK (
         execution_mode IN ('openai_live', 'sdk_stub', 'replay_fixture')
@@ -493,46 +496,175 @@ class SQLiteStore:
 
     @staticmethod
     def _migrate_recovery_creations(connection: sqlite3.Connection) -> None:
-        """Fail closed when upgrading pre-session-bound creation claims."""
+        """Transactionally upgrade creation claims to the canonical IP schema."""
 
-        columns = {
-            cast(str, row["name"])
-            for row in connection.execute(
-                "PRAGMA table_info(recovery_creations)"
-            ).fetchall()
-        }
-        legacy_expiry = (datetime.now(UTC) + timedelta(days=7)).isoformat()
-        if "session_key" not in columns:
-            connection.execute(
-                "ALTER TABLE recovery_creations ADD COLUMN session_key TEXT"
+        savepoint = "recovery_creations_schema_migration"
+        connection.execute(f"SAVEPOINT {savepoint}")
+        try:
+            columns = {
+                cast(str, row["name"])
+                for row in connection.execute(
+                    "PRAGMA table_info(recovery_creations)"
+                ).fetchall()
+            }
+            legacy_expiry = (datetime.now(UTC) + timedelta(days=7)).isoformat()
+            if "session_key" not in columns:
+                connection.execute(
+                    "ALTER TABLE recovery_creations ADD COLUMN session_key TEXT"
+                )
+                connection.execute(
+                    """
+                    UPDATE recovery_creations
+                    SET session_key = request_key, status = 'unknown'
+                    WHERE session_key IS NULL
+                    """
+                )
+            if "expires_at" not in columns:
+                connection.execute(
+                    "ALTER TABLE recovery_creations ADD COLUMN expires_at TEXT"
+                )
+                connection.execute(
+                    """
+                    UPDATE recovery_creations
+                    SET expires_at = ?, status = 'unknown'
+                    WHERE expires_at IS NULL
+                    """,
+                    (legacy_expiry,),
+                )
+
+            ip_column = next(
+                (
+                    row
+                    for row in connection.execute(
+                        "PRAGMA table_xinfo(recovery_creations)"
+                    ).fetchall()
+                    if cast(str, row["name"]) == "ip_key"
+                ),
+                None,
             )
-            connection.execute(
+            schema_row = connection.execute(
                 """
-                UPDATE recovery_creations
-                SET session_key = request_key, status = 'unknown'
-                WHERE session_key IS NULL
+                SELECT sql
+                FROM sqlite_master
+                WHERE type = 'table' AND name = 'recovery_creations'
                 """
+            ).fetchone()
+            normalized_schema = (
+                "".join(cast(str, schema_row["sql"]).lower().split())
+                if schema_row is not None and schema_row["sql"] is not None
+                else ""
             )
-        if "expires_at" not in columns:
+            canonical_ip_schema = (
+                ip_column is not None
+                and cast(str, ip_column["type"]).upper() == "TEXT"
+                and cast(int, ip_column["notnull"]) == 1
+                and cast(int, ip_column["hidden"]) == 0
+                and (
+                    "ip_keytextnotnullcheck(length(ip_key)=64)"
+                    in normalized_schema
+                )
+            )
+            if not canonical_ip_schema:
+                invalid_session = connection.execute(
+                    """
+                    SELECT 1
+                    FROM recovery_creations
+                    WHERE typeof(session_key) <> 'text'
+                       OR length(session_key) <> 64
+                       OR session_key GLOB '*[^0-9a-f]*'
+                    LIMIT 1
+                    """
+                ).fetchone()
+                if invalid_session is not None:
+                    raise RuntimeError(
+                        "Unsupported recovery creation session correlation"
+                    )
+                connection.execute(
+                    "DROP TABLE IF EXISTS recovery_creations_ip_migration"
+                )
+                connection.execute(
+                    """
+                    CREATE TABLE recovery_creations_ip_migration (
+                        request_key TEXT PRIMARY KEY,
+                        request_fingerprint TEXT NOT NULL,
+                        session_key TEXT NOT NULL CHECK (length(session_key) = 64),
+                        ip_key TEXT NOT NULL CHECK (length(ip_key) = 64),
+                        scenario_id TEXT NOT NULL CHECK (
+                            scenario_id IN ('hotel', 'api-quota')
+                        ),
+                        execution_mode TEXT NOT NULL CHECK (
+                            execution_mode IN (
+                                'openai_live', 'sdk_stub', 'replay_fixture'
+                            )
+                        ),
+                        recovery_id TEXT NOT NULL,
+                        status TEXT NOT NULL CHECK (
+                            status IN ('reserved', 'started', 'ready', 'unknown')
+                        ),
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        expires_at TEXT NOT NULL
+                    )
+                    """
+                )
+                ip_key_expression = (
+                    """
+                    CASE
+                        WHEN typeof(ip_key) = 'text'
+                         AND length(ip_key) = 64
+                         AND ip_key NOT GLOB '*[^0-9a-f]*'
+                        THEN ip_key
+                        ELSE session_key
+                    END
+                    """
+                    if ip_column is not None
+                    else "session_key"
+                )
+                connection.execute(
+                    f"""
+                    INSERT INTO recovery_creations_ip_migration (
+                        request_key, request_fingerprint, session_key, ip_key,
+                        scenario_id, execution_mode, recovery_id, status,
+                        created_at, updated_at, expires_at
+                    )
+                    SELECT
+                        request_key, request_fingerprint, session_key,
+                        {ip_key_expression},
+                        scenario_id, execution_mode, recovery_id, status,
+                        created_at, updated_at, expires_at
+                    FROM recovery_creations
+                    """
+                )
+                connection.execute("DROP TABLE recovery_creations")
+                connection.execute(
+                    "ALTER TABLE recovery_creations_ip_migration "
+                    "RENAME TO recovery_creations"
+                )
+
             connection.execute(
-                "ALTER TABLE recovery_creations ADD COLUMN expires_at TEXT"
+                "CREATE INDEX IF NOT EXISTS "
+                "recovery_creations_status_updated_idx "
+                "ON recovery_creations(status, updated_at)"
             )
             connection.execute(
-                """
-                UPDATE recovery_creations
-                SET expires_at = ?, status = 'unknown'
-                WHERE expires_at IS NULL
-                """,
-                (legacy_expiry,),
+                "CREATE INDEX IF NOT EXISTS recovery_creations_session_idx "
+                "ON recovery_creations(session_key)"
             )
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS recovery_creations_session_idx "
-            "ON recovery_creations(session_key)"
-        )
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS recovery_creations_expiry_idx "
-            "ON recovery_creations(expires_at)"
-        )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS "
+                "recovery_creations_ip_expiry_idx "
+                "ON recovery_creations(ip_key, expires_at)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS recovery_creations_expiry_idx "
+                "ON recovery_creations(expires_at)"
+            )
+        except BaseException:
+            connection.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+            connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+            raise
+        else:
+            connection.execute(f"RELEASE SAVEPOINT {savepoint}")
 
     @staticmethod
     def _migrate_recovery_access(connection: sqlite3.Connection) -> None:
@@ -1912,8 +2044,10 @@ class SQLiteStore:
         execution_mode: ExecutionMode,
         reserved_recovery_id: str,
         session_key: str,
+        ip_key: str,
         expires_at: datetime,
         max_per_session: int = DEFAULT_MAX_RECOVERY_CREATIONS_PER_SESSION,
+        max_per_ip: int = DEFAULT_MAX_RECOVERY_CREATIONS_PER_IP,
         max_global: int = DEFAULT_MAX_RECOVERY_CREATIONS_GLOBAL,
         stale_after: timedelta = RECOVERY_CREATION_STALE_AFTER,
         now: datetime | None = None,
@@ -1927,6 +2061,7 @@ class SQLiteStore:
         )
         self._require_creation_recovery_id(reserved_recovery_id)
         self._require_opaque_session_key(session_key)
+        self._require_creation_digest(ip_key, name="ip_key")
         self._require_creation_time(expires_at, name="expires_at")
         if (
             not isinstance(max_per_session, int)
@@ -1936,6 +2071,14 @@ class SQLiteStore:
             raise ValueError(
                 "max_per_session must be between "
                 f"1 and {MAX_RECOVERY_CREATIONS_PER_SESSION}"
+            )
+        if (
+            not isinstance(max_per_ip, int)
+            or isinstance(max_per_ip, bool)
+            or not 1 <= max_per_ip <= MAX_RECOVERY_CREATIONS_PER_IP
+        ):
+            raise ValueError(
+                f"max_per_ip must be between 1 and {MAX_RECOVERY_CREATIONS_PER_IP}"
             )
         if (
             not isinstance(max_global, int)
@@ -1974,16 +2117,21 @@ class SQLiteStore:
                         COALESCE(
                             SUM(CASE WHEN session_key = ? THEN 1 ELSE 0 END),
                             0
-                        ) AS session_count
+                        ) AS session_count,
+                        COALESCE(
+                            SUM(CASE WHEN ip_key = ? THEN 1 ELSE 0 END),
+                            0
+                        ) AS ip_count
                     FROM recovery_creations
                     WHERE expires_at > ?
                     """,
-                    (session_key, current_text),
+                    (session_key, ip_key, current_text),
                 ).fetchone()
                 if capacity is None:
                     raise RuntimeError("Recovery creation capacity could not be read")
                 if (
                     cast(int, capacity["session_count"]) >= max_per_session
+                    or cast(int, capacity["ip_count"]) >= max_per_ip
                     or cast(int, capacity["global_count"]) >= max_global
                 ):
                     return RecoveryCreationClaim(
@@ -1995,15 +2143,16 @@ class SQLiteStore:
                 connection.execute(
                     """
                     INSERT INTO recovery_creations (
-                        request_key, request_fingerprint, session_key, scenario_id,
-                        execution_mode, recovery_id, status,
+                        request_key, request_fingerprint, session_key, ip_key,
+                        scenario_id, execution_mode, recovery_id, status,
                         created_at, updated_at, expires_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, 'reserved', ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'reserved', ?, ?, ?)
                     """,
                     (
                         request_key,
                         request_fingerprint,
                         session_key,
+                        ip_key,
                         scenario_id.value,
                         execution_mode.value,
                         reserved_recovery_id,

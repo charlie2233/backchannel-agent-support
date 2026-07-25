@@ -534,6 +534,8 @@ def test_readiness_is_generic_503_when_configured_static_index_is_missing(
         "closed",
         "missing_schema",
         "malformed_schema",
+        "malformed_creation_ip",
+        "malformed_creation_ip_value",
         "missing_access",
         "malformed_access",
         "access_foreign_key_violation",
@@ -564,6 +566,32 @@ def test_readiness_is_generic_503_for_sqlite_or_schema_failure(
                         "ALTER TABLE receipts "
                         "RENAME COLUMN receipt_json TO broken_receipt"
                     )
+                elif failure == "malformed_creation_ip":
+                    connection.execute(
+                        "ALTER TABLE recovery_creations "
+                        "RENAME COLUMN ip_key TO broken_ip_key"
+                    )
+                elif failure == "malformed_creation_ip_value":
+                    connection.execute(
+                        """
+                        INSERT INTO recovery_creations (
+                            request_key, request_fingerprint, session_key,
+                            ip_key, scenario_id, execution_mode, recovery_id,
+                            status, created_at, updated_at, expires_at
+                        ) VALUES (?, ?, ?, ?, 'hotel', 'sdk_stub', ?,
+                                  'reserved', ?, ?, ?)
+                        """,
+                        (
+                            "a" * 64,
+                            "b" * 64,
+                            "c" * 64,
+                            "z" * 64,
+                            "11111111-2222-4333-8444-555555555555",
+                            "2026-07-24T12:00:00+00:00",
+                            "2026-07-24T12:00:00+00:00",
+                            "2026-07-25T12:00:00+00:00",
+                        ),
+                    )
                 elif failure == "missing_access":
                     connection.execute("DROP TABLE recovery_access")
                 elif failure == "malformed_access":
@@ -588,6 +616,8 @@ def test_readiness_is_generic_503_for_sqlite_or_schema_failure(
     assert "receipt" not in public_body
     assert "recovery_access" not in public_body
     assert "session" not in public_body
+    assert "ip_key" not in public_body
+    assert "correlation" not in public_body
     assert health.status_code == 200
 
 
