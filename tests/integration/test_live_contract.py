@@ -44,7 +44,11 @@ from server.agents.schemas import (
 from server.agents.stub_model import DECLINE_MESSAGE
 from server.agents.tracing import configure_openai_live_tracing
 from server.models import ApprovalDecisionRequest, ExecutionMode, RecoveryStatus
-from server.orchestrator import LiveUnavailableError, RecoveryOrchestrator
+from server.orchestrator import (
+    LiveOperationTimeoutError,
+    LiveUnavailableError,
+    RecoveryOrchestrator,
+)
 from server.providers.hotel_simulator import HotelSimulator
 from server.store import ApprovalDecisionError, SQLiteStore
 
@@ -107,6 +111,9 @@ class _ScriptedLiveModel(Model):
         self._owner.call_count += 1
         if self._owner.before_call is not None:
             self._owner.before_call(self._owner.call_count)
+        delay = self._owner.delays.get(self._owner.call_count)
+        if delay is not None:
+            await asyncio.sleep(delay)
         if self._owner.resume_entered is not None and self._owner.call_count >= 4:
             self._owner.resume_entered.set()
             assert self._owner.resume_release is not None
@@ -222,6 +229,7 @@ class ScriptedLiveModelProvider(ModelProvider):
         before_call: Callable[[int], None] | None = None,
         resume_entered: asyncio.Event | None = None,
         resume_release: asyncio.Event | None = None,
+        delays: dict[int, float] | None = None,
     ) -> None:
         self.returned_models = returned_models
         self.resume_only = resume_only
@@ -231,6 +239,7 @@ class ScriptedLiveModelProvider(ModelProvider):
         self.before_call = before_call
         self.resume_entered = resume_entered
         self.resume_release = resume_release
+        self.delays = delays or {}
         self.call_count = 0
         self.requested_models: list[str] = []
         self.strict_output_types: list[str] = []
@@ -362,6 +371,211 @@ def test_live_model_failure_before_pending_boundary_removes_only_its_orphan(
     assert model_provider.call_count == 2
     assert store.count_recoveries() == 0
     assert hotel.dispatch_count == 0
+
+
+def test_live_start_deadline_expiry_persists_no_partial_graph(
+    tmp_path,
+) -> None:
+    store = SQLiteStore(tmp_path / "live-shared-deadline.sqlite3")
+    hotel = HotelSimulator(store=store)
+    model_provider = ScriptedLiveModelProvider(
+        returned_models=RETURNED_MODELS,
+        delays={1: 10},
+    )
+    orchestrator = RecoveryOrchestrator(
+        store=store,
+        hotel_provider=hotel,
+        live_ready=True,
+        live_model_provider_factory=model_provider.bind,
+        live_trace_factory=_TraceRecorder().root,
+        live_operation_timeout=timedelta(seconds=1),
+    )
+
+    with pytest.raises(LiveOperationTimeoutError, match="live_timeout") as raised:
+        asyncio.run(
+            orchestrator.start("hotel", execution_mode=ExecutionMode.OPENAI_LIVE)
+        )
+
+    assert raised.value.__cause__ is None
+    assert model_provider.call_count == 1
+    assert store.count_recoveries() == 0
+    assert hotel.dispatch_count == 0
+
+
+def test_live_start_uses_one_shared_deadline_context(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    observed_delays: list[float | None] = []
+    original_timeout = asyncio.timeout
+
+    def recording_timeout(delay: float | None):
+        observed_delays.append(delay)
+        return original_timeout(delay)
+
+    monkeypatch.setattr(
+        "server.orchestrator.application_timeout",
+        recording_timeout,
+    )
+    store = SQLiteStore(tmp_path / "live-shared-deadline-context.sqlite3")
+    model_provider = ScriptedLiveModelProvider(returned_models=RETURNED_MODELS)
+    orchestrator = RecoveryOrchestrator(
+        store=store,
+        hotel_provider=HotelSimulator(store=store),
+        live_ready=True,
+        live_model_provider_factory=model_provider.bind,
+        live_trace_factory=_TraceRecorder().root,
+        live_operation_timeout=timedelta(seconds=5),
+    )
+
+    pending = asyncio.run(
+        orchestrator.start("hotel", execution_mode=ExecutionMode.OPENAI_LIVE)
+    )
+
+    assert pending.recovery.status is RecoveryStatus.PENDING_APPROVAL
+    assert model_provider.call_count == 3
+    assert observed_delays == [5.0]
+
+
+def test_external_live_start_cancellation_is_not_translated(tmp_path) -> None:
+    async def exercise() -> tuple[SQLiteStore, HotelSimulator]:
+        entered = asyncio.Event()
+        store = SQLiteStore(tmp_path / "live-external-cancellation.sqlite3")
+        hotel = HotelSimulator(store=store)
+        model_provider = ScriptedLiveModelProvider(
+            returned_models=RETURNED_MODELS,
+            before_call=lambda _call: entered.set(),
+            delays={1: 10},
+        )
+        orchestrator = RecoveryOrchestrator(
+            store=store,
+            hotel_provider=hotel,
+            live_ready=True,
+            live_model_provider_factory=model_provider.bind,
+            live_trace_factory=_TraceRecorder().root,
+            live_operation_timeout=timedelta(seconds=5),
+        )
+        task = asyncio.create_task(
+            orchestrator.start("hotel", execution_mode=ExecutionMode.OPENAI_LIVE)
+        )
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return store, hotel
+
+    store, hotel = asyncio.run(exercise())
+    assert store.count_recoveries() == 0
+    assert hotel.dispatch_count == 0
+
+
+def test_inner_live_runner_timeout_is_not_relabelled_as_app_deadline(tmp_path) -> None:
+    def raise_inner_timeout(_call: int) -> None:
+        raise TimeoutError("inner-runner-timeout")
+
+    store = SQLiteStore(tmp_path / "live-inner-timeout.sqlite3")
+    model_provider = ScriptedLiveModelProvider(
+        returned_models=RETURNED_MODELS,
+        before_call=raise_inner_timeout,
+    )
+    orchestrator = RecoveryOrchestrator(
+        store=store,
+        hotel_provider=HotelSimulator(store=store),
+        live_ready=True,
+        live_model_provider_factory=model_provider.bind,
+        live_trace_factory=_TraceRecorder().root,
+        live_operation_timeout=timedelta(seconds=5),
+    )
+
+    with pytest.raises(TimeoutError, match="inner-runner-timeout"):
+        asyncio.run(
+            orchestrator.start("hotel", execution_mode=ExecutionMode.OPENAI_LIVE)
+        )
+    assert store.count_recoveries() == 0
+
+
+def test_live_approval_timeout_after_durable_dispatch_retries_without_duplicate(
+    tmp_path,
+) -> None:
+    async def exercise() -> tuple[int, int, int, str]:
+        store = SQLiteStore(tmp_path / "live-approval-timeout.sqlite3")
+        hotel = HotelSimulator(store=store)
+        model_provider = ScriptedLiveModelProvider(
+            returned_models=RETURNED_MODELS,
+            delays={4: 10},
+        )
+        orchestrator = RecoveryOrchestrator(
+            store=store,
+            hotel_provider=hotel,
+            live_ready=True,
+            live_model_provider_factory=model_provider.bind,
+            live_trace_factory=_TraceRecorder().root,
+            live_operation_timeout=timedelta(seconds=1),
+            decision_lease_duration=timedelta(milliseconds=300),
+        )
+        pending = await orchestrator.start(
+            "hotel", execution_mode=ExecutionMode.OPENAI_LIVE
+        )
+        recovery_id = pending.recovery.recovery_id
+        request = _decision(pending, "approve", "live-timeout-retry")
+
+        with pytest.raises(LiveOperationTimeoutError, match="live_timeout"):
+            await orchestrator.approve_decision(recovery_id, request)
+
+        assert hotel.dispatch_count == 1
+        assert store.count_executions(recovery_id) == 1
+        calls_after_timeout = model_provider.call_count
+        model_provider.delays.clear()
+        response = await orchestrator.approve_decision(recovery_id, request)
+        return (
+            calls_after_timeout,
+            model_provider.call_count,
+            hotel.dispatch_count,
+            response.status,
+        )
+
+    calls_after_timeout, final_calls, dispatches, status = asyncio.run(exercise())
+    assert calls_after_timeout == final_calls == 4
+    assert dispatches == 1
+    assert status == "completed"
+
+
+def test_live_decline_timeout_releases_lease_for_exact_retry(tmp_path) -> None:
+    async def exercise() -> tuple[int, int, str]:
+        store = SQLiteStore(tmp_path / "live-decline-timeout.sqlite3")
+        hotel = HotelSimulator(store=store)
+        model_provider = ScriptedLiveModelProvider(
+            returned_models=RETURNED_MODELS,
+            delays={4: 10},
+        )
+        orchestrator = RecoveryOrchestrator(
+            store=store,
+            hotel_provider=hotel,
+            live_ready=True,
+            live_model_provider_factory=model_provider.bind,
+            live_trace_factory=_TraceRecorder().root,
+            live_operation_timeout=timedelta(seconds=1),
+            decision_lease_duration=timedelta(milliseconds=300),
+        )
+        pending = await orchestrator.start(
+            "hotel", execution_mode=ExecutionMode.OPENAI_LIVE
+        )
+        request = _decision(pending, "decline", "live-decline-timeout-retry")
+
+        with pytest.raises(LiveOperationTimeoutError, match="live_timeout"):
+            await orchestrator.decline_decision(pending.recovery.recovery_id, request)
+
+        model_provider.delays.clear()
+        response = await orchestrator.decline_decision(
+            pending.recovery.recovery_id,
+            request,
+        )
+        return model_provider.call_count, hotel.dispatch_count, response.status
+
+    calls, dispatches, status = asyncio.run(exercise())
+    assert calls == 5
+    assert dispatches == 0
+    assert status == "closed_without_action"
 
 
 def test_live_start_has_no_durable_row_before_all_remote_preapproval_calls(

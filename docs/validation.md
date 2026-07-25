@@ -63,5 +63,18 @@ contract. This source/test evidence does not change the final-build capture lane
 `9bda860…` and is not public deployment, live OpenAI, container-host durability, tag,
 or release proof.
 
+## Live deadline proof boundary
+
+The source contract bounds the complete live pre-approval graph and each live
+decision resume with a configurable 1..300-second cooperative deadline. Focused tests
+cover one shared graph budget, external cancellation propagation, no partial recovery,
+route-gate release, retained admission charges, exact public `504 live_timeout`
+envelopes, retryable approve/decline claims, and no duplicate dispatch when provider
+execution committed before the timeout. The OpenAI client and the redacted live-smoke
+client use the same configured seconds with transport retries disabled. This remains
+local source/test evidence until an exact commit and hosted gate are recorded; it is
+not a real OpenAI trace, hard process-termination proof, public deployment, or release
+claim.
+
 Update this matrix only after the corresponding same-SHA command or external gate is
 actually observed.

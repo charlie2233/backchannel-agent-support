@@ -54,6 +54,7 @@ from server.models import (
     ScenarioResponse,
 )
 from server.orchestrator import (
+    LiveOperationTimeoutError,
     LiveUnavailableError,
     RecoveryOrchestrator,
     ResumeIncompatibleError,
@@ -134,6 +135,29 @@ def _decision_error_code(code: str) -> str:
     }.get(code, code)
 
 
+def _raise_live_failure(
+    error: Exception,
+    *,
+    recovery_id: str | None = None,
+    replay_offer: bool = False,
+) -> NoReturn:
+    if isinstance(error, LiveOperationTimeoutError) or (
+        isinstance(error, LiveModelRequestError) and error.code == "timeout"
+    ):
+        _raise_public(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            code="live_timeout",
+            recovery_id=recovery_id,
+            replay_offer=replay_offer,
+        )
+    _raise_public(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        code="live_unavailable",
+        recovery_id=recovery_id,
+        replay_offer=replay_offer,
+    )
+
+
 def create_app(
     settings: RuntimeSettings | None = None,
     *,
@@ -163,7 +187,14 @@ def create_app(
     live_client: AsyncOpenAI | None = None
     if recovery_orchestrator is None:
         provider = hotel_provider or HotelSimulator(store=recovery_store)
-        live_client = AsyncOpenAI() if runtime_settings.live_ready else None
+        live_client = (
+            AsyncOpenAI(
+                timeout=runtime_settings.live_operation_timeout.total_seconds(),
+                max_retries=0,
+            )
+            if runtime_settings.live_ready
+            else None
+        )
 
         def live_provider_factory(
             recorder: ResponseMetadataRecorder,
@@ -183,6 +214,7 @@ def create_app(
             live_model_provider_factory=(
                 live_provider_factory if runtime_settings.live_ready else None
             ),
+            live_operation_timeout=runtime_settings.live_operation_timeout,
         )
 
     @asynccontextmanager
@@ -358,7 +390,13 @@ def create_app(
                         },
                     }
                 },
-            }
+            },
+            504: {
+                "model": PublicErrorResponse,
+                "description": (
+                    "Live processing exceeded the configured server deadline."
+                ),
+            },
         },
     )
     async def create_recovery(
@@ -458,12 +496,12 @@ def create_app(
                     retry_after_seconds=error.retry_after_seconds,
                     replay_offer=True,
                 )
-            except (LiveUnavailableError, LiveModelRequestError):
-                _raise_public(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    code="live_unavailable",
-                    replay_offer=True,
-                )
+            except (
+                LiveOperationTimeoutError,
+                LiveUnavailableError,
+                LiveModelRequestError,
+            ) as error:
+                _raise_live_failure(error, replay_offer=True)
         try:
             pending = await recovery_orchestrator.start(
                 payload.scenario_id,
@@ -486,6 +524,14 @@ def create_app(
     @application.post(
         "/api/recoveries/{recovery_id}/decisions",
         response_model=DecisionResponse,
+        responses={
+            504: {
+                "model": PublicErrorResponse,
+                "description": (
+                    "Live decision processing exceeded the configured server deadline."
+                ),
+            }
+        },
     )
     async def decide_recovery(
         recovery_id: UUID,
@@ -566,12 +612,12 @@ def create_app(
                 code="resume_incompatible",
                 recovery_id=recovery_key,
             )
-        except (LiveUnavailableError, LiveModelRequestError):
-            _raise_public(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                code="live_unavailable",
-                recovery_id=recovery_key,
-            )
+        except (
+            LiveOperationTimeoutError,
+            LiveUnavailableError,
+            LiveModelRequestError,
+        ) as error:
+            _raise_live_failure(error, recovery_id=recovery_key)
 
     @application.get(
         "/api/recoveries/{recovery_id}", response_model=RecoverySnapshot

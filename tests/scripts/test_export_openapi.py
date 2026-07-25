@@ -163,6 +163,23 @@ def test_generated_schema_matches_the_implemented_public_http_contract() -> None
         "minimum": 1,
         "type": "integer",
     }
+    decision_responses = paths["/api/recoveries/{recovery_id}/decisions"]["post"][
+        "responses"
+    ]
+    for response in (creation_responses["504"], decision_responses["504"]):
+        assert response["content"]["application/json"]["schema"] == {
+            "$ref": "#/components/schemas/PublicErrorResponse"
+        }
+        assert "Retry-After" not in response.get("headers", {})
+    for path, method in (
+        ("/health", "get"),
+        ("/readyz", "get"),
+        ("/api/scenarios", "get"),
+        ("/api/recoveries/{recovery_id}", "get"),
+        ("/api/recoveries/{recovery_id}/events", "get"),
+        ("/api/recoveries/{recovery_id}/receipt", "get"),
+    ):
+        assert "504" not in paths[path][method]["responses"]
     assert "HTTPValidationError" not in schema["components"]["schemas"]
 
     serialized = json.dumps(schema, sort_keys=True)

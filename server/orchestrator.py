@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from asyncio import timeout as application_timeout
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -131,6 +132,15 @@ class LiveUnavailableError(ValueError):
         super().__init__(self.code)
 
 
+class LiveOperationTimeoutError(RuntimeError):
+    """Stable application deadline outcome with no provider payload."""
+
+    code = "live_timeout"
+
+    def __init__(self) -> None:
+        super().__init__(self.code)
+
+
 LiveModelProviderFactory = Callable[[ResponseMetadataRecorder], ModelProvider]
 LiveTraceFactory = Callable[..., AbstractContextManager[Any]]
 ReconciliationClock = Callable[[], datetime]
@@ -157,6 +167,7 @@ class RecoveryOrchestrator:
         live_ready: bool = False,
         live_model_provider_factory: LiveModelProviderFactory | None = None,
         live_trace_factory: LiveTraceFactory | None = None,
+        live_operation_timeout: timedelta = timedelta(seconds=60),
         decision_lease_duration: timedelta = timedelta(seconds=30),
         decision_wait_interval: float = 0.02,
         reconciliation_clock: ReconciliationClock | None = None,
@@ -173,6 +184,11 @@ class RecoveryOrchestrator:
         self._live_ready = live_ready
         self._live_model_provider_factory = live_model_provider_factory
         self._live_trace_factory = live_trace_factory or self._openai_trace
+        if not timedelta(seconds=1) <= live_operation_timeout <= timedelta(
+            seconds=300
+        ):
+            raise ValueError("Live operation timeout must be between 1 and 300 seconds")
+        self._live_operation_timeout = live_operation_timeout
         if decision_lease_duration <= timedelta(0):
             raise ValueError("Decision lease duration must be positive")
         if decision_wait_interval <= 0:
@@ -774,46 +790,64 @@ class RecoveryOrchestrator:
         )
         authoritative_arguments = deterministic_hotel_arguments()
         try:
-            with self._live_trace_factory(
-                trace_id=root_trace_id,
-                group_id=recovery_id,
-            ):
-                consumer_result = await Runner.run(
-                    graph.consumer,
-                    LIVE_CONSUMER_PROMPT,
-                    context=context,
-                    run_config=run_config,
-                )
-                if not isinstance(consumer_result.final_output, ConsumerProof):
-                    raise RuntimeError("Live consumer Agent returned incompatible output")
-                if consumer_result.final_output != authoritative_arguments.consumer_proof:
-                    raise RuntimeError(
-                        "Live consumer proof changed the fixed source evidence"
+            async with application_timeout(
+                self._live_operation_timeout.total_seconds()
+            ) as deadline:
+                with self._live_trace_factory(
+                    trace_id=root_trace_id,
+                    group_id=recovery_id,
+                ):
+                    consumer_result = await Runner.run(
+                        graph.consumer,
+                        LIVE_CONSUMER_PROMPT,
+                        context=context,
+                        run_config=run_config,
                     )
-                provider_result = await Runner.run(
-                    graph.provider,
-                    LIVE_PROVIDER_PROMPT,
-                    context=context,
-                    run_config=run_config,
-                )
-                if not isinstance(provider_result.final_output, ProviderProof):
-                    raise RuntimeError("Live provider Agent returned incompatible output")
-                if provider_result.final_output != authoritative_arguments.provider_proof:
-                    raise RuntimeError(
-                        "Live provider proof changed the fixed source evidence"
+                    if not isinstance(consumer_result.final_output, ConsumerProof):
+                        raise RuntimeError(
+                            "Live consumer Agent returned incompatible output"
+                        )
+                    if (
+                        consumer_result.final_output
+                        != authoritative_arguments.consumer_proof
+                    ):
+                        raise RuntimeError(
+                            "Live consumer proof changed the fixed source evidence"
+                        )
+                    provider_result = await Runner.run(
+                        graph.provider,
+                        LIVE_PROVIDER_PROMPT,
+                        context=context,
+                        run_config=run_config,
                     )
-                proposed = authoritative_arguments.remedy
-                proposed_arguments = CommitRemedyArguments(
-                    consumer_proof=consumer_result.final_output,
-                    provider_proof=provider_result.final_output,
-                    remedy=proposed,
-                )
-                broker_result = await Runner.run(
-                    graph.broker,
-                    live_broker_prompt(proposed_arguments),
-                    context=context,
-                    run_config=run_config,
-                )
+                    if not isinstance(provider_result.final_output, ProviderProof):
+                        raise RuntimeError(
+                            "Live provider Agent returned incompatible output"
+                        )
+                    if (
+                        provider_result.final_output
+                        != authoritative_arguments.provider_proof
+                    ):
+                        raise RuntimeError(
+                            "Live provider proof changed the fixed source evidence"
+                        )
+                    proposed = authoritative_arguments.remedy
+                    proposed_arguments = CommitRemedyArguments(
+                        consumer_proof=consumer_result.final_output,
+                        provider_proof=provider_result.final_output,
+                        remedy=proposed,
+                    )
+                    broker_result = await Runner.run(
+                        graph.broker,
+                        live_broker_prompt(proposed_arguments),
+                        context=context,
+                        run_config=run_config,
+                    )
+        except TimeoutError:
+            if deadline.expired():
+                raise LiveOperationTimeoutError from None
+            raise
+        try:
             if len(broker_result.interruptions) != 1:
                 raise RuntimeError("Live broker did not produce exactly one interruption")
             interruption = broker_result.interruptions[0]
@@ -1459,15 +1493,23 @@ class RecoveryOrchestrator:
                 rejection_message=DECLINE_MESSAGE,
             )
         if envelope.execution_mode is ExecutionMode.OPENAI_LIVE:
-            with self._live_trace_factory(
-                trace_id=envelope.root_trace_id,
-                group_id=recovery_id,
-            ):
-                completed = await Runner.run(
-                    fresh_agent,
-                    state,
-                    run_config=run_config,
-                )
+            try:
+                async with application_timeout(
+                    self._live_operation_timeout.total_seconds()
+                ) as deadline:
+                    with self._live_trace_factory(
+                        trace_id=envelope.root_trace_id,
+                        group_id=recovery_id,
+                    ):
+                        completed = await Runner.run(
+                            fresh_agent,
+                            state,
+                            run_config=run_config,
+                        )
+            except TimeoutError:
+                if deadline.expired():
+                    raise LiveOperationTimeoutError from None
+                raise
         else:
             completed = await Runner.run(
                 fresh_agent,

@@ -31,6 +31,7 @@ PublicErrorCode = Literal[
     "unsupported_media_type",
     "request_too_large",
     "live_unavailable",
+    "live_timeout",
     "live_cooldown",
     "live_daily_budget_exceeded",
     "creation_daily_budget_exceeded",
@@ -60,6 +61,7 @@ PUBLIC_ERROR_MESSAGES: Mapping[str, str] = {
     "unsupported_media_type": "Content-Type must be application/json.",
     "request_too_large": "The request body is too large.",
     "live_unavailable": "Live mode is unavailable on this server.",
+    "live_timeout": "Live processing did not finish before the server deadline.",
     "live_cooldown": "Live mode is cooling down for this demo identity.",
     "live_daily_budget_exceeded": "The live demo budget is exhausted for today.",
     "creation_daily_budget_exceeded": (

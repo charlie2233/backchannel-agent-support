@@ -29,6 +29,15 @@ provider dispatch. A terminal receipt closes and revokes that permission scope.
 The API and UI derive provenance from the explicit mode and server health. Stub and
 replay states cannot claim returned model identifiers.
 
+Live model work has two aligned timeout layers. `AsyncOpenAI` uses the configured
+`BACKCHANNEL_LIVE_OPERATION_TIMEOUT_SECONDS` value as its per-attempt transport
+timeout with SDK retries disabled. Separately, the orchestrator applies one shared
+application wall-clock deadline to the full three-Agent pre-approval graph and one
+deadline to each live approval/decline resume. The setting defaults to 60 seconds and
+is restricted to 1..300 seconds. This deadline is cooperative cancellation inside the
+Python process, not hard process termination; a cancellation-resistant dependency
+would still require process supervision to enforce a hard stop.
+
 ## Process and container topology
 
 Production-compatible startup uses **one process** and one worker. Process-local live
@@ -49,9 +58,10 @@ SQLite creation ledger before replay or SDK orchestration and before the live-on
 gate and ledger. Strict body/schema, scenario/mode support, deployed SDK availability,
 and keyless live availability are checked first and do not consume creation budget.
 An admitted attempt remains charged if a later capacity, cooldown, upstream, or
-internal step fails; there is intentionally no refund state machine. Session, IP,
-and global UTC-day counters are incremented atomically, contain only HMAC identities
-plus one fixed global key, and are never mixed with the live-only usage ledger.
+timeout, or internal step fails; there is intentionally no refund state machine.
+Session, IP, and global UTC-day counters are incremented atomically, contain only HMAC
+identities plus one fixed global key, and are never mixed with the live-only usage
+ledger.
 
 The creation defaults are 12 per signed session, 60 per IP, and 120 globally per UTC
 day. Any value may be zero as an operator kill switch. Rows are retained for eight

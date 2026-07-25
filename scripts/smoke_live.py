@@ -28,7 +28,7 @@ from server.agents.live_models import (
 )
 from server.config import RuntimeSettings
 from server.models import ApprovalDecisionRequest, ExecutionMode, RecoveryStatus
-from server.orchestrator import RecoveryOrchestrator
+from server.orchestrator import LiveOperationTimeoutError, RecoveryOrchestrator
 from server.providers.hotel_simulator import HotelSimulator
 from server.store import SQLiteStore
 
@@ -122,6 +122,8 @@ def _safe_error(error: Exception) -> tuple[str, str]:
     if isinstance(error, LiveModelRequestError):
         code = error.code if error.code in LIVE_MODEL_ERROR_CODES else "external_error"
         return "LiveModelRequestError", code
+    if isinstance(error, LiveOperationTimeoutError):
+        return "LiveOperationTimeoutError", "live_timeout"
     if isinstance(error, AssertionError):
         return "AssertionError", "smoke_invariant_failed"
     return "ExternalError", "external_error"
@@ -141,13 +143,17 @@ async def run_live_smoke(run_number: int = 1) -> LiveSmokeResult:
     client: AsyncOpenAI | None = None
 
     try:
-        if not RuntimeSettings.from_environment().live_ready:
+        runtime_settings = RuntimeSettings.from_environment()
+        if not runtime_settings.live_ready:
             raise LiveSmokeError("missing_openai_api_key")
 
         temporary_directory = TemporaryDirectory(prefix="backchannel-live-smoke-")
         store = SQLiteStore(Path(temporary_directory.name) / "live.sqlite3")
         hotel_provider = HotelSimulator(store=store)
-        client = AsyncOpenAI()
+        client = AsyncOpenAI(
+            timeout=runtime_settings.live_operation_timeout.total_seconds(),
+            max_retries=0,
+        )
 
         def provider_factory(
             recorder: ResponseMetadataRecorder,
@@ -170,6 +176,7 @@ async def run_live_smoke(run_number: int = 1) -> LiveSmokeResult:
             live_ready=True,
             live_model_provider_factory=provider_factory,
             live_trace_factory=trace_factory,
+            live_operation_timeout=runtime_settings.live_operation_timeout,
         )
         pending = await orchestrator.start(
             "hotel",

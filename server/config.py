@@ -40,6 +40,7 @@ class RuntimeSettings:
     )
     max_request_body_bytes: int = 16 * 1024
     live_max_concurrent: int = 1
+    live_operation_timeout: timedelta = timedelta(seconds=60)
     live_cooldown: timedelta = timedelta(seconds=30)
     live_daily_budget: int = 12
     creation_session_daily_budget: int = 12
@@ -67,6 +68,10 @@ class RuntimeSettings:
             raise ValueError("Request body limit must be positive")
         if self.live_max_concurrent < 1:
             raise ValueError("Live concurrency must be positive")
+        if not timedelta(seconds=1) <= self.live_operation_timeout <= timedelta(
+            seconds=300
+        ):
+            raise ValueError("Live operation timeout must be between 1 and 300 seconds")
         if self.live_cooldown < timedelta(0):
             raise ValueError("Live cooldown cannot be negative")
         if self.live_daily_budget < 0:
@@ -168,11 +173,19 @@ class RuntimeSettings:
             "" if deployed else LOCAL_IDENTITY_HMAC_SECRET,
         )
 
-        def integer(name: str, default: int, *, minimum: int = 0) -> int:
+        def integer(
+            name: str,
+            default: int,
+            *,
+            minimum: int = 0,
+            maximum: int | None = None,
+        ) -> int:
             raw = os.environ.get(name)
             value = default if raw is None else int(raw)
             if value < minimum:
                 raise ValueError(f"{name} must be at least {minimum}")
+            if maximum is not None and value > maximum:
+                raise ValueError(f"{name} must be at most {maximum}")
             return value
 
         return cls(
@@ -193,6 +206,14 @@ class RuntimeSettings:
                 "BACKCHANNEL_LIVE_MAX_CONCURRENT",
                 1,
                 minimum=1,
+            ),
+            live_operation_timeout=timedelta(
+                seconds=integer(
+                    "BACKCHANNEL_LIVE_OPERATION_TIMEOUT_SECONDS",
+                    60,
+                    minimum=1,
+                    maximum=300,
+                )
             ),
             live_cooldown=timedelta(
                 seconds=integer("BACKCHANNEL_LIVE_COOLDOWN_SECONDS", 30)

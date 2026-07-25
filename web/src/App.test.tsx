@@ -45,11 +45,12 @@ function healthResponse(liveReady = false, sdkStubReady = true): Response {
 function publicErrorResponse(
   code:
     | "live_unavailable"
+    | "live_timeout"
     | "live_capacity_reached"
     | "live_cooldown"
     | "live_daily_budget_exceeded",
   message: string,
-  status: 429 | 503,
+  status: 429 | 503 | 504,
   recoveryId: string | null = null,
   fallback: object | null = {
     kind: "show_replay_fixture",
@@ -927,6 +928,11 @@ describe("Backchannel console", () => {
 
   it.each([
     ["live_unavailable", "Live mode is unavailable on this server.", 503],
+    [
+      "live_timeout",
+      "Live processing did not finish before the server deadline.",
+      504,
+    ],
     ["live_capacity_reached", "The live demo is currently at capacity.", 429],
     ["live_cooldown", "Live mode is cooling down for this demo identity.", 429],
     [

@@ -83,6 +83,29 @@ returns HTTP `429`, code `creation_daily_budget_exceeded`, the generic message
 does not reveal which counter decided the rejection, has no replay fallback, and
 does not issue a provisional session cookie.
 
+## Live deadline and retry outcome
+
+Live pre-approval uses one shared configured deadline across all three sequential
+Agent runs; it is not refreshed for each model call. A live decision resume receives
+one deadline around its live-only Agent continuation. The server also configures the
+OpenAI client with the same number of seconds as a per-attempt transport timeout and
+sets transport retries to zero, so hidden retries cannot extend the application
+budget. `BACKCHANNEL_LIVE_OPERATION_TIMEOUT_SECONDS` is an integer from 1 through
+300, with a default of 60.
+
+Application deadline expiry and an OpenAI transport timeout both return HTTP `504`,
+code `live_timeout`, and message `Live processing did not finish before the server
+deadline.` A creation timeout includes the explicit replay-fixture fallback, remains
+charged in both admitted ledgers, has no `Retry-After`, persists no partial recovery,
+and does not issue a provisional session cookie. A decision timeout includes the
+owned `recoveryId` and no replay fallback. Its durable claim remains retryable after
+the resume lease and heartbeat are released; an already committed idempotent provider
+result is finalized on retry without a second dispatch. Other live provider failures
+remain the generic HTTP `503` `live_unavailable` outcome.
+
+The application deadline uses cooperative task cancellation and does not translate
+an unrelated caller cancellation. It is not a hard process-termination guarantee.
+
 ## Endpoint map
 
 The generated, checked contract is [OpenAPI](openapi.json).

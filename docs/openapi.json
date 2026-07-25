@@ -1088,6 +1088,16 @@
                 }
               }
             }
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "Live processing exceeded the configured server deadline."
           }
         },
         "summary": "Create Recovery"
@@ -1186,6 +1196,16 @@
               }
             },
             "description": "The request was rejected with a public error envelope."
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "Live decision processing exceeded the configured server deadline."
           }
         },
         "summary": "Decide Recovery"

@@ -341,6 +341,149 @@ describe("decision and receipt contracts", () => {
     });
   });
 
+  it("accepts the exact live timeout envelopes for start and decision", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn()
+        .mockResolvedValueOnce(
+          publicErrorResponse(
+            "live_timeout",
+            "Live processing did not finish before the server deadline.",
+            504,
+            {
+              kind: "show_replay_fixture",
+              scenarioId: "hotel",
+              executionMode: "replay_fixture",
+            },
+          ),
+        )
+        .mockResolvedValueOnce(
+          publicErrorResponse(
+            "live_timeout",
+            "Live processing did not finish before the server deadline.",
+            504,
+            null,
+            recoveryId,
+          ),
+        ),
+    );
+
+    const startFailure = await createRecovery("hotel", "openai_live").catch(
+      (error: unknown) => error,
+    );
+    const decisionFailure = await postDecision(recoveryId, {
+      decision: "decline",
+      clientDecisionId: "live-timeout-decision",
+      remedyId: "remedy-timeout",
+      remedyDigest: digest,
+      toolCallId: "tool-timeout",
+    }).catch((error: unknown) => error);
+
+    expect(startFailure).toMatchObject({
+      code: "live_timeout",
+      status: 504,
+      retryAfterSeconds: null,
+      fallback: {
+        kind: "show_replay_fixture",
+        scenarioId: "hotel",
+        executionMode: "replay_fixture",
+      },
+    });
+    expect(decisionFailure).toMatchObject({
+      code: "live_timeout",
+      status: 504,
+      recoveryId,
+      retryAfterSeconds: null,
+      fallback: null,
+    });
+  });
+
+  it("rejects malformed live timeout status, retry, and creation correlation", async () => {
+    const timeoutMessage =
+      "Live processing did not finish before the server deadline.";
+    const replayFallback = {
+      kind: "show_replay_fixture",
+      scenarioId: "hotel",
+      executionMode: "replay_fixture",
+    };
+    const malformedResponses = [
+      () =>
+        publicErrorResponse(
+          "live_timeout",
+          timeoutMessage,
+          503,
+          replayFallback,
+        ),
+      () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              code: "live_timeout",
+              message: timeoutMessage,
+              requestId: "req_11111111111111111111111111111111",
+              recoveryId: null,
+              retryAfterSeconds: 1,
+              fallback: replayFallback,
+            },
+          }),
+          { status: 504, headers: { "Content-Type": "application/json" } },
+        ),
+      () =>
+        publicErrorResponse(
+          "live_timeout",
+          timeoutMessage,
+          504,
+          replayFallback,
+          recoveryId,
+        ),
+    ];
+
+    for (const response of malformedResponses) {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response()));
+
+      const failure = await createRecovery("hotel", "openai_live").catch(
+        (error: unknown) => error,
+      );
+
+      expect(failure).toMatchObject({
+        code: "unexpected_response",
+        status: response().status,
+        recoveryId: null,
+        retryAfterSeconds: null,
+        fallback: null,
+      });
+    }
+  });
+
+  it("rejects a live timeout decision with a substituted recovery ID", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        publicErrorResponse(
+          "live_timeout",
+          "Live processing did not finish before the server deadline.",
+          504,
+          null,
+          "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        ),
+      ),
+    );
+
+    const failure = await postDecision(recoveryId, {
+      decision: "decline",
+      clientDecisionId: "live-timeout-substitution",
+      remedyId: "remedy-timeout-substitution",
+      remedyDigest: digest,
+      toolCallId: "tool-timeout-substitution",
+    }).catch((error: unknown) => error);
+
+    expect(failure).toMatchObject({
+      code: "unexpected_response",
+      status: 504,
+      recoveryId: null,
+    });
+  });
+
   it("turns an unrecognized error body into a local generic error without canaries", async () => {
     vi.stubGlobal(
       "fetch",

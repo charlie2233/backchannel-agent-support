@@ -30,6 +30,7 @@ export type PublicErrorCode =
   | "unsupported_media_type"
   | "request_too_large"
   | "live_unavailable"
+  | "live_timeout"
   | "live_cooldown"
   | "live_daily_budget_exceeded"
   | "live_capacity_reached"
@@ -62,6 +63,7 @@ const publicMessages: Readonly<Record<PublicErrorCode, string>> = {
   unsupported_media_type: "Content-Type must be application/json.",
   request_too_large: "The request body is too large.",
   live_unavailable: "Live mode is unavailable on this server.",
+  live_timeout: "Live processing did not finish before the server deadline.",
   live_cooldown: "Live mode is cooling down for this demo identity.",
   live_daily_budget_exceeded: "The live demo budget is exhausted for today.",
   live_capacity_reached: "The live demo is currently at capacity.",
@@ -85,6 +87,7 @@ const publicMessages: Readonly<Record<PublicErrorCode, string>> = {
 const publicErrorCodes = new Set<string>(Object.keys(publicMessages));
 const fallbackCodes = new Set<PublicErrorCode>([
   "live_unavailable",
+  "live_timeout",
   "live_cooldown",
   "live_daily_budget_exceeded",
   "live_capacity_reached",
@@ -157,7 +160,7 @@ async function failedRequest(
   response: Response,
   options: {
     allowFallback?: boolean;
-    expectedRecoveryId?: string;
+    expectedRecoveryId?: string | null;
   } = {},
 ): Promise<PublicApiError> {
   let body: unknown;
@@ -200,6 +203,12 @@ async function failedRequest(
     return unexpectedResponse(response.status);
   }
   const code = error.code as PublicErrorCode;
+  if (
+    code === "live_timeout" &&
+    (response.status !== 504 || error.retryAfterSeconds !== null)
+  ) {
+    return unexpectedResponse(response.status);
+  }
   let fallback: ReplayFixtureFallback | null = null;
   if (error.fallback !== null) {
     if (
@@ -470,6 +479,7 @@ export async function createRecovery(
   if (!response.ok) {
     throw await failedRequest(response, {
       allowFallback: executionMode === "openai_live",
+      expectedRecoveryId: null,
     });
   }
   const recovery = await readRecovery(response);
