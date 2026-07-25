@@ -51,6 +51,16 @@ class RecoveryCleanupService:
     def running(self) -> bool:
         return self._task is not None and not self._task.done()
 
+    def _task_completed(self, completed: asyncio.Future[None]) -> None:
+        if self._task is completed:
+            self._task = None
+        try:
+            error = completed.exception()
+        except asyncio.CancelledError:
+            return
+        if error is not None:
+            logger.error("Durable cleanup task failed error_code=cleanup_task_failed")
+
     def run_once(self) -> int:
         now = self._clock()
         terminal_count = self._store.cleanup_terminal_recoveries(
@@ -89,10 +99,12 @@ class RecoveryCleanupService:
         if self.running:
             return
         self._stop.clear()
-        self._task = asyncio.create_task(
+        task = asyncio.create_task(
             self._run(),
             name="backchannel-terminal-cleanup",
         )
+        self._task = task
+        task.add_done_callback(self._task_completed)
 
     async def shutdown(self) -> None:
         task = self._task
@@ -100,6 +112,7 @@ class RecoveryCleanupService:
             return
         self._stop.set()
         try:
-            await task
+            await asyncio.shield(task)
         finally:
-            self._task = None
+            if task.done() and self._task is task:
+                self._task = None

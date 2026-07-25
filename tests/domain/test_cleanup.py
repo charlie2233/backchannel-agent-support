@@ -4,7 +4,7 @@ import asyncio
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
-from threading import Barrier, Event, Thread, current_thread
+from threading import Barrier, Event, Lock, Thread, current_thread
 from threading import enumerate as enumerate_threads
 from typing import Any
 
@@ -348,6 +348,105 @@ def test_periodic_cleanup_keeps_event_loop_live_during_sqlite_writer_contention(
         connection.rollback()
     finally:
         connection.close()
+    store.close()
+
+
+def test_cancelled_shutdown_retains_blocked_cleanup_until_worker_finishes(
+    tmp_path,
+) -> None:
+    store = SQLiteStore(tmp_path / "cleanup-cancelled-shutdown.sqlite3")
+    first_started = Event()
+    second_started = Event()
+    release_first = Event()
+    state_lock = Lock()
+    calls = 0
+    active = 0
+    max_active = 0
+    workers: list[Thread] = []
+
+    def controlled_run_once() -> int:
+        nonlocal active, calls, max_active
+        with state_lock:
+            calls += 1
+            call_number = calls
+            active += 1
+            max_active = max(max_active, active)
+            workers.append(current_thread())
+        try:
+            if call_number == 1:
+                first_started.set()
+                release_first.wait(timeout=2)
+            elif call_number == 2:
+                second_started.set()
+            return 0
+        finally:
+            with state_lock:
+                active -= 1
+
+    service = RecoveryCleanupService(
+        store=store,
+        ttl=timedelta(days=7),
+        interval=timedelta(hours=1),
+        batch_size=10,
+    )
+    service.run_once = controlled_run_once  # type: ignore[method-assign]
+
+    async def wait_for_thread_event(event: Event) -> None:
+        while not event.is_set():
+            await asyncio.sleep(0)
+
+    async def exercise() -> None:
+        try:
+            await service.startup()
+            first_task = service.task
+            assert first_task is not None
+            await wait_for_thread_event(first_started)
+
+            cancelled_shutdown = asyncio.create_task(service.shutdown())
+            joining_shutdown = asyncio.create_task(service.shutdown())
+            await asyncio.sleep(0)
+            assert not cancelled_shutdown.done()
+            assert not joining_shutdown.done()
+
+            cancelled_shutdown.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await cancelled_shutdown
+            assert not joining_shutdown.done()
+            assert service.task is first_task
+            assert not first_task.done()
+
+            await service.startup()
+            assert service.task is first_task
+            with state_lock:
+                assert calls == 1
+                assert max_active == 1
+
+            release_first.set()
+            await asyncio.wait_for(joining_shutdown, timeout=2)
+            assert first_task.done()
+            assert service.task is None
+
+            await service.startup()
+            second_task = service.task
+            assert second_task is not None
+            assert second_task is not first_task
+            await wait_for_thread_event(second_started)
+            await service.shutdown()
+            assert second_task.done()
+            assert service.task is None
+        finally:
+            release_first.set()
+            if service.task is not None:
+                await asyncio.wait_for(service.shutdown(), timeout=2)
+
+    asyncio.run(asyncio.wait_for(exercise(), timeout=5))
+
+    with state_lock:
+        assert calls == 2
+        assert active == 0
+        assert max_active == 1
+    assert workers
+    assert all(not worker.is_alive() for worker in workers)
     store.close()
 
 
