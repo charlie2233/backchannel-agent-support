@@ -12,6 +12,7 @@ import type { RecoveryEvent } from "../api/events";
 import type {
   DecisionAction,
   EvidenceEntry,
+  PendingApproval,
   RecoveryReceipt,
   RecoveryScenario,
   RecoverySnapshot,
@@ -90,6 +91,18 @@ function formatMinorUsd(minorUnits: number): string {
   })} USD`;
 }
 
+function policyEligibleApproval(snapshot: RecoverySnapshot | null): PendingApproval | null {
+  const approval = snapshot?.pendingApproval ?? null;
+  if (
+    approval === null ||
+    approval.hardConstraintSatisfied !== true ||
+    approval.delegatedAuthoritySatisfied !== true
+  ) {
+    return null;
+  }
+  return approval;
+}
+
 function sheetTitle(
   snapshot: RecoverySnapshot | null,
   receipt: RecoveryReceipt | null,
@@ -102,7 +115,7 @@ function sheetTitle(
   if (receipt?.status === "completed") return "Recovery receipt";
   if (terminalEventObserved) return "Recovery receipt";
   if (decisionAccepted) return "Decision accepted";
-  if (snapshot?.pendingApproval !== null && snapshot?.pendingApproval !== undefined) {
+  if (policyEligibleApproval(snapshot) !== null) {
     return "Approve exact remedy";
   }
   if (snapshot?.claimedDecision !== null && snapshot?.claimedDecision !== undefined) {
@@ -143,7 +156,9 @@ export function EvidenceInspector({
   const acceptedDecisionContext = useRef<AcceptedDecisionContext | null>(null);
   const serverRefreshes = useRef(new Set<string>());
   const fallbackReturnFocusRef = useRef<HTMLElement | null>(null);
-  const approval = snapshot?.pendingApproval ?? null;
+  const rawApproval = snapshot?.pendingApproval ?? null;
+  const approval = policyEligibleApproval(snapshot);
+  const hasIneligibleApproval = rawApproval !== null && approval === null;
   const claimedDecision = snapshot?.claimedDecision ?? null;
   const decisionContextKey = [
     snapshot?.recoveryId ?? "no-recovery",
@@ -577,8 +592,8 @@ export function EvidenceInspector({
             </dd>
           </div>
           <div><dt>Expiry</dt><dd><time dateTime={approval.expiry}>{utcDisplay(approval.expiry)}</time></dd></div>
-          <div><dt>Hard constraint</dt><dd>{approval.hardConstraintSatisfied ? "Satisfied" : "Not satisfied"}</dd></div>
-          <div><dt>Delegated authority</dt><dd>{approval.delegatedAuthoritySatisfied ? "Satisfied" : "Not satisfied"}</dd></div>
+          <div><dt>Hard constraint</dt><dd>Satisfied</dd></div>
+          <div><dt>Delegated authority</dt><dd>Satisfied</dd></div>
           <div><dt>Pending tool-call ID</dt><dd className="mono">{approval.toolCallId}</dd></div>
         </dl>
         <div className="execution-boundary" aria-live="polite">
@@ -675,6 +690,16 @@ export function EvidenceInspector({
           {contextSubmittingAction === claimedDecision.action ? "Resuming exact decision…" : resumeLabel}
         </button>
       </form>
+    );
+  } else if (snapshot !== null && hasIneligibleApproval) {
+    content = (
+      <>
+        <p className="inspector-summary">{snapshot.currentStepSummary}</p>
+        <div className="execution-boundary" role="alert">
+          <strong>Policy-ineligible consent is unavailable.</strong>
+          <p>No public decision action can be created from this recovery snapshot.</p>
+        </div>
+      </>
     );
   } else if (snapshot !== null && snapshot.status === "pending_approval") {
     content = (

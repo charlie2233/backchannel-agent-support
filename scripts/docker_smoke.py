@@ -44,7 +44,7 @@ SDK_VERSION = "0.18.3"
 SDK_PROTOCOL_VERSION = "backchannel.approval.v1"
 SDK_AGENT_GRAPH_VERSION = "backchannel.hotel-agent.v1"
 SDK_DEFINITION_DIGEST = (
-    "6dfe3cc5b949d1ec809f17b5a22e2bc6e463d4dfe1098fcee660fcb39d6ff2dd"
+    "800c944124cb2909d132f86fe8699616b67a0a1776adcd15c453536b7fdd3a8b"
 )
 SDK_BOUNDARY = (
     "Deterministic Agents SDK model and demo hotel adapter only; "

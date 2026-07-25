@@ -316,6 +316,7 @@
             "type": "integer"
           },
           "delegatedAuthoritySatisfied": {
+            "const": true,
             "title": "Delegatedauthoritysatisfied",
             "type": "boolean"
           },
@@ -330,6 +331,7 @@
             "type": "string"
           },
           "hardConstraintSatisfied": {
+            "const": true,
             "title": "Hardconstraintsatisfied",
             "type": "boolean"
           },

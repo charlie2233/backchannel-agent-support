@@ -1,4 +1,6 @@
 import asyncio
+import logging
+import sqlite3
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -31,6 +33,7 @@ from openai.types.responses.response_prompt_param import ResponsePromptParam
 from pydantic import ValidationError
 
 from server.agents.schemas import (
+    CommitRemedyArguments,
     ConsumerProof,
     ProviderProof,
     deterministic_hotel_arguments,
@@ -133,7 +136,7 @@ class ScriptedLiveModel(Model):
             )
         )
         response_id = f"fake-live-{len(self._provider.calls)}"
-        arguments = deterministic_hotel_arguments()
+        arguments = self._provider.arguments
         if schema_name == ConsumerProof.__name__:
             assert self._model_name == LUNA_MODEL
             assert not tools
@@ -200,9 +203,15 @@ class ScriptedLiveModel(Model):
 
 
 class ScriptedLiveProvider(ModelProvider):
-    def __init__(self, *, repeat_tool_after_output: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        repeat_tool_after_output: bool = False,
+        arguments: CommitRemedyArguments | None = None,
+    ) -> None:
         self.calls: list[RecordedModelCall] = []
         self.repeat_tool_after_output = repeat_tool_after_output
+        self.arguments = arguments or deterministic_hotel_arguments()
 
     def get_model(self, model_name: str | None) -> Model:
         assert model_name in {LUNA_MODEL, TERRA_MODEL}
@@ -331,6 +340,100 @@ def test_no_key_api_gate_uses_injected_live_provider_only_when_ready(
         LUNA_MODEL,
         TERRA_MODEL,
     ]
+
+
+def test_mocked_live_policy_denial_is_generic_and_releases_exact_admission(
+    tmp_path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    database_path = tmp_path / "live-policy-denied.sqlite3"
+    store = SQLiteStore(database_path)
+    hotel_provider = HotelSimulator(store=store)
+    base_arguments = deterministic_hotel_arguments()
+    denied_arguments = base_arguments.model_copy(
+        update={
+            "remedy": base_arguments.remedy.model_copy(
+                update={
+                    "remedy_id": "private-policy-remedy",
+                    "cost_delta_minor": 1,
+                }
+            )
+        }
+    )
+    models = ScriptedLiveProvider(arguments=denied_arguments)
+    caplog.set_level(logging.ERROR)
+    with TestClient(
+        create_app(
+            RuntimeSettings(
+                live_ready=True,
+                max_concurrent_live_recoveries=1,
+                live_ip_cooldown_seconds=60,
+                live_session_cooldown_seconds=60,
+                daily_demo_budget_units=10,
+            ),
+            store=store,
+            hotel_provider=hotel_provider,
+            model_provider=models,
+        ),
+        raise_server_exceptions=False,
+    ) as client:
+        response = client.post(
+            "/api/recoveries",
+            json={"scenarioId": "hotel", "executionMode": "openai_live"},
+            headers={
+                "Authorization": "Bearer private-policy-request-token",
+                "Cookie": "backchannel_demo_session=private-policy-cookie",
+            },
+        )
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "code": "internal_error",
+        "message": "The request could not be completed.",
+        "requestId": response.headers["x-request-id"],
+    }
+    assert "fallbackExecutionMode" not in response.json()
+    assert [call.model_name for call in models.calls] == [
+        LUNA_MODEL,
+        LUNA_MODEL,
+        TERRA_MODEL,
+    ]
+    assert hotel_provider.dispatch_count == 0
+    combined = response.text + caplog.text
+    for private_value in (
+        "private-policy-remedy",
+        "booking-demo-001",
+        "2026-08-14",
+        "private-policy-request-token",
+        "private-policy-cookie",
+        "cost_delta_minor",
+        "state_json",
+        str(database_path),
+    ):
+        assert private_value not in combined
+
+    with sqlite3.connect(database_path) as connection:
+        admission = connection.execute(
+            "SELECT recovery_id, budget_units, released_at FROM live_admissions"
+        ).fetchone()
+        assert admission is not None
+        assert admission[1] == 1
+        assert admission[2] is not None
+        assert f"recovery_id={admission[0]}" in caplog.text
+        assert connection.execute(
+            "SELECT recovery_id, category, amount FROM usage_ledger"
+        ).fetchone() == (admission[0], "live_demo_budget_unit", 1)
+        for table in (
+            "recoveries",
+            "recovery_access",
+            "events",
+            "remedies",
+            "pending_approvals",
+            "approval_decisions",
+            "executions",
+            "receipts",
+        ):
+            assert connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone() == (0,)
 
 
 def _approval_request(pending: Any) -> dict[str, str]:

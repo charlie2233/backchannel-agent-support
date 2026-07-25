@@ -105,8 +105,9 @@ correlation and safe resume, not externally verified cross-process trace continu
 
 ## Exact hotel consent
 
-The `commit_remedy` tool requires Agents SDK approval. Before pausing, the server persists the
-opaque SDK state and a separate public consent view. Its canonical digest binds exactly:
+The `commit_remedy` tool requires Agents SDK approval. After the runner returns the validated
+pause, the server may persist the opaque SDK state and a separate public consent view. Its
+canonical digest binds exactly:
 
 - `recoveryId` and `remedyId`;
 - typed remedy terms;
@@ -118,6 +119,39 @@ The object is compact JSON with sorted keys and then SHA-256 hashed as
 `sha256:<64 lowercase hex>`. A decision must echo `clientDecisionId`, `remedyId`, the full
 `remedyDigest`, and the exact `toolCallId`. The shortened digest in the UI is display-only; its
 copy action returns the full value.
+
+The authoritative typed evidence must independently match the stored remedy identifier, exact
+terms, minor-unit cost, sorted changed fields, and sorted provider commitments. The server
+recomputes the consent digest over those fields plus the UTC expiry and separately requires the
+pending envelope's action digest to match the typed remedy. These checks run before persistence,
+for public pending and claimed views, and during decision validation. Consequently a broken
+binding exposes neither `pendingApproval` nor `claimedDecision`; there is no public approve,
+decline, or resume capability to render.
+
+The structured SDK argument models reject unknown top-level and nested fields. Their JSON Schemas
+are definition-digest inputs, so this stricter schema creates a new canonical definition digest
+and deliberately makes older serialized pending SDK state resume-incompatible.
+
+The runner must first return exactly one typed `commit_remedy` interruption whose arguments
+match the validated consumer/provider proof. The server then recomputes current hotel policy and
+requires both the hard-constraint and delegated-authority results to be exactly true before it
+creates the recovery, access binding, event, remedy, pending envelope, or public consent. A
+policy denial raises only the generic correlated internal-error boundary; it does not create an
+alternative, replay, or provider dispatch. A denied mocked-live request releases its exact live
+admission but retains the truthfully consumed budget unit. This scripted test is not a real
+OpenAI run.
+
+The public pending-consent schema represents both policy results as literal `true`, and the
+browser validates them as such before accepting a snapshot or rendering decision controls.
+SQLite repeats the complete binding and current-policy checks before beginning a consent
+transition. If an older or tampered row contains a false stored result, mismatched consent field,
+changed evidence, digest mismatch, or stale action digest, its public snapshot exposes no
+actionable pending consent or resumable claim. Decision-time digest, expiry, policy, and
+interruption revalidation remains mandatory even after these admission checks.
+
+The SHA-256 values are unkeyed integrity bindings, not database authentication. A malicious
+writer with authority to replace all bound rows and recompute both digests remains outside this
+application-level threat model; SQLite storage is an explicit trust boundary.
 
 Approval is claimed in a SQLite `BEGIN IMMEDIATE` transaction. Immediately before creating an
 execution, the server recomputes the consent digest and rechecks expiry, hard constraints,

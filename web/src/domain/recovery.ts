@@ -49,8 +49,8 @@ export interface PendingApproval {
   changedFields: string[];
   providerCommitments: string[];
   expiry: string;
-  hardConstraintSatisfied: boolean;
-  delegatedAuthoritySatisfied: boolean;
+  hardConstraintSatisfied: true;
+  delegatedAuthoritySatisfied: true;
   toolCallId: string;
   executionStarted: false;
 }

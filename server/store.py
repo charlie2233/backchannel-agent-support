@@ -15,6 +15,7 @@ from uuid import uuid4
 from pydantic import JsonValue
 
 from server.agents.schemas import CommitRemedyArguments
+from server.agents.versioning import remedy_action_digest
 from server.digest import remedy_consent_digest
 from server.models import (
     OPENAI_LIVE_BOUNDARY,
@@ -328,6 +329,7 @@ class RemedyConsentRecord:
     evidence: CommitRemedyArguments
 
     def public_view(self, *, tool_call_id: str) -> PendingApprovalView:
+        self.require_policy_eligible()
         return PendingApprovalView(
             remedyId=self.remedy_id,
             remedyDigest=self.consent_digest,
@@ -336,11 +338,45 @@ class RemedyConsentRecord:
             changedFields=list(self.changed_fields),
             providerCommitments=list(self.provider_commitments),
             expiry=self.expiry,
-            hardConstraintSatisfied=self.hard_constraint_satisfied,
-            delegatedAuthoritySatisfied=self.delegated_authority_satisfied,
+            hardConstraintSatisfied=True,
+            delegatedAuthoritySatisfied=True,
             toolCallId=tool_call_id,
             executionStarted=False,
         )
+
+    def require_policy_eligible(self) -> None:
+        """Reject consent unless its complete binding and current policy allow it."""
+
+        policy = evaluate_hotel_policy(
+            self.evidence,
+            DETERMINISTIC_HOTEL_AUTHORITY,
+        )
+        recomputed_digest = remedy_consent_digest(
+            {
+                "recoveryId": self.recovery_id,
+                "remedyId": self.remedy_id,
+                "terms": self.terms.model_dump(mode="json", by_alias=True),
+                "costDeltaMinor": self.cost_delta_minor,
+                "changedFields": list(self.changed_fields),
+                "providerCommitments": list(self.provider_commitments),
+                "expiry": self.expiry,
+            }
+        )
+        if (
+            self.evidence.remedy.remedy_id != self.remedy_id
+            or exact_hotel_terms(self.evidence) != self.terms
+            or self.evidence.remedy.cost_delta_minor != self.cost_delta_minor
+            or tuple(sorted(self.evidence.remedy.changed_fields))
+            != self.changed_fields
+            or tuple(sorted(self.evidence.remedy.provider_commitments))
+            != self.provider_commitments
+            or recomputed_digest != self.consent_digest
+            or self.hard_constraint_satisfied is not True
+            or self.delegated_authority_satisfied is not True
+            or policy.hard_constraint_satisfied is not True
+            or policy.delegated_authority_satisfied is not True
+        ):
+            raise ValueError("Remedy consent is not policy eligible")
 
 
 class SQLiteStore:
@@ -1187,6 +1223,13 @@ class SQLiteStore:
             isinstance(item, str) for item in provider_commitments
         ):
             raise ValueError("Stored provider commitments must be a string array")
+
+        def stored_policy_flag(field: str) -> bool:
+            value = row[field]
+            if type(value) is not int or value not in (0, 1):
+                raise ValueError(f"Stored {field} must be the integer 0 or 1")
+            return value == 1
+
         return RemedyConsentRecord(
             remedy_id=cast(str, row["id"]),
             recovery_id=cast(str, row["recovery_id"]),
@@ -1196,8 +1239,10 @@ class SQLiteStore:
             provider_commitments=tuple(provider_commitments),
             expiry=datetime.fromisoformat(cast(str, row["expiry"])),
             consent_digest=cast(str, row["digest"]),
-            hard_constraint_satisfied=bool(cast(int, row["hard_constraint_satisfied"])),
-            delegated_authority_satisfied=bool(cast(int, row["delegated_authority_satisfied"])),
+            hard_constraint_satisfied=stored_policy_flag("hard_constraint_satisfied"),
+            delegated_authority_satisfied=stored_policy_flag(
+                "delegated_authority_satisfied"
+            ),
             evidence=CommitRemedyArguments.model_validate_json(cast(str, row["evidence_json"])),
         )
 
@@ -1216,6 +1261,20 @@ class SQLiteStore:
             sort_keys=True,
         ).encode("utf-8")
         return hashlib.sha256(serialized).hexdigest()
+
+    @staticmethod
+    def _require_pending_consent_binding(
+        pending: PendingApprovalEnvelope,
+        consent: RemedyConsentRecord,
+    ) -> None:
+        consent.require_policy_eligible()
+        if (
+            pending.recovery_id != consent.recovery_id
+            or pending.remedy_id != consent.remedy_id
+            or pending.consent_digest != consent.consent_digest
+            or pending.action_digest != remedy_action_digest(consent.evidence)
+        ):
+            raise ValueError("Pending approval binding does not match consent")
 
     @staticmethod
     def _decision_request_from_row(row: sqlite3.Row) -> ApprovalDecisionRequest:
@@ -1357,6 +1416,12 @@ class SQLiteStore:
             or consent.delegated_authority_satisfied != policy.delegated_authority_satisfied
         ):
             raise ApprovalDecisionError("authority_denied", recovery_id, status_code=422)
+        try:
+            self._require_pending_consent_binding(pending, consent)
+        except (TypeError, ValueError):
+            raise ApprovalDecisionError(
+                "resume_incompatible", recovery_id, status_code=409
+            ) from None
         return pending, consent
 
     def _public_pending_view(
@@ -1364,9 +1429,9 @@ class SQLiteStore:
         connection: sqlite3.Connection,
         recovery_id: str,
     ) -> PendingApprovalView | None:
-        pending = connection.execute(
+        pending_row = connection.execute(
             """
-            SELECT tool_call_id, remedy_id, consent_digest
+            SELECT *
             FROM pending_approvals
             WHERE recovery_id = ?
               AND status = 'pending'
@@ -1378,21 +1443,26 @@ class SQLiteStore:
             """,
             (recovery_id,),
         ).fetchone()
-        if pending is None or cast(str, pending["consent_digest"]) == "legacy-incompatible":
+        if pending_row is None:
             return None
-        remedy = connection.execute(
-            """
-            SELECT * FROM remedies
-            WHERE recovery_id = ? AND id = ?
-            """,
-            (recovery_id, cast(str, pending["remedy_id"])),
-        ).fetchone()
-        if remedy is None:
-            raise ValueError("Pending approval consent linkage is invalid")
-        consent = self._remedy_consent_from_row(remedy)
-        if consent.consent_digest != cast(str, pending["consent_digest"]):
-            raise ValueError("Pending approval consent digest linkage is invalid")
-        return consent.public_view(tool_call_id=cast(str, pending["tool_call_id"]))
+        try:
+            pending = self._pending_approval_from_row(pending_row)
+            if pending.consent_digest == "legacy-incompatible":
+                return None
+            remedy = connection.execute(
+                """
+                SELECT * FROM remedies
+                WHERE recovery_id = ? AND id = ?
+                """,
+                (recovery_id, pending.remedy_id),
+            ).fetchone()
+            if remedy is None:
+                return None
+            consent = self._remedy_consent_from_row(remedy)
+            self._require_pending_consent_binding(pending, consent)
+        except (TypeError, ValueError):
+            return None
+        return consent.public_view(tool_call_id=pending.tool_call_id)
 
     def _public_claimed_decision_view(
         self,
@@ -1409,34 +1479,39 @@ class SQLiteStore:
         ).fetchone()
         if row is None:
             return None
-        claim = self._verified_decision_claim_from_row(row, recovery_id=recovery_id)
-        remedy = connection.execute(
-            """
-            SELECT * FROM remedies
-            WHERE recovery_id = ? AND id = ?
-            """,
-            (recovery_id, claim.request.remedy_id),
-        ).fetchone()
-        if remedy is None:
-            raise ApprovalDecisionError(
-                "resume_incompatible",
-                recovery_id,
-                status_code=409,
-            )
         try:
-            consent = self._remedy_consent_from_row(remedy)
-        except (TypeError, ValueError):
-            raise ApprovalDecisionError(
-                "resume_incompatible",
-                recovery_id,
-                status_code=409,
-            ) from None
-        if consent.consent_digest != claim.request.remedy_digest:
-            raise ApprovalDecisionError(
-                "resume_incompatible",
-                recovery_id,
-                status_code=409,
+            claim = self._verified_decision_claim_from_row(
+                row,
+                recovery_id=recovery_id,
             )
+            pending_row = connection.execute(
+                "SELECT * FROM pending_approvals WHERE recovery_id = ?",
+                (recovery_id,),
+            ).fetchone()
+            if pending_row is None:
+                return None
+            pending = self._pending_approval_from_row(pending_row)
+            if pending.status not in {"pending", "approved"}:
+                return None
+            remedy = connection.execute(
+                """
+                SELECT * FROM remedies
+                WHERE recovery_id = ? AND id = ?
+                """,
+                (recovery_id, pending.remedy_id),
+            ).fetchone()
+            if remedy is None:
+                return None
+            consent = self._remedy_consent_from_row(remedy)
+            self._require_pending_consent_binding(pending, consent)
+            if (
+                claim.request.remedy_id != pending.remedy_id
+                or claim.request.remedy_digest != pending.consent_digest
+                or claim.request.tool_call_id != pending.tool_call_id
+            ):
+                return None
+        except (ApprovalDecisionError, TypeError, ValueError):
+            return None
         return ClaimedDecisionView(
             action=claim.request.action,
             remedyDigest=claim.request.remedy_digest,
@@ -1826,12 +1901,12 @@ class SQLiteStore:
         if (pending_approval is None) is not (remedy_consent is None):
             raise ValueError("Pending SDK envelope and authoritative consent must persist together")
         if pending_approval is not None and remedy_consent is not None:
-            if remedy_consent.recovery_id != recovery_id:
-                raise ValueError("Remedy consent recovery ID does not match transition")
-            if pending_approval.remedy_id != remedy_consent.remedy_id:
-                raise ValueError("Pending approval remedy linkage does not match consent")
-            if pending_approval.consent_digest != remedy_consent.consent_digest:
-                raise ValueError("Pending approval digest linkage does not match consent")
+            if (
+                pending_approval.recovery_id != recovery_id
+                or remedy_consent.recovery_id != recovery_id
+            ):
+                raise ValueError("Pending approval binding does not match recovery")
+            self._require_pending_consent_binding(pending_approval, remedy_consent)
             remedy_consent.public_view(tool_call_id=pending_approval.tool_call_id)
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")

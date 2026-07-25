@@ -62,6 +62,33 @@ SDK, protocol, agent-graph, and definition versions that must still match on res
 reconciliation can seal a receipt from an already committed demo-adapter result without
 dispatching it again.
 
+Hotel consent has a fail-closed eligibility gate before that persistence boundary. After the
+SDK returns one exact typed interruption and, for mocked/live orchestration, the broker arguments
+match the validated consumer and provider proofs, both current hard-constraint and delegated-
+authority results must be true. Only then may the orchestrator create a recovery and atomically
+attach its access row, followed by the pending consent transition. The store independently
+recomputes the consent digest and policy and binds the stored remedy identifier, exact terms,
+cost, canonically sorted changed fields and commitments, expiry, and action digest to the typed
+evidence before `BEGIN IMMEDIATE`. Public snapshots expose literal-true policy fields only;
+legacy or tampered pending rows fail closed with `pendingApproval=null`. A tampered unfinished
+decision claim also has `claimedDecision=null`, so the browser receives no decision or resume
+action. The browser retains an additional no-action rendering guard for malformed input.
+
+Typed SDK evidence forbids unknown fields at every nesting level. Because those JSON Schemas are
+part of the canonical agent-definition digest, this tightening intentionally changes that digest:
+serialized pending approvals made against the older definition fail resume compatibility rather
+than being interpreted under the newer contract.
+
+These unkeyed digests detect accidental or non-coordinated row changes inside the application
+trust boundary. They are not authentication against a malicious database writer able to replace
+the stored fields, typed evidence, consent digest, and action digest coherently.
+
+For a policy-denied live start, public-demo admission still truthfully records the consumed
+budget unit, then releases that exact admission after the orchestrator fails. The response is the
+ordinary generic correlated 500 and no replay, recovery artifacts, or hotel-adapter dispatch is
+created. The regression uses an injected scripted model provider and does not establish a real
+OpenAI call, public deployment, or real booking-provider execution.
+
 The browser never needs a duplicate decision request to continue an unfinished claim. An
 authorized snapshot may expose only its server-authored action, remedy digest, and UTC expiry.
 The single **Resume exact approval/decline** action posts exact empty JSON; session access and

@@ -80,7 +80,7 @@ def test_claimed_decision_and_pending_approval_are_mutually_exclusive() -> None:
         "providerCommitments": ["No additional fees", "Preserve booking dates"],
         "expiry": "2026-09-01T18:45:30Z",
         "hardConstraintSatisfied": True,
-        "delegatedAuthoritySatisfied": False,
+        "delegatedAuthoritySatisfied": True,
         "toolCallId": "call-server-742",
         "executionStarted": False,
     }

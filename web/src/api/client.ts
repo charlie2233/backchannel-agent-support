@@ -151,8 +151,8 @@ function isPendingApproval(value: unknown): value is PendingApproval {
       (item, index) => item === [...providerCommitments].sort()[index],
     ) &&
     isUtcTimestamp(value.expiry) &&
-    typeof value.hardConstraintSatisfied === "boolean" &&
-    typeof value.delegatedAuthoritySatisfied === "boolean" &&
+    value.hardConstraintSatisfied === true &&
+    value.delegatedAuthoritySatisfied === true &&
     typeof value.toolCallId === "string" &&
     value.executionStarted === false
   );

@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 class StubSchema(BaseModel):
     """Immutable base for deterministic model and provider contracts."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
 
 class ConsumerProof(StubSchema):

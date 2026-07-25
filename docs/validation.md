@@ -31,6 +31,8 @@ uv run pytest -q tests/security/test_session_isolation.py
 uv run pytest -q tests/domain/test_pending_expiry.py tests/api/test_expiry_lifecycle.py
 uv run pytest -q tests/domain/test_decision_resume.py tests/api/test_decision_resume.py
 uv run pytest -q tests/domain/test_event_stream_admission.py tests/api/test_event_stream_admission.py
+uv run pytest -q tests/integration/test_policy_eligibility.py
+uv run pytest -q tests/integration/test_live_contract.py::test_mocked_live_policy_denial_is_generic_and_releases_exact_admission
 npm --workspace web exec -- vitest run src/components/EvidenceInspector.test.tsx
 npm --workspace web exec -- vitest run src/api/client.test.ts src/App.explicitLive.test.tsx
 npm --workspace web exec -- vitest run src/api/events.test.ts src/hooks/useRecovery.test.tsx
@@ -41,6 +43,15 @@ It proves foreign snapshot/SSE/receipt/approve/decline all match an absent recov
 404, owner approval remains at-most-once under a foreign race, the signed cookie survives a
 same-secret restart, tampered cookies fail closed, shared replay access detaches per session,
 reset preserves cooldown/budget history, and retention cleanup cascades access rows.
+The policy-eligibility suite proves hard-constraint and delegated-authority denial both stop a
+typed SDK-stub attempt before recovery/access/event/remedy/pending/decision/execution/receipt
+persistence, with zero demo-provider dispatch. It also proves store refusal occurs before
+`BEGIN IMMEDIATE`; every stored consent/evidence/action binding is rechecked; false, integer, and
+string policy flags cannot satisfy literal `true`; unknown top-level and nested SDK arguments are
+rejected; and tampered pending or claimed rows expose no public decision or resume action. The
+mocked-live case proves a generic correlated error, release of the exact admitted lease, retention
+of its one budget unit, three expected scripted model calls, and zero fallback, recovery
+artifacts, or hotel-adapter dispatch. It is injected local test evidence, not a real OpenAI run.
 The expiry suites prove SDK/live zero-dispatch receipts, live-admission release with cooldown and
 usage preservation, restart idempotence, decision-versus-expiry writer serialization,
 access-check ordering, synchronous snapshot/SSE/receipt/decision truth, bounded UTC maintenance,

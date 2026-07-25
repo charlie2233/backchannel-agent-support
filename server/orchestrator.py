@@ -273,21 +273,7 @@ class RecoveryOrchestrator:
             )
             agent_graph_version = self._version_policy.agent_graph_version
             definition_digest = hotel_definition_digest(original_root_agent)
-            self._store.create_recovery(
-                recovery_id=recovery_id,
-                scenario_id=approved_scenario,
-                execution_mode=execution_mode,
-                current_step=0,
-                current_step_summary="Deterministic Agents SDK recovery started.",
-                model_ids=model_ids,
-                root_trace_id=root_trace_id,
-                model_call=False,
-                sdk_version=self._version_policy.sdk_version,
-                protocol_version=self._version_policy.protocol_version,
-                agent_graph_version=agent_graph_version,
-                definition_digest=definition_digest,
-                session_key=session_key,
-            )
+            recovery_summary = "Deterministic Agents SDK recovery started."
             result = await Runner.run(
                 original_root_agent,
                 HOTEL_START_PROMPT,
@@ -356,23 +342,8 @@ class RecoveryOrchestrator:
                 or arguments.provider_proof != provider_proof
             ):
                 raise RuntimeError("Live broker changed the validated proof outputs")
-            self._store.create_recovery(
-                recovery_id=recovery_id,
-                scenario_id=approved_scenario,
-                execution_mode=execution_mode,
-                current_step=0,
-                current_step_summary="OpenAI Agents SDK recovery started.",
-                model_ids=model_ids,
-                root_trace_id=root_trace_id,
-                model_call=True,
-                sdk_version=self._version_policy.sdk_version,
-                protocol_version=self._version_policy.protocol_version,
-                agent_graph_version=agent_graph_version,
-                definition_digest=definition_digest,
-                session_key=session_key,
-            )
+            recovery_summary = "OpenAI Agents SDK recovery started."
 
-        action_digest = remedy_action_digest(arguments)
         if len(result.interruptions) != 1:
             raise RuntimeError("SDK run did not produce exactly one interruption")
         interruption = result.interruptions[0]
@@ -380,11 +351,31 @@ class RecoveryOrchestrator:
             raise RuntimeError("SDK run interrupted on an unexpected tool")
         if not interruption.call_id:
             raise RuntimeError("SDK interruption is missing its call ID")
+        try:
+            interruption_arguments = CommitRemedyArguments.model_validate_json(
+                interruption.arguments or ""
+            )
+        except ValueError as error:
+            raise RuntimeError("SDK interruption returned invalid remedy arguments") from error
+        if interruption_arguments != arguments:
+            raise RuntimeError("SDK interruption changed validated remedy arguments")
+        arguments = interruption_arguments
+
+        policy_result = evaluate_hotel_policy(
+            arguments,
+            DETERMINISTIC_HOTEL_AUTHORITY,
+        )
+        if (
+            not policy_result.hard_constraint_satisfied
+            or not policy_result.delegated_authority_satisfied
+        ):
+            raise RuntimeError("policy_ineligible")
 
         state_json = result.to_state().to_json(
             context_serializer=self._context_serializer,
             strict_context=True,
         )
+        action_digest = remedy_action_digest(arguments)
         terms = exact_hotel_terms(arguments)
         expiry = datetime.now(UTC) + timedelta(minutes=30)
         changed_fields = tuple(sorted(arguments.remedy.changed_fields))
@@ -400,9 +391,20 @@ class RecoveryOrchestrator:
                 "expiry": expiry,
             }
         )
-        policy_result = evaluate_hotel_policy(
-            arguments,
-            DETERMINISTIC_HOTEL_AUTHORITY,
+        self._store.create_recovery(
+            recovery_id=recovery_id,
+            scenario_id=approved_scenario,
+            execution_mode=execution_mode,
+            current_step=0,
+            current_step_summary=recovery_summary,
+            model_ids=model_ids,
+            root_trace_id=root_trace_id,
+            model_call=execution_mode is ExecutionMode.OPENAI_LIVE,
+            sdk_version=self._version_policy.sdk_version,
+            protocol_version=self._version_policy.protocol_version,
+            agent_graph_version=agent_graph_version,
+            definition_digest=definition_digest,
+            session_key=session_key,
         )
         envelope = PendingApprovalEnvelope(
             tool_call_id=interruption.call_id,

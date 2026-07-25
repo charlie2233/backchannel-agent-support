@@ -322,6 +322,54 @@ describe("claimed decision and explicit resume contracts", () => {
   });
 });
 
+describe("pending approval policy eligibility contract", () => {
+  const approval = {
+    remedyId: "remedy-policy-test",
+    remedyDigest: `sha256:${"a".repeat(64)}`,
+    terms: {
+      bookingId: "booking-policy-test",
+      action: "replace_room",
+      replacement: { fromRoomType: "double", toRoomType: "king" },
+      stay: { checkIn: "2026-08-14", checkOut: "2026-08-16" },
+      currency: "USD",
+    },
+    costDeltaMinor: 0,
+    changedFields: ["room_type"],
+    providerCommitments: ["Preserve booking dates"],
+    expiry: "2026-08-14T00:00:00Z",
+    hardConstraintSatisfied: true,
+    delegatedAuthoritySatisfied: true,
+    toolCallId: "tool-policy-test",
+    executionStarted: false,
+  };
+  const snapshot = {
+    recoveryId: "11111111-2222-4333-8444-555555555555",
+    scenarioId: "hotel",
+    executionMode: "sdk_stub",
+    modelIds: [],
+    rootTraceId: "qa_trace_0123456789abcdef0123456789abcdef",
+    status: "pending_approval",
+    currentStep: 3,
+    currentStepSummary: "Policy-eligible consent is pending.",
+    createdAt: "2026-07-20T01:00:00Z",
+    updatedAt: "2026-07-20T01:00:01Z",
+    pendingApproval: approval,
+    claimedDecision: null,
+  };
+
+  it("accepts pending consent only when both policy checks are exactly true", () => {
+    expect(isRecoverySnapshot(snapshot)).toBe(true);
+    expect(isRecoverySnapshot({
+      ...snapshot,
+      pendingApproval: { ...approval, hardConstraintSatisfied: false },
+    })).toBe(false);
+    expect(isRecoverySnapshot({
+      ...snapshot,
+      pendingApproval: { ...approval, delegatedAuthoritySatisfied: false },
+    })).toBe(false);
+  });
+});
+
 describe("getReceipt runtime validation", () => {
   const validReceipt = {
     recoveryId: "11111111-2222-4333-8444-555555555555",

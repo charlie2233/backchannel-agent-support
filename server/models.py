@@ -185,10 +185,21 @@ class PendingApprovalView(ApiModel):
     changed_fields: list[str] = Field(alias="changedFields", min_length=1)
     provider_commitments: list[str] = Field(alias="providerCommitments", min_length=1)
     expiry: datetime
-    hard_constraint_satisfied: bool = Field(alias="hardConstraintSatisfied")
-    delegated_authority_satisfied: bool = Field(alias="delegatedAuthoritySatisfied")
+    hard_constraint_satisfied: Literal[True] = Field(alias="hardConstraintSatisfied")
+    delegated_authority_satisfied: Literal[True] = Field(alias="delegatedAuthoritySatisfied")
     tool_call_id: str = Field(alias="toolCallId")
     execution_started: Literal[False] = Field(alias="executionStarted")
+
+    @field_validator(
+        "hard_constraint_satisfied",
+        "delegated_authority_satisfied",
+        mode="before",
+    )
+    @classmethod
+    def require_exact_true(cls, value: object) -> object:
+        if value is not True:
+            raise ValueError("Policy eligibility flags must be exactly true")
+        return value
 
     @field_validator("changed_fields", "provider_commitments")
     @classmethod

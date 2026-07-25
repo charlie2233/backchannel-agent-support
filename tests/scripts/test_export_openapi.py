@@ -34,6 +34,18 @@ def test_openapi_export_is_deterministic_and_secret_free() -> None:
     assert "state_json" not in first
 
 
+def test_pending_approval_schema_exposes_only_policy_eligible_consent() -> None:
+    schema = json.loads(_exporter().render_openapi())
+
+    properties = schema["components"]["schemas"]["PendingApprovalView"]["properties"]
+    for field in ("hardConstraintSatisfied", "delegatedAuthoritySatisfied"):
+        assert properties[field] == {
+            "const": True,
+            "title": properties[field]["title"],
+            "type": "boolean",
+        }
+
+
 def test_private_recovery_operations_document_one_generic_not_found_boundary() -> None:
     schema = json.loads(_exporter().render_openapi())
     operations = (

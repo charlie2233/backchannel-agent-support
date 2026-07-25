@@ -43,7 +43,7 @@ function pendingSnapshot(): RecoverySnapshot {
       providerCommitments: ["No additional fees", "Preserve booking dates"],
       expiry: "2026-09-01T18:45:30Z",
       hardConstraintSatisfied: true,
-      delegatedAuthoritySatisfied: false,
+      delegatedAuthoritySatisfied: true,
       toolCallId: "call-server-742",
       executionStarted: false,
     },
@@ -100,6 +100,48 @@ afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+});
+
+it.each(["hardConstraintSatisfied", "delegatedAuthoritySatisfied"] as const)(
+  "does not render public decision actions when %s is false",
+  (field) => {
+    const validApproval = pendingSnapshot().pendingApproval!;
+    const snapshot = {
+      ...pendingSnapshot(),
+      pendingApproval: {
+        ...validApproval,
+        [field]: false,
+      },
+    } as unknown as RecoverySnapshot;
+
+    render(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={snapshot}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "Approve remedy" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Decline" })).not.toBeInTheDocument();
+    expect(screen.getByText("Policy-ineligible consent is unavailable.")).toBeInTheDocument();
+  },
+);
+
+it("renders no decision or resume action when the server suppresses a tampered claim", () => {
+  render(
+    <EvidenceInspector
+      scenario={recoveryScenarios[0]}
+      snapshot={{
+        ...claimedSnapshot(),
+        pendingApproval: null,
+        claimedDecision: null,
+      }}
+    />,
+  );
+
+  expect(screen.queryByRole("button", { name: "Approve remedy" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Decline" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /Resume exact/ })).not.toBeInTheDocument();
 });
 
 describe("EvidenceInspector exact consent", () => {
@@ -903,7 +945,7 @@ describe("EvidenceInspector exact consent", () => {
     );
     expect(
       within(inspector).getByText("Delegated authority").nextSibling,
-    ).toHaveTextContent("Not satisfied");
+    ).toHaveTextContent("Satisfied");
     expect(within(inspector).getByText("call-server-742")).toBeVisible();
     expect(within(inspector).getByText("Execution has not begun.")).toBeVisible();
     expect(within(inspector).getByText("sha256:0123456789ab…89abcdef")).toBeVisible();

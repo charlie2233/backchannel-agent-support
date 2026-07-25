@@ -278,7 +278,7 @@ def test_remedy_envelope_and_event_roll_back_as_one_atomic_transition(tmp_path) 
     conflicting_envelope = replace(first_envelope, recovery_id=second_id)
     second_consent = replace(first_consent, recovery_id=second_id)
 
-    with pytest.raises(ValueError, match="does not match recovery"):
+    with pytest.raises(ValueError, match="(?:does not match recovery|policy eligible)"):
         store.record_transition(
             second_id,
             status=RecoveryStatus.PENDING_APPROVAL,
@@ -360,7 +360,7 @@ def test_terms_mutated_after_display_fail_digest_recheck_with_zero_execution(
     assert store.count_executions(recovery_id) == 0
 
 
-def test_displayed_commitment_cannot_diverge_from_restored_sdk_arguments(
+def test_rebound_commitment_is_hidden_when_action_digest_still_diverges(
     tmp_path,
 ) -> None:
     database_path = tmp_path / "restored-consent-mismatch.sqlite3"
@@ -410,11 +410,12 @@ def test_displayed_commitment_cannot_diverge_from_restored_sdk_arguments(
             )
 
         displayed = client.get(f"/api/recoveries/{recovery_id}").json()
-        assert displayed["pendingApproval"]["providerCommitments"] == (displayed_commitments)
-        assert displayed["pendingApproval"]["remedyDigest"] == displayed_digest
+        assert displayed["pendingApproval"] is None
+        payload = _decision_payload(initial, "restored-consent-mismatch")
+        payload["remedyDigest"] = displayed_digest
         response = client.post(
             f"/api/recoveries/{recovery_id}/decisions",
-            json=_decision_payload(displayed, "restored-consent-mismatch"),
+            json=payload,
         )
 
     assert response.status_code == 409
