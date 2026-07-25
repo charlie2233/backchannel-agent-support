@@ -4334,6 +4334,113 @@ class SQLiteStore:
             if cursor.rowcount != 1:
                 raise RecoveryNotFoundError("Pending approval not found")
 
+    def _require_new_execution_authorization(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        recovery_id: str,
+        tool_call_id: str,
+        remedy_digest: str,
+        now: datetime,
+    ) -> None:
+        """Recheck the exact active approval inside the execution write transaction."""
+
+        decision_row = connection.execute(
+            "SELECT * FROM approval_decisions WHERE recovery_id = ?",
+            (recovery_id,),
+        ).fetchone()
+        if decision_row is None:
+            raise ApprovalDecisionError(
+                "decision_unavailable",
+                recovery_id,
+                status_code=409,
+            )
+        claim = self._verified_decision_claim_from_row(
+            decision_row,
+            recovery_id=recovery_id,
+        )
+        if (
+            cast(str, decision_row["status"]) != "claimed"
+            or decision_row["result_json"] is not None
+            or decision_row["completed_at"] is not None
+            or claim.response is not None
+        ):
+            raise ApprovalDecisionError(
+                "decision_unavailable",
+                recovery_id,
+                status_code=409,
+            )
+        if (
+            claim.request.action is not DecisionAction.APPROVE
+            or claim.request.tool_call_id != tool_call_id
+            or claim.request.remedy_digest != remedy_digest
+        ):
+            raise ApprovalDecisionError(
+                "decision_id_conflict",
+                recovery_id,
+                status_code=409,
+            )
+
+        pending, _consent = self._validate_consent_for_decision(
+            connection,
+            recovery_id,
+            claim.request,
+            now=now,
+        )
+        if pending.status != "approved":
+            raise ApprovalDecisionError(
+                "decision_unavailable",
+                recovery_id,
+                status_code=409,
+            )
+
+        terminal_evidence = connection.execute(
+            """
+            SELECT 1
+            WHERE EXISTS (
+                SELECT 1 FROM receipts WHERE recovery_id = ?
+            )
+               OR EXISTS (
+                SELECT 1 FROM events
+                WHERE recovery_id = ? AND terminal = 1
+            )
+            """,
+            (recovery_id, recovery_id),
+        ).fetchone()
+        if terminal_evidence is not None:
+            raise ApprovalDecisionError(
+                "decision_unavailable",
+                recovery_id,
+                status_code=409,
+            )
+
+    @staticmethod
+    def _execution_persistence_shape(
+        row: sqlite3.Row,
+    ) -> Literal["completed", "pending", "invalid"]:
+        """Classify only the two durable states the execution writer can trust."""
+
+        status = row["status"]
+        provider_execution = row["provider_execution"]
+        result_json = row["result_json"]
+        if (
+            type(status) is str
+            and status == "completed"
+            and type(provider_execution) is int
+            and provider_execution == 1
+            and result_json is not None
+        ):
+            return "completed"
+        if (
+            type(status) is str
+            and status == "pending"
+            and type(provider_execution) is int
+            and provider_execution == 0
+            and result_json is None
+        ):
+            return "pending"
+        return "invalid"
+
     def record_completed_execution(
         self,
         *,
@@ -4347,7 +4454,6 @@ class SQLiteStore:
     ) -> tuple[DurableExecution, bool]:
         """Atomically persist or replay one completed idempotent provider result."""
 
-        now = self._now()
         serialized_result = json.dumps(
             result_json,
             ensure_ascii=False,
@@ -4356,11 +4462,57 @@ class SQLiteStore:
         )
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            now = self._now()
             existing = connection.execute(
                 "SELECT * FROM executions WHERE idempotency_key = ?",
                 (idempotency_key,),
             ).fetchone()
-            dispatched = False
+            if existing is not None:
+                if (
+                    cast(str, existing["recovery_id"]) != recovery_id
+                    or cast(str | None, existing["request_digest"]) != request_digest
+                    or cast(str | None, existing["tool_call_id"]) != tool_call_id
+                    or cast(str | None, existing["remedy_digest"]) != remedy_digest
+                ):
+                    raise ExecutionConflictError(
+                        "Idempotency key was already used for a different execution"
+                    )
+
+            conflicting_execution = connection.execute(
+                """
+                SELECT 1
+                FROM executions
+                WHERE recovery_id = ? AND idempotency_key <> ?
+                LIMIT 1
+                """,
+                (recovery_id, idempotency_key),
+            ).fetchone()
+            if conflicting_execution is not None:
+                raise ExecutionConflictError(
+                    "Recovery already has a different durable execution"
+                )
+
+            if existing is not None:
+                existing_shape = self._execution_persistence_shape(existing)
+                if existing_shape == "completed":
+                    try:
+                        return self._execution_from_row(existing), False
+                    except (TypeError, ValueError):
+                        raise ExecutionConflictError(
+                            "Completed durable execution evidence is invalid"
+                        ) from None
+                if existing_shape != "pending":
+                    raise ExecutionConflictError(
+                        "Durable execution has an invalid persistence state"
+                    )
+
+            self._require_new_execution_authorization(
+                connection,
+                recovery_id=recovery_id,
+                tool_call_id=tool_call_id,
+                remedy_digest=remedy_digest,
+                now=now,
+            )
             if existing is None:
                 connection.execute(
                     """
@@ -4382,36 +4534,36 @@ class SQLiteStore:
                         now.isoformat(),
                     ),
                 )
-                dispatched = True
             else:
-                if (
-                    cast(str, existing["recovery_id"]) != recovery_id
-                    or cast(str | None, existing["request_digest"]) != request_digest
-                    or cast(str | None, existing["tool_call_id"]) != tool_call_id
-                    or cast(str | None, existing["remedy_digest"]) != remedy_digest
-                ):
-                    raise ExecutionConflictError(
-                        "Idempotency key was already used for a different execution"
-                    )
-                if cast(str, existing["status"]) != "completed" or existing["result_json"] is None:
-                    connection.execute(
-                        """
-                        UPDATE executions
-                        SET status = 'completed', provider_execution = 1,
-                            result_json = ?, updated_at = ?
-                        WHERE idempotency_key = ?
-                        """,
-                        (serialized_result, now.isoformat(), idempotency_key),
-                    )
-                    dispatched = True
+                connection.execute(
+                    """
+                    UPDATE executions
+                    SET status = 'completed', provider_execution = 1,
+                        result_json = ?, updated_at = ?
+                    WHERE idempotency_key = ?
+                      AND status = 'pending'
+                      AND provider_execution = 0
+                      AND result_json IS NULL
+                    """,
+                    (serialized_result, now.isoformat(), idempotency_key),
+                )
             row = connection.execute(
                 "SELECT * FROM executions WHERE idempotency_key = ?",
                 (idempotency_key,),
             ).fetchone()
             if row is None:
                 raise RuntimeError("Durable execution write did not persist")
-            execution = self._execution_from_row(row)
-        return execution, dispatched
+            if self._execution_persistence_shape(row) != "completed":
+                raise ExecutionConflictError(
+                    "Durable execution write produced an invalid persistence state"
+                )
+            try:
+                execution = self._execution_from_row(row)
+            except (TypeError, ValueError):
+                raise ExecutionConflictError(
+                    "Completed durable execution evidence is invalid"
+                ) from None
+        return execution, True
 
     def count_executions(self, recovery_id: str) -> int:
         with self._lock, self._connect() as connection:

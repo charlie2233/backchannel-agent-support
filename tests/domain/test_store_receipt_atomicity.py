@@ -1,3 +1,4 @@
+import asyncio
 import json
 import sqlite3
 
@@ -5,11 +6,15 @@ import pytest
 
 from server.models import (
     SDK_STUB_BOUNDARY,
+    ApprovalDecisionRequest,
+    DecisionAction,
     ExecutionMode,
     RecoveryReceipt,
     RecoveryStatus,
     ScenarioId,
 )
+from server.orchestrator import RecoveryOrchestrator
+from server.providers.hotel_simulator import HotelSimulator
 from server.store import (
     DurableExecution,
     ReceiptTransitionError,
@@ -73,26 +78,38 @@ def create_durable_sdk_execution(
     store: SQLiteStore,
     recovery_id: str,
 ) -> tuple[DurableExecution, RecoveryReceipt]:
-    store.create_recovery(
-        recovery_id=recovery_id,
-        scenario_id=ScenarioId.HOTEL,
-        execution_mode=ExecutionMode.SDK_STUB,
-        current_step=3,
-        current_step_summary="Durable provider result awaiting finalization.",
-        root_trace_id=QA_ROOT,
-        sdk_version="0.18.3",
-        protocol_version="v1",
-        agent_graph_version="graph-v1",
-        definition_digest=DEFINITION_DIGEST,
+    orchestrator = RecoveryOrchestrator(
+        store=store,
+        hotel_provider=HotelSimulator(store=store),
     )
+    pending = asyncio.run(
+        orchestrator.start(
+            "hotel",
+            execution_mode=ExecutionMode.SDK_STUB,
+            recovery_id=recovery_id,
+        )
+    )
+    approval = pending.recovery.pending_approval
+    assert approval is not None
+    store.claim_approval_decision(
+        recovery_id,
+        ApprovalDecisionRequest(
+            action=DecisionAction.APPROVE,
+            clientDecisionId=f"decision-{recovery_id}",
+            remedyId=approval.remedy_id,
+            remedyDigest=approval.remedy_digest,
+            toolCallId=approval.tool_call_id,
+        ),
+    )
+    store.update_pending_approval_status(recovery_id, status="approved")
     provider_result = "Bound demo-provider result."
     execution, dispatched = store.record_completed_execution(
         execution_id=f"execution-{recovery_id}",
         recovery_id=recovery_id,
         idempotency_key=f"idempotency-{recovery_id}",
         request_digest="request-digest",
-        tool_call_id=f"tool-{recovery_id}",
-        remedy_digest=APPROVED_DIGEST,
+        tool_call_id=approval.tool_call_id,
+        remedy_digest=approval.remedy_digest,
         result_json={
             "dispatch_id": f"dispatch-{recovery_id}",
             "status": "confirmed",
@@ -101,25 +118,7 @@ def create_durable_sdk_execution(
         },
     )
     assert dispatched is True
-    receipt = RecoveryReceipt(
-        recoveryId=recovery_id,
-        executionMode=ExecutionMode.SDK_STUB,
-        status="completed",
-        simulated=True,
-        providerExecution=True,
-        modelCall=False,
-        modelIds=[],
-        rootTraceId=QA_ROOT,
-        sdkVersion="0.18.3",
-        protocolVersion="v1",
-        agentGraphVersion="graph-v1",
-        definitionDigest=DEFINITION_DIGEST,
-        boundary=SDK_STUB_BOUNDARY,
-        providerResult=provider_result,
-        authorizationSource="Exact approval decision.",
-        verificationResults=["Durable provider result verified."],
-        approvedRemedyDigest=APPROVED_DIGEST,
-    )
+    receipt = store.completed_receipt_for_execution(execution)
     return execution, receipt
 
 
@@ -229,7 +228,7 @@ def test_finalizer_rejects_existing_receipt_with_another_approved_digest(
     with pytest.raises(ReceiptTransitionError, match="receipt evidence mismatch"):
         store.finalize_completed_execution(execution, receipt=expected_receipt)
 
-    assert store.get_recovery(recovery_id).status is RecoveryStatus.IN_PROGRESS
+    assert store.get_recovery(recovery_id).status is RecoveryStatus.PENDING_APPROVAL
     assert store.get_receipt(recovery_id).approved_remedy_digest == OTHER_VALID_DIGEST
     assert not any(event.terminal for event in store.list_events(recovery_id))
 
@@ -249,9 +248,17 @@ def test_finalizer_rejects_terminal_event_with_wrong_type_and_data(tmp_path) -> 
             """
             INSERT INTO events (
                 recovery_id, seq, type, terminal, data_json, created_at
-            ) VALUES (?, 2, 'recovery.cancelled', 1, ?, ?)
+            ) VALUES (
+                ?,
+                (SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE recovery_id = ?),
+                'recovery.cancelled',
+                1,
+                ?,
+                ?
+            )
             """,
             (
+                recovery_id,
                 recovery_id,
                 json.dumps(wrong_terminal_data, separators=(",", ":"), sort_keys=True),
                 "2026-07-18T20:00:00+00:00",
@@ -261,7 +268,7 @@ def test_finalizer_rejects_terminal_event_with_wrong_type_and_data(tmp_path) -> 
     with pytest.raises(ReceiptTransitionError, match="terminal evidence mismatch"):
         store.finalize_completed_execution(execution, receipt=expected_receipt)
 
-    assert store.get_recovery(recovery_id).status is RecoveryStatus.IN_PROGRESS
+    assert store.get_recovery(recovery_id).status is RecoveryStatus.PENDING_APPROVAL
     with pytest.raises(RecoveryNotFoundError, match="Receipt not found"):
         store.get_receipt(recovery_id)
     terminal_events = [event for event in store.list_events(recovery_id) if event.terminal]
@@ -288,4 +295,7 @@ def test_finalizer_replays_matching_receipt_and_terminal_evidence_idempotently(
     assert terminal_events[0].data["recoveryId"] == recovery_id
     assert terminal_events[0].data["executionMode"] == "sdk_stub"
     assert terminal_events[0].data["providerExecution"] is True
-    assert terminal_events[0].data["approvedRemedyDigest"] == APPROVED_DIGEST
+    assert (
+        terminal_events[0].data["approvedRemedyDigest"]
+        == expected_receipt.approved_remedy_digest
+    )

@@ -108,6 +108,17 @@ no resume POST, rapid explicit activation coalesces, response action/digest mism
 closed, and only the server-authored action remains available. The proof is signed-session scoped
 and establishes at most one demo-adapter dispatch, not original-tab ownership, cross-process
 live-model serialization, deployment, or provider execution outside the demo adapter.
+The execution-authorization suite moves the deterministic clock at writer-lock acquisition and
+proves that a missing or incomplete execution rechecks unexpired consent, the raw unfinished
+approve claim, its fingerprint and exact bindings, the SDK-approved pending marker, action and
+consent evidence, absence of terminal evidence, and absence of another execution in the same
+transaction. Two store instances racing the same key produce one durable write and one stored
+replay; different keys elect one owner and refuse the loser. The state matrix proves only
+canonical pending evidence can advance, mixed states remain unchanged, and multiple completed
+keys make replay ambiguous. Trigger-injected insert and update failures roll back without changing
+authorization or execution evidence. A sole completed exact-key result still replays after
+finalization and consent expiry. This is durable SQLite demo-adapter evidence, not exactly-once
+proof for an external provider side effect.
 The event-stream admission suites prove atomic global/per-recovery caps under threaded stress,
 idempotent cleanup, finite exact capacity framing without a polling loop, privacy and cursor
 ordering while saturated, expiry-before-admission, replay preservation, and reacquisition after

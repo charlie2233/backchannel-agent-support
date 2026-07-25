@@ -259,14 +259,22 @@ The SHA-256 values are unkeyed integrity bindings, not database authentication. 
 writer with authority to replace all bound rows and recompute both digests remains outside this
 application-level threat model; SQLite storage is an explicit trust boundary.
 
-Approval is claimed in a SQLite `BEGIN IMMEDIATE` transaction. Immediately before creating an
-execution, the server recomputes the consent digest and rechecks expiry, hard constraints,
-delegated authority, and the stored SDK interruption. The provider execution key is bound to
-the recovery, interruption, and action digest. Retrying the same decision ID returns its stored
-result; a different loser receives `409 already_decided`. These controls and tests establish an
-at-most-one dispatch property for this demo adapter, not a universal exactly-once guarantee.
-An unrelated session cannot participate in that race: it receives 404 before a decision claim
-and cannot win, renew a live lease, or trigger provider dispatch.
+Approval is claimed in a SQLite `BEGIN IMMEDIATE` transaction. For a missing or incomplete
+durable demo-adapter execution, the execution writer acquires another `BEGIN IMMEDIATE`, samples
+the authorization time only after acquiring that lock, and then recomputes the consent digest and
+rechecks expiry, hard constraints, delegated authority, the stored SDK interruption, the claimed
+approve action, and the SDK-approved pending marker before writing. The same transaction rejects
+terminal evidence and any different execution for the recovery. The execution binding includes
+the recovery, interruption, approved remedy digest, and request fingerprint; the pending action
+digest independently binds the complete typed evidence. An exact completed execution key with the
+same stored bindings replays before current authorization and expiry checks only when no other
+execution key makes the recovery ambiguous. Only the canonical incomplete shape (`pending`, zero
+provider execution, and no result) can be completed under current authorization. Mixed states and
+multiple keys fail closed without rewriting them. Retrying the same decision ID returns its
+stored result; a different loser receives `409 already_decided`. These controls and tests
+establish an at-most-one durable dispatch record for this demo adapter, not exactly-once execution
+at an external provider. An unrelated session cannot participate in that race: it receives 404
+before a decision claim and cannot win, renew a live lease, or trigger provider dispatch.
 
 ### Explicit durable-claim resume
 

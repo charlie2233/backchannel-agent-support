@@ -130,6 +130,17 @@ SDK, protocol, agent-graph, and definition versions that must still match on res
 reconciliation can seal a receipt from an already committed demo-adapter result without
 dispatching it again.
 
+The durable demo-adapter execution writer acquires one SQLite writer transaction before sampling
+the authorization time. A missing or incomplete execution is admitted only while that same
+transaction still sees the fingerprint-verified approve claim, the exact approved interruption
+and remedy binding, current consent and policy, the SDK-approved pending marker, no terminal
+evidence, and no different execution for the recovery. An exact completed execution is replayed
+before those current-authorization checks only when it is the recovery's sole execution. An exact
+incomplete row may advance only from `pending`, zero provider execution, and no result; mixed
+states and multiple keys fail closed without rewriting evidence. This lets restart recovery
+return one unambiguous stored result without redispatch. The fence governs the local durable
+demo-adapter ledger; it does not make an external provider side effect exactly once.
+
 Hotel consent has a fail-closed eligibility gate before that persistence boundary. After the
 SDK returns one exact typed interruption and, for mocked/live orchestration, the broker arguments
 match the validated consumer and provider proofs, both current hard-constraint and delegated-
