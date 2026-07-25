@@ -209,11 +209,40 @@ def test_release_docs_cover_architecture_protocol_and_evidence_boundaries() -> N
 
     validation = _read("docs/validation.md")
     assert "`codex/backchannel-v0.3`" in validation
-    assert "9bda860a45efaf7ecc061810cbbc54562cc9c338" in validation
-    assert "29868045880" in validation
-    assert "17 capture contracts" in validation
-    assert "198 web tests" in validation
-    assert "465 Python tests" in validation
+    assert "85e1e8ec9147242adca311c4ba10ea8c1c3008dc" in validation
+    assert "b57868005a3fe0869136f54472ee0098035a9099" in validation
+    assert "30140554792" in validation
+    assert "89632837699" in validation
+    assert "89633002245" in validation
+    assert (
+        "- Local exact-tree pre-activation gate covered 28 capture contracts, offline\n"
+        "  manifest verification, 224 web tests, 530 Python tests, Vite build, Ruff,\n"
+        "  strict MyPy over 34 source files, stub smoke, local one-process\n"
+        "  production/SSE/SIGTERM smoke, OpenAPI freshness, history-aware secret scan,\n"
+        "  Node syntax, and diff checks.\n"
+    ) in validation
+    assert (
+        "- Hosted exact-activation `verify` covered the canonical `npm run check`,\n"
+        "  deterministic stub smoke, OpenAPI artifact verification, and the\n"
+        "  history-aware secret scan; `container-smoke` separately covered the\n"
+        "  packaged image build, non-root identity, and two offline packaged smoke\n"
+        "  profiles.\n"
+    ) in validation
+    assert (
+        "Local exact-tree gate before activation and the hosted canonical gate covered"
+        not in validation
+    )
+    assert "[`docs/assets/final/manifest.json`](assets/final/manifest.json)" in validation
+    assert "eeb6b87ce35ad04cb4c53d048c39fcbc8caf33bb62e142526e0f9aba544afb30" in validation
+    assert "Google Chrome 150.0.7871.186" in validation
+    assert "81 runtime paths" in validation
+    assert "`keyless_sdk_stub`" in validation
+    assert "`en-US` / `UTC` / `reduce` / `light`" in validation
+    assert (
+        "Capture source `85e1e8e…`; activation and canonical CI "
+        "`b578680…`"
+    ) in validation
+    assert "CI did not execute the browser capture" in validation
     assert "1440×1024" in validation
     assert "390×844" in validation
     for lane in (
