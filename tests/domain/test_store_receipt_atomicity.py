@@ -101,7 +101,11 @@ def create_durable_sdk_execution(
             toolCallId=approval.tool_call_id,
         ),
     )
-    store.update_pending_approval_status(recovery_id, status="approved")
+    store.update_pending_approval_status(
+        recovery_id,
+        expected_status="pending",
+        status="approved",
+    )
     provider_result = "Bound demo-provider result."
     execution, dispatched = store.record_completed_execution(
         execution_id=f"execution-{recovery_id}",

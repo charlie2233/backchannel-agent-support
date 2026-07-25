@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from typing import Any, cast
 from uuid import uuid4
 
@@ -15,7 +16,8 @@ from server.store import ApprovalDecisionError, SQLiteStore
 
 @pytest.fixture
 def rejection_client(tmp_path: Any):
-    store = SQLiteStore(tmp_path / "rejection-api.sqlite3")
+    database_path = tmp_path / "rejection-api.sqlite3"
+    store = SQLiteStore(database_path)
     provider = HotelSimulator(store=store)
     with TestClient(
         create_app(
@@ -24,7 +26,7 @@ def rejection_client(tmp_path: Any):
             hotel_provider=provider,
         )
     ) as client:
-        yield client, store, provider
+        yield client, store, provider, database_path
     store.close()
 
 
@@ -58,7 +60,7 @@ def _decision_payload(
 
 
 def test_decision_action_is_required_and_has_no_default(rejection_client: Any) -> None:
-    client, store, provider = rejection_client
+    client, store, provider, _database_path = rejection_client
     snapshot = _pending_recovery(client)
     recovery_id = cast(str, snapshot["recoveryId"])
     payload = _decision_payload(snapshot, action="decline")
@@ -76,7 +78,7 @@ def test_decision_action_is_required_and_has_no_default(rejection_client: Any) -
 
 
 def test_decline_seals_zero_execution_terminal_evidence(rejection_client: Any) -> None:
-    client, store, provider = rejection_client
+    client, store, provider, _database_path = rejection_client
     snapshot = _pending_recovery(client)
     recovery_id = cast(str, snapshot["recoveryId"])
 
@@ -135,7 +137,7 @@ def test_decline_seals_zero_execution_terminal_evidence(rejection_client: Any) -
 
 
 def test_exact_decline_replays_but_changed_action_conflicts(rejection_client: Any) -> None:
-    client, store, provider = rejection_client
+    client, store, provider, _database_path = rejection_client
     snapshot = _pending_recovery(client)
     recovery_id = cast(str, snapshot["recoveryId"])
     payload = _decision_payload(snapshot, action="decline")
@@ -160,13 +162,88 @@ def test_exact_decline_replays_but_changed_action_conflicts(rejection_client: An
     assert len([event for event in store.list_events(recovery_id) if event.terminal]) == 1
 
 
+@pytest.mark.parametrize(
+    ("pending_status", "expected_status"),
+    [
+        ("pending", "closed_without_action"),
+        ("approved", "outcome_unknown"),
+    ],
+)
+def test_decline_replay_rejects_tampered_verification_evidence(
+    rejection_client: Any,
+    pending_status: str,
+    expected_status: str,
+) -> None:
+    client, store, provider, database_path = rejection_client
+    snapshot = _pending_recovery(client)
+    recovery_id = cast(str, snapshot["recoveryId"])
+    payload = _decision_payload(
+        snapshot,
+        action="decline",
+        client_decision_id=f"tampered-{pending_status}-decline",
+    )
+    if pending_status == "approved":
+        with sqlite3.connect(database_path) as connection:
+            connection.execute(
+                """
+                UPDATE pending_approvals
+                SET status = 'approved'
+                WHERE recovery_id = ?
+                """,
+                (recovery_id,),
+            )
+
+    first = client.post(f"/api/recoveries/{recovery_id}/decisions", json=payload)
+    assert first.status_code == 200
+    assert first.json()["status"] == expected_status
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute(
+            "SELECT receipt_json FROM receipts WHERE recovery_id = ?",
+            (recovery_id,),
+        ).fetchone()
+        assert row is not None
+        receipt = json.loads(row[0])
+        receipt["verificationResults"] = ["Tampered verification evidence."]
+        connection.execute(
+            """
+            UPDATE receipts
+            SET receipt_json = ?
+            WHERE recovery_id = ?
+            """,
+            (
+                json.dumps(receipt, separators=(",", ":"), sort_keys=True),
+                recovery_id,
+            ),
+        )
+
+    replay = client.post(f"/api/recoveries/{recovery_id}/decisions", json=payload)
+
+    assert replay.status_code == 409
+    assert replay.json()["detail"] == {
+        "code": "resume_incompatible",
+        "recoveryId": recovery_id,
+    }
+    assert store.count_decisions(recovery_id) == 1
+    assert store.count_executions(recovery_id) == 0
+    assert provider.dispatch_count == 0
+    assert len([event for event in store.list_events(recovery_id) if event.terminal]) == 1
+
+
 def test_decline_after_approval_may_have_begun_marks_outcome_unknown(
     rejection_client: Any,
 ) -> None:
-    client, store, provider = rejection_client
+    client, store, provider, database_path = rejection_client
     snapshot = _pending_recovery(client)
     recovery_id = cast(str, snapshot["recoveryId"])
-    store.update_pending_approval_status(recovery_id, status="approved")
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            UPDATE pending_approvals
+            SET status = 'approved'
+            WHERE recovery_id = ?
+            """,
+            (recovery_id,),
+        )
 
     response = client.post(
         f"/api/recoveries/{recovery_id}/decisions",

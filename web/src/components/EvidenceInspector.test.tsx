@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DECISION_CAPACITY_MESSAGE } from "../api/client";
-import type { RecoverySnapshot } from "../domain/recovery";
+import type { RecoveryReceipt, RecoverySnapshot } from "../domain/recovery";
 import { recoveryScenarios } from "../fixtures/recoveries";
 import { DECISION_REQUEST_TIMEOUT_MS, EvidenceInspector } from "./EvidenceInspector";
 
@@ -301,6 +301,42 @@ describe("EvidenceInspector exact consent", () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
   });
 
+  it("refreshes authoritative evidence instead of retrying an expired resume", async () => {
+    const recoveryId = "11111111-2222-4333-8444-555555555555";
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          detail: {
+            code: "remedy_expired",
+            recoveryId,
+          },
+        }),
+        { status: 422, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const onServerSuccess = vi.fn().mockResolvedValue(undefined);
+    render(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={claimedSnapshot("approve")}
+        onServerSuccess={onServerSuccess}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Resume exact approval" }));
+
+    await waitFor(() => expect(onServerSuccess).toHaveBeenCalledTimes(1));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(
+      screen.getByText("Consent expired. Refreshing authoritative recovery evidence."),
+    ).toBeVisible();
+    expect(screen.queryByText(/could not be resumed/i)).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Resume exact approval" }),
+    ).toBeDisabled();
+  });
+
   it("disables an expired claimed decision and refreshes evidence without posting", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-01T18:45:31.000Z"));
@@ -321,6 +357,81 @@ describe("EvidenceInspector exact consent", () => {
     fireEvent.click(button);
     expect(fetchMock).not.toHaveBeenCalled();
     expect(onServerSuccess).toHaveBeenCalledTimes(1);
+  });
+
+  it("refreshes an expired claimed approval to canonical unknown evidence without posting", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T18:45:31.000Z"));
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const refreshObserved = vi.fn();
+    const terminalSnapshot: RecoverySnapshot = {
+      ...claimedSnapshot("approve"),
+      status: "outcome_unknown",
+      currentStep: 5,
+      currentStepSummary: "Claimed decision expired; provider outcome remains unknown.",
+      claimedDecision: null,
+    };
+    const terminalReceipt: RecoveryReceipt = {
+      recoveryId: terminalSnapshot.recoveryId,
+      executionMode: "sdk_stub",
+      status: "outcome_unknown",
+      simulated: true,
+      providerExecution: null,
+      modelCall: false,
+      modelIds: [],
+      rootTraceId: "qa_trace_0123456789abcdef0123456789abcdef",
+      sdkVersion: "0.18.3",
+      protocolVersion: "backchannel.approval.v1",
+      agentGraphVersion: "backchannel.hotel-agent.v1",
+      definitionDigest: "b".repeat(64),
+      boundary:
+        "Deterministic Agents SDK model and demo hotel adapter only; no OpenAI model call, real booking, or payment change.",
+      providerResult: "Claimed decision expired; provider outcome remains unknown.",
+      authorizationSource:
+        "A durable exact decision was claimed before consent expiry; no provider outcome is asserted.",
+      verificationResults: [
+        "Human consent requested.",
+        "An exact decision was claimed before consent expiry.",
+        "Durable evidence cannot prove that provider dispatch did not begin.",
+        "Cancellation and zero execution are not claimed.",
+        "Temporary permission revoked.",
+        "Uncertain claim-expiry receipt sealed.",
+      ],
+      approvalCount: 1,
+      approvedRemedyDigest: null,
+    };
+
+    function ExpiredClaimRefreshHarness() {
+      const [terminal, setTerminal] = useState(false);
+      return (
+        <EvidenceInspector
+          scenario={recoveryScenarios[0]}
+          snapshot={terminal ? terminalSnapshot : claimedSnapshot("approve")}
+          receipt={terminal ? terminalReceipt : null}
+          onServerSuccess={() => {
+            refreshObserved();
+            setTerminal(true);
+          }}
+        />
+      );
+    }
+
+    render(<ExpiredClaimRefreshHarness />);
+    await act(async () => { await Promise.resolve(); });
+
+    expect(refreshObserved).toHaveBeenCalledTimes(1);
+    expect(fetchMock).not.toHaveBeenCalled();
+    const receipt = screen.getByRole("region", { name: "Outcome unknown" });
+    expect(within(receipt).getByText("Approval count").parentElement).toHaveTextContent(
+      "Approval count1",
+    );
+    expect(
+      within(receipt).getByText("Approved remedy digest").parentElement,
+    ).toHaveTextContent("Approved remedy digestNone");
+    expect(screen.queryByRole("button", { name: /Resume exact/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve remedy" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Decline" })).not.toBeInTheDocument();
   });
 
   it("closes the fresh-decision rapid-click window before React state commits", () => {
@@ -1059,6 +1170,42 @@ describe("EvidenceInspector exact consent", () => {
       "Approval could not be recorded. Try again with the same decision.",
     );
     expect(onServerSuccess).not.toHaveBeenCalled();
+  });
+
+  it("refreshes authoritative evidence instead of retrying an expired decision", async () => {
+    const recoveryId = "11111111-2222-4333-8444-555555555555";
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          detail: {
+            code: "remedy_expired",
+            recoveryId,
+          },
+        }),
+        { status: 422, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const onServerSuccess = vi.fn().mockResolvedValue(undefined);
+    render(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={pendingSnapshot()}
+        clientDecisionIdFactory={() => "decision-expired-742"}
+        onServerSuccess={onServerSuccess}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Approve remedy" }));
+
+    await waitFor(() => expect(onServerSuccess).toHaveBeenCalledTimes(1));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(
+      screen.getByText("Consent expired. Refreshing authoritative recovery evidence."),
+    ).toBeVisible();
+    expect(screen.queryByText(/could not be recorded/i)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Approve remedy" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Decline" })).toBeDisabled();
   });
 
   it("posts an exact decline, disables both actions, and refreshes only after acceptance", async () => {

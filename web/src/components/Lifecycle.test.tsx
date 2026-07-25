@@ -53,12 +53,13 @@ describe("Lifecycle terminal truth", () => {
     expect(items[5]).toHaveTextContent("Closed");
   });
 
-  it("labels uncertain execution as unknown instead of recorded", () => {
+  it("labels uncertain authorization generically and execution as unknown", () => {
     render(<Lifecycle scenario={terminalScenario("outcome_unknown")} />);
     const items = within(screen.getByRole("list", { name: "Recovery lifecycle" }))
       .getAllByRole("listitem");
 
-    expect(items[3]).toHaveTextContent("Declined");
+    expect(items[3]).toHaveTextContent("Claimed");
+    expect(items[3]).not.toHaveTextContent("Declined");
     expect(items[4]).toHaveTextContent("Unknown");
     expect(items[4]).not.toHaveTextContent("Recorded");
     expect(items[5]).toHaveTextContent("Outcome unknown");

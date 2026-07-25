@@ -1336,11 +1336,69 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "oneOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "detail": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "code": {
+                              "enum": [
+                                "decision_resume_body_invalid",
+                                "remedy_expired"
+                              ],
+                              "type": "string"
+                            },
+                            "recoveryId": {
+                              "format": "uuid",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "code",
+                            "recoveryId"
+                          ],
+                          "type": "object"
+                        }
+                      },
+                      "required": [
+                        "detail"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "enum": [
+                            "invalid_request"
+                          ],
+                          "type": "string"
+                        },
+                        "message": {
+                          "enum": [
+                            "The request did not match the public API contract."
+                          ],
+                          "type": "string"
+                        },
+                        "requestId": {
+                          "pattern": "^[0-9a-f]{32}$",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message",
+                        "requestId"
+                      ],
+                      "type": "object"
+                    }
+                  ]
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "The authenticated resume body is invalid, the exact claim expired, or the recovery path is not a valid UUID."
           }
         },
         "summary": "Resume Recovery Decision"

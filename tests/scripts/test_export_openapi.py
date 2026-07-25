@@ -460,6 +460,25 @@ def test_decision_422_documents_both_stable_public_error_shapes() -> None:
     }
 
 
+def test_decision_resume_422_documents_body_and_expiry_errors() -> None:
+    schema = json.loads(_exporter().render_openapi())
+
+    response = schema["paths"][
+        "/api/recoveries/{recovery_id}/decisions/resume"
+    ]["post"]["responses"]["422"]
+    variants = response["content"]["application/json"]["schema"]["oneOf"]
+
+    assert response["description"] == (
+        "The authenticated resume body is invalid, the exact claim expired, "
+        "or the recovery path is not a valid UUID."
+    )
+    assert variants[0]["properties"]["detail"]["properties"]["code"]["enum"] == [
+        "decision_resume_body_invalid",
+        "remedy_expired",
+    ]
+    assert variants[1]["properties"]["code"]["enum"] == ["invalid_request"]
+
+
 def test_demo_reset_documents_unresolved_creation_conflict() -> None:
     schema = json.loads(_exporter().render_openapi())
 

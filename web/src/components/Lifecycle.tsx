@@ -30,7 +30,7 @@ function stepState(
   }
   if (scenario.status === "outcome_unknown") {
     if (index < 3) return { className: "complete", label: "Recorded", current: false };
-    if (index === 3) return { className: "declined", label: "Declined", current: false };
+    if (index === 3) return { className: "unknown", label: "Claimed", current: false };
     if (index === 4) return { className: "unknown", label: "Unknown", current: false };
     return { className: "unknown", label: "Outcome unknown", current: false };
   }

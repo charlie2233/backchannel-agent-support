@@ -171,7 +171,7 @@ function serverLifecycleDetails(snapshot: RecoverySnapshot): RecoveryScenario["l
     case "outcome_unknown":
       return {
         ...recorded,
-        Authorize: "The decline was recorded after dispatch may have begun.",
+        Authorize: "An exact decision was claimed; its provider outcome remains unresolved.",
         Execute: "Provider dispatch may have begun; its outcome is unknown.",
         "Verify & seal": "Uncertain-outcome evidence was sealed by the server.",
       };

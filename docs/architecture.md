@@ -179,19 +179,24 @@ gate, with no automatic retry or replay fallback.
 
 This resume capability follows the signed demo session, not an original browser tab. It cannot
 create or change consent, and reload never invokes it. Concurrent attempts retain the durable
-demo-adapter idempotency boundary, but they do not prove one live model run across processes. A
-claim that remains unfinished at expiry fails closed; the server does not synthesize cancellation
-while another request or worker might still be resolving it.
+demo-adapter idempotency boundary, but they do not prove one live model run across processes.
+At the authoritative expiry, a bounded writer transaction classifies an unfinished exact claim:
+approve seals `outcome_unknown`; decline seals `closed_without_action` only when zero execution
+is proven and otherwise seals `outcome_unknown`. The decision row and execution ledger remain
+intact, and the sole canonical completed approve result is instead finalized as `completed`
+without capacity acquisition or redispatch. Exact later decision/resume attempts return stable
+`remedy_expired` after the terminal evidence is visible.
 
 Untouched SDK/live hotel consent is also durable lifecycle state. A bounded SQLite
 `BEGIN IMMEDIATE` sweep runs at startup, on the existing maintenance cadence, and before new
 recovery cleanup. Authorized snapshot, receipt, and decision requests sweep their exact target
 after the session-access check; initial SSE does so after both access and cursor validation.
-Expiry and decision claims therefore serialize as competing writers: a committed claim is never
-expired, while an expiration that commits first prevents a later claim. Expiration seals one
-`recovery.expired` event and receipt, marks the pending envelope and remedy expired, and releases
-the matching live admission with `COALESCE` so cooldown and aggregate usage evidence remain
-intact.
+Expiry and decision claims therefore serialize as competing writers: an expiration that commits
+first prevents a later claim, while a claim that commits first owns continuation only until its
+consent deadline or a canonical completed result. Untouched expiry seals one `recovery.expired`
+event; claimed expiry seals one `recovery.claim_expired` event with its conservative terminal
+receipt. Both mark the pending envelope and remedy terminal and release the matching live
+admission with `COALESCE` so cooldown and aggregate usage evidence remain intact.
 
 ## Runtime provenance and trust boundary
 

@@ -92,10 +92,16 @@ model call nor a provider dispatch.
   at the displayed deadline and refreshes server evidence instead of inventing the outcome.
 - Compatible pending approvals survive a process restart; version or definition drift fails
   closed with `resume_incompatible`.
-- An unfinished durable decision claim can be continued after reload without storing its request
-  in the browser. The authorized snapshot exposes only the claimed action, digest, and expiry;
-  **Resume exact approval/decline** sends an explicit empty request, and the server reloads and
-  revalidates its immutable claim. Mount and reload never submit it automatically.
+- An unfinished durable decision claim can be continued before its authoritative expiry without
+  storing its request in the browser. The authorized snapshot exposes only the claimed action,
+  digest, and expiry; **Resume exact approval/decline** sends an explicit empty request, and the
+  server reloads and revalidates its immutable claim. Mount and reload never submit it
+  automatically.
+- At expiry, an unfinished approve claim seals conservative `outcome_unknown` evidence; a
+  zero-work decline can seal `closed_without_action`, while an ambiguous decline also becomes
+  `outcome_unknown`. The sole exact provider result already committed before expiry is finalized
+  as `completed` without another dispatch. Later owner decision/resume attempts return stable
+  `422 remedy_expired` after refreshing that authoritative evidence.
 - SSE polling is fail-fast bounded to 16 streams per server process and four per recovery by
   default. At capacity, the server returns a finite `stream.capacity` control event with a
   five-second native retry interval; authorized streams retain durable replay, heartbeat, and
@@ -107,8 +113,7 @@ model call nor a provider dispatch.
   polling; foreign and absent recoveries still receive the same generic `404` before cursor
   parsing.
 - Decision resume is signed-session scoped and preserves the demo adapter's at-most-one dispatch
-  boundary. It is not an original-tab capability or an at-most-one live-model-run claim, and an
-  expired unfinished claim still fails closed without inventing a terminal outcome.
+  boundary. It is not an original-tab capability or an at-most-one live-model-run claim.
 - API quota recovery is the complementary zero-approval case: deterministic delegated
   authority, simulated execution verification, permission revocation, and a sealed receipt.
 

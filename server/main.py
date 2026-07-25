@@ -491,6 +491,64 @@ _DECISION_UNPROCESSABLE_RESPONSE: dict[str, Any] = {
         }
     },
 }
+_DECISION_RESUME_UNPROCESSABLE_RESPONSE: dict[str, Any] = {
+    "description": (
+        "The authenticated resume body is invalid, the exact claim expired, "
+        "or the recovery path is not a valid UUID."
+    ),
+    "content": {
+        "application/json": {
+            "schema": {
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["detail"],
+                        "properties": {
+                            "detail": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": ["code", "recoveryId"],
+                                "properties": {
+                                    "code": {
+                                        "type": "string",
+                                        "enum": [
+                                            "decision_resume_body_invalid",
+                                            "remedy_expired",
+                                        ],
+                                    },
+                                    "recoveryId": {
+                                        "type": "string",
+                                        "format": "uuid",
+                                    },
+                                },
+                            }
+                        },
+                    },
+                    {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["code", "message", "requestId"],
+                        "properties": {
+                            "code": {
+                                "type": "string",
+                                "enum": ["invalid_request"],
+                            },
+                            "message": {
+                                "type": "string",
+                                "enum": [_INVALID_REQUEST_MESSAGE],
+                            },
+                            "requestId": {
+                                "type": "string",
+                                "pattern": "^[0-9a-f]{32}$",
+                            },
+                        },
+                    },
+                ]
+            }
+        }
+    },
+}
 _EVENT_STREAM_DESCRIPTION = (
     f"{_PRIVATE_RECOVERY_DESCRIPTION} Streams are admitted by bounded, "
     "process-local capacity. At capacity, the endpoint returns a finite "
@@ -1588,6 +1646,12 @@ def create_app(
                 public_controls.release_live(recovery_key)
             return response
         except ApprovalDecisionError as error:
+            if error.code == "remedy_expired":
+                expire_pending_approvals(
+                    recovery_store,
+                    batch_size=1,
+                    recovery_id=recovery_key,
+                )
             raise HTTPException(
                 status_code=error.status_code,
                 detail=error.public_detail,
@@ -1605,7 +1669,12 @@ def create_app(
             f"{_PRIVATE_RECOVERY_DESCRIPTION} Explicitly continues only the existing "
             "durable decision claim; the empty request cannot create or alter consent."
         ),
-        responses=_PRIVATE_NOT_FOUND_RESPONSE,
+        responses={
+            **_PRIVATE_NOT_FOUND_RESPONSE,
+            status.HTTP_422_UNPROCESSABLE_CONTENT: (
+                _DECISION_RESUME_UNPROCESSABLE_RESPONSE
+            ),
+        },
         openapi_extra={
             "requestBody": {
                 "required": True,
@@ -1650,6 +1719,12 @@ def create_app(
                 batch_size=1,
                 recovery_id=recovery_key,
             )
+            if recovery_store.recovery_has_expiration_evidence(recovery_key):
+                raise ApprovalDecisionError(
+                    "remedy_expired",
+                    recovery_key,
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                )
             claim = recovery_orchestrator.preflight_decision_resume(recovery_key)
             if claim.response is not None:
                 response = claim.response
@@ -1677,6 +1752,12 @@ def create_app(
                 remedy_digest=claim.request.remedy_digest,
             )
         except ApprovalDecisionError as error:
+            if error.code == "remedy_expired":
+                expire_pending_approvals(
+                    recovery_store,
+                    batch_size=1,
+                    recovery_id=recovery_key,
+                )
             raise HTTPException(
                 status_code=error.status_code,
                 detail=error.public_detail,

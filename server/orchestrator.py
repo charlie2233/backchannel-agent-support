@@ -88,6 +88,7 @@ from server.store import (
     ApprovalDecisionError,
     DurableExecution,
     PendingApprovalEnvelope,
+    ReceiptTransitionError,
     RecoveryNotFoundError,
     RemedyConsentRecord,
     SQLiteStore,
@@ -155,8 +156,8 @@ class RecoveryOrchestrator:
         self._version_policy = version_policy or ApprovalVersionPolicy.current()
         self._live_ready = live_ready
         self._model_provider = model_provider
-        self._reconcile_completed_executions()
         self._reconcile_claimed_decisions()
+        self._reconcile_completed_executions()
 
     @staticmethod
     def _context_serializer(_context: HotelAgentContext) -> dict[str, Any]:
@@ -203,17 +204,29 @@ class RecoveryOrchestrator:
         for claim in self._store.list_claimed_decisions():
             if claim.request.action is not DecisionAction.APPROVE:
                 continue
-            execution = self._store.get_completed_execution(claim.recovery_id)
-            if execution is None:
-                continue
-            self._store.finalize_completed_execution(
-                execution,
-                receipt=self._receipt_for_execution(execution),
-            )
-            self._store.complete_approval_decision(
-                claim,
-                self._decision_response(claim),
-            )
+            try:
+                execution = self._store.get_completed_execution(claim.recovery_id)
+                if execution is None:
+                    continue
+                self._complete_committed_claim(claim, execution)
+            except (
+                ApprovalDecisionError,
+                ReceiptTransitionError,
+                TypeError,
+                ValueError,
+            ) as error:
+                try:
+                    pending_recovery = self._store.get_recovery(claim.recovery_id)
+                except (RecoveryNotFoundError, TypeError, ValueError):
+                    raise
+                if pending_recovery.status is not RecoveryStatus.PENDING_APPROVAL:
+                    raise
+                logger.warning(
+                    "claimed_execution_reconcile_deferred "
+                    "recovery_id=%s error_type=%s",
+                    claim.recovery_id,
+                    type(error).__name__,
+                )
 
     @staticmethod
     def _raise_incompatible(recovery_id: str, marker: str) -> NoReturn:
@@ -641,13 +654,12 @@ class RecoveryOrchestrator:
         claim: ApprovalDecisionClaim,
         execution: DurableExecution,
     ) -> ApprovalDecisionResponse:
-        self._store.finalize_completed_execution(
+        response = self._decision_response(claim)
+        return self._store.finalize_completed_execution_claim(
             execution,
             receipt=self._receipt_for_execution(execution),
-        )
-        return self._store.complete_approval_decision(
-            claim,
-            self._decision_response(claim),
+            claim=claim,
+            response=response,
         )
 
     async def approve_decision(
@@ -664,6 +676,11 @@ class RecoveryOrchestrator:
         """Load and fully validate the stored claim before any live capacity wait."""
 
         claim = self._store.load_decision_claim_for_resume(recovery_id)
+        if claim.response is None and claim.request.action is DecisionAction.APPROVE:
+            execution = self._store.get_completed_execution(recovery_id)
+            if execution is not None:
+                self._complete_committed_claim(claim, execution)
+                return self._store.load_decision_claim_for_resume(recovery_id)
         if claim.response is None:
             self._validate_decision_resume_compatibility(claim)
         return claim
@@ -696,16 +713,25 @@ class RecoveryOrchestrator:
         if claim.response is not None:
             return claim.response
         if claim.request.action is DecisionAction.DECLINE:
-            await self._resume_claimed_approval(claim)
-            return self._store.complete_decline_decision(claim)
+            try:
+                await self._resume_claimed_approval(claim)
+                return self._store.complete_decline_decision(claim)
+            except (
+                ApprovalDecisionError,
+                ReceiptTransitionError,
+                ResumeIncompatibleError,
+            ):
+                self._raise_if_claim_expired(recovery_id)
+                raise
         execution = self._store.get_completed_execution(recovery_id)
         if execution is not None:
             return self._complete_committed_claim(claim, execution)
         try:
             completed = await self._resume_claimed_approval(claim)
-        except ApprovalDecisionError:
+        except (ApprovalDecisionError, ResumeIncompatibleError):
             execution = self._store.get_completed_execution(recovery_id)
             if execution is None:
+                self._raise_if_claim_expired(recovery_id)
                 raise
             return self._complete_committed_claim(claim, execution)
         if completed is None:
@@ -714,8 +740,19 @@ class RecoveryOrchestrator:
                 return replayed.response
         execution = self._store.get_completed_execution(recovery_id)
         if execution is None:
+            self._raise_if_claim_expired(recovery_id)
             raise RuntimeError("Approved SDK run completed without a durable execution")
         return self._complete_committed_claim(claim, execution)
+
+    def _raise_if_claim_expired(self, recovery_id: str) -> None:
+        """Map only the exact atomic claim-expiry seal to its stable owner error."""
+
+        if self._store.recovery_has_expiration_evidence(recovery_id):
+            raise ApprovalDecisionError(
+                "remedy_expired",
+                recovery_id,
+                status_code=422,
+            )
 
     def _validate_decision_resume_compatibility(
         self,
@@ -926,7 +963,11 @@ class RecoveryOrchestrator:
             return None
         if claim.request.action is DecisionAction.APPROVE:
             state.approve(interruption)
-            self._store.update_pending_approval_status(recovery_id, status="approved")
+            self._store.update_pending_approval_status(
+                recovery_id,
+                expected_status=envelope.status,
+                status="approved",
+            )
         else:
             state.reject(
                 interruption,
@@ -946,6 +987,7 @@ class RecoveryOrchestrator:
                 # authorization boundary or durable provider evidence.
                 self._store.update_pending_approval_status(
                     recovery_id,
+                    expected_status=envelope.status,
                     status="outcome_unknown",
                 )
         return completed

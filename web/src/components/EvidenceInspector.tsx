@@ -7,7 +7,12 @@ import {
   type RefObject,
 } from "react";
 
-import { DecisionCapacityError, postDecision, postDecisionResume } from "../api/client";
+import {
+  DecisionCapacityError,
+  DecisionExpiredError,
+  postDecision,
+  postDecisionResume,
+} from "../api/client";
 import type { RecoveryEvent } from "../api/events";
 import type {
   DecisionAction,
@@ -344,6 +349,36 @@ export function EvidenceInspector({
     };
   }, [decisionContextKey, decisionExpiry, expiryMilliseconds, onServerSuccess]);
 
+  const refreshExpiredDecisionEvidence = async (
+    request: DecisionRequestAttempt,
+    submittedGeneration: number,
+  ) => {
+    acceptedDecisionContext.current = {
+      key: request.key,
+      generation: request.generation,
+    };
+    setExpiredContextKey(request.key);
+    setError(null);
+    setStatusMessage(
+      "Consent expired. Refreshing authoritative recovery evidence.",
+    );
+    if (serverRefreshes.current.has(request.key)) return;
+    serverRefreshes.current.add(request.key);
+    try {
+      await onServerSuccess?.();
+    } catch {
+      if (
+        decisionContextRef.current.generation !== submittedGeneration ||
+        decisionContextRef.current.key !== request.key
+      ) {
+        return;
+      }
+      setError(
+        "Consent expired, but refreshed recovery evidence is unavailable.",
+      );
+    }
+  };
+
   const copyDigest = async () => {
     if (approval === null) return;
     const submittedGeneration = decisionContextRef.current.generation;
@@ -442,6 +477,13 @@ export function EvidenceInspector({
     } catch (caught: unknown) {
       if (!retireDecisionRequest(inFlight, false)) return;
       setSubmittingAction(null);
+      if (caught instanceof DecisionExpiredError) {
+        await refreshExpiredDecisionEvidence(
+          inFlight,
+          submittedGeneration,
+        );
+        return;
+      }
       setError(
         caught instanceof DecisionCapacityError
           ? caught.message
@@ -515,6 +557,13 @@ export function EvidenceInspector({
     } catch (caught: unknown) {
       if (!retireDecisionRequest(inFlight, false)) return;
       setSubmittingAction(null);
+      if (caught instanceof DecisionExpiredError) {
+        await refreshExpiredDecisionEvidence(
+          inFlight,
+          submittedGeneration,
+        );
+        return;
+      }
       setError(
         caught instanceof DecisionCapacityError
           ? caught.message

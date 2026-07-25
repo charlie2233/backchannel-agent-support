@@ -87,12 +87,6 @@ def _commit_remedy_tool() -> FunctionTool:
         )
         if execution is None:
             raise RuntimeError("Durable provider result was not recorded")
-        tool_context.context.store.finalize_completed_execution(
-            execution,
-            receipt=tool_context.context.store.completed_receipt_for_execution(
-                execution
-            ),
-        )
         return dispatch.model_dump_json()
 
     return commit_remedy

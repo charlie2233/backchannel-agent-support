@@ -1258,14 +1258,14 @@ describe("Backchannel console", () => {
     {
       status: "outcome_unknown",
       label: "Outcome unknown",
-      authorization: "The decline was recorded after dispatch may have begun.",
+      authorization: "An exact decision was claimed; its provider outcome remains unresolved.",
       execution: "Provider dispatch may have begun; its outcome is unknown.",
       verification: "Uncertain-outcome evidence was sealed by the server.",
       stepLabels: [
         "Recorded",
         "Recorded",
         "Recorded",
-        "Declined",
+        "Claimed",
         "Unknown",
         "Outcome unknown",
       ],

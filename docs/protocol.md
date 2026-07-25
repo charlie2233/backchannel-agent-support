@@ -298,15 +298,20 @@ HttpOnly session and recovery UUID may explicitly continue the already-fixed cla
 attempts remain bounded by the durable execution/idempotency ledger to at most one demo-adapter
 dispatch, but may duplicate live model work across workers. Capacity returns the existing
 `decision_capacity` response and leaves the explicit action available; it never starts replay or
-retries automatically. At or after the original consent expiry, resume returns
-`422 remedy_expired` before capacity or dispatch and does not invent a cancellation or receipt.
+retries automatically. At or after the original consent expiry, the targeted lifecycle sweep
+runs before capacity or dispatch. The sole canonical approved provider result that already
+committed is reconciled to its completed receipt without another dispatch. Every other exact
+unfinished claim seals conservative terminal evidence, after which resume returns stable
+`422 remedy_expired`.
 
 If the authoritative UTC expiry is reached with the recovery and envelope still pending and no
 decision, execution, receipt, or terminal event exists, a bounded `BEGIN IMMEDIATE` lifecycle
 sweep closes the recovery instead. A decision claim that commits first wins and is left for the
-normal resume path; an expiration that commits first makes later claims unavailable. The
-browser's local timer only disables both controls and asks for fresh server evidence. It does
-not infer whether another tab already committed a claim or synthesize a terminal outcome.
+normal resume path until its consent deadline; an expiration that commits first makes later
+claims unavailable. At that deadline, an unfinished approve seals `outcome_unknown`; an
+unfinished decline seals `closed_without_action` only when zero execution is proven and otherwise
+seals `outcome_unknown`. The claim and execution rows are preserved. The browser's local timer
+only disables both controls and asks for fresh server evidence; it does not infer the outcome.
 Once exact durable expiration evidence exists, every later authorized decision attempt returns
 the stable `422 remedy_expired` code without changing the receipt or event ledger; unrelated
 sessions still receive the generic 404 before that evidence is inspected.
@@ -332,9 +337,12 @@ An untouched expired interruption is also `closed_without_action`, but uses the 
 terminal event `recovery.expired`. Its receipt preserves SDK/live provenance and proves consent
 was requested, the window expired without a decision claim, decision and execution counts are
 zero, provider dispatch did not begin, temporary permission was revoked, and expiration
-evidence was sealed. A repeated sweep or process restart does not rewrite that evidence. Any
-claimed-but-incomplete decision is deliberately excluded because provider dispatch may be in
-flight.
+evidence was sealed. A repeated sweep or process restart does not rewrite that evidence. A
+claimed-but-incomplete decision uses the distinct `recovery.claim_expired` event. Approve
+records one committed approval decision with unknown provider execution; decline records zero
+approvals and claims `providerExecution=false` only when its pending state and empty execution
+ledger prove no work began. Every ambiguous case remains `outcome_unknown`, while a sole
+canonical completed approve execution is finalized instead of expired.
 
 If dispatch might have begun, the terminal state is `outcome_unknown`. It deliberately carries
 `providerExecution=null`, no approved digest, and no zero-execution or cancellation claim.

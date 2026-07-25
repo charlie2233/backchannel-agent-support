@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DECISION_CAPACITY_MESSAGE,
   DecisionCapacityError,
+  DecisionExpiredError,
   LIVE_ADMISSION_MESSAGES,
   LiveAdmissionError,
   RECOVERY_CREATION_MESSAGES,
@@ -323,6 +324,59 @@ describe("postDecision public errors", () => {
       ).rejects.toThrow(`Decision request failed with status ${status}`);
     },
   );
+
+  it("returns a typed exact-expiry error only for the requested recovery", async () => {
+    const recoveryId = "11111111-2222-4333-8444-555555555555";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            detail: {
+              code: "remedy_expired",
+              recoveryId,
+            },
+          }),
+          { status: 422 },
+        ),
+      ),
+    );
+
+    await expect(postDecision(recoveryId, decision)).rejects.toEqual(
+      expect.objectContaining<Partial<DecisionExpiredError>>({
+        name: "DecisionExpiredError",
+        code: "remedy_expired",
+        recoveryId,
+      }),
+    );
+  });
+
+  it("rejects an uncorrelated expiry envelope as a generic error", async () => {
+    const recoveryId = "11111111-2222-4333-8444-555555555555";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            detail: {
+              code: "remedy_expired",
+              recoveryId: "99999999-2222-4333-8444-555555555555",
+            },
+          }),
+          { status: 422 },
+        ),
+      ),
+    );
+
+    const error = await postDecision(recoveryId, decision).catch(
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(DecisionExpiredError);
+    expect((error as Error).message).toBe(
+      "Decision request failed with status 422",
+    );
+  });
 });
 
 describe("claimed decision and explicit resume contracts", () => {
@@ -403,6 +457,27 @@ describe("claimed decision and explicit resume contracts", () => {
       `/api/recoveries/${recoveryId}/decisions/resume`,
       expect.objectContaining({ method: "POST", body: "{}" }),
     );
+  });
+
+  it("returns a typed exact-expiry error for the correlated resume", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            detail: {
+              code: "remedy_expired",
+              recoveryId,
+            },
+          }),
+          { status: 422 },
+        ),
+      ),
+    );
+
+    await expect(
+      postDecisionResume(recoveryId, claimedDecision),
+    ).rejects.toBeInstanceOf(DecisionExpiredError);
   });
 
   it.each([
@@ -605,6 +680,70 @@ describe("getReceipt runtime validation", () => {
     );
 
     await expect(getReceipt(quotaReceipt.recoveryId)).resolves.toEqual(quotaReceipt);
+  });
+
+  it("accepts a canonical unknown-outcome receipt for one claimed approval", async () => {
+    const unknownReceipt = {
+      ...validReceipt,
+      status: "outcome_unknown",
+      providerExecution: null,
+      providerResult: "Claimed decision expired; provider outcome remains unknown.",
+      authorizationSource:
+        "A durable exact decision was claimed before consent expiry; no provider outcome is asserted.",
+      verificationResults: [
+        "Human consent requested.",
+        "An exact decision was claimed before consent expiry.",
+        "Durable evidence cannot prove that provider dispatch did not begin.",
+        "Cancellation and zero execution are not claimed.",
+        "Temporary permission revoked.",
+        "Uncertain claim-expiry receipt sealed.",
+      ],
+      approvalCount: 1,
+      approvedRemedyDigest: null,
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify(unknownReceipt), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+
+    await expect(getReceipt(unknownReceipt.recoveryId)).resolves.toEqual(unknownReceipt);
+  });
+
+  it.each([
+    { name: "approval count two", update: { approvalCount: 2 } },
+    { name: "provider execution false", update: { providerExecution: false } },
+    { name: "provider execution true", update: { providerExecution: true } },
+    {
+      name: "an approved remedy digest",
+      update: { approvedRemedyDigest: `sha256:${"a".repeat(64)}` },
+    },
+  ])("rejects an unknown-outcome receipt with $name", async ({ update }) => {
+    const unknownReceipt = {
+      ...validReceipt,
+      status: "outcome_unknown",
+      providerExecution: null,
+      approvalCount: 1,
+      approvedRemedyDigest: null,
+      ...update,
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify(unknownReceipt), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+
+    await expect(getReceipt(unknownReceipt.recoveryId)).rejects.toThrow(
+      "Receipt response did not match the receipt contract",
+    );
   });
 
   it.each([

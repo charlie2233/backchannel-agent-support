@@ -129,6 +129,40 @@ def test_unknown_outcome_forbids_claiming_provider_execution(
         )
 
 
+@pytest.mark.parametrize("approval_count", [0, 1])
+def test_unknown_outcome_allows_only_bounded_claim_evidence(
+    approval_count: int,
+) -> None:
+    payload = receipt_payload(ExecutionMode.SDK_STUB)
+    payload.update(
+        {
+            "status": "outcome_unknown",
+            "providerExecution": None,
+            "approvalCount": approval_count,
+            "approvedRemedyDigest": None,
+        }
+    )
+
+    assert RecoveryReceipt.model_validate(payload).approval_count == approval_count
+    with pytest.raises(ValidationError):
+        RecoveryReceipt.model_validate({**payload, "approvalCount": 2})
+
+
+def test_closed_without_action_still_rejects_approval_evidence() -> None:
+    payload = receipt_payload(ExecutionMode.SDK_STUB)
+    payload.update(
+        {
+            "status": "closed_without_action",
+            "providerExecution": False,
+            "approvalCount": 1,
+            "approvedRemedyDigest": None,
+        }
+    )
+
+    with pytest.raises(ValidationError):
+        RecoveryReceipt.model_validate(payload)
+
+
 @pytest.mark.parametrize("status", ["in_progress", "pending_approval", "bogus"])
 def test_receipt_rejects_nonterminal_or_unknown_status(status: str) -> None:
     payload = receipt_payload(ExecutionMode.SDK_STUB)

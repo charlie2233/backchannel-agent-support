@@ -61,6 +61,15 @@ export class DecisionCapacityError extends Error {
   }
 }
 
+export class DecisionExpiredError extends Error {
+  readonly name = "DecisionExpiredError";
+  readonly code = "remedy_expired" as const;
+
+  constructor(readonly recoveryId: string) {
+    super("Consent expired. Refresh authoritative recovery evidence.");
+  }
+}
+
 export class RecoveryCreationError extends Error {
   readonly name = "RecoveryCreationError";
 
@@ -252,6 +261,25 @@ function readDecisionCapacityError(
     return null;
   }
   return new DecisionCapacityError(value.requestId);
+}
+
+function readDecisionExpiredError(
+  value: unknown,
+  status: number,
+  recoveryId: string,
+): DecisionExpiredError | null {
+  if (
+    status !== 422 ||
+    !isRecord(value) ||
+    !hasExactKeys(value, ["detail"]) ||
+    !isRecord(value.detail) ||
+    !hasExactKeys(value.detail, ["code", "recoveryId"]) ||
+    value.detail.code !== "remedy_expired" ||
+    value.detail.recoveryId !== recoveryId
+  ) {
+    return null;
+  }
+  return new DecisionExpiredError(recoveryId);
 }
 
 function isRecoveryCreationCode(
@@ -528,7 +556,7 @@ export function isRecoveryReceipt(value: unknown): value is RecoveryReceipt {
   }
   return (
     value.status === "outcome_unknown" &&
-    value.approvalCount === 0 &&
+    (value.approvalCount === 0 || value.approvalCount === 1) &&
     value.providerExecution === null &&
     value.approvedRemedyDigest === null &&
     (value.executionMode !== "sdk_stub" || value.boundary === sdkBoundary)
@@ -683,6 +711,14 @@ export async function postDecision(
     } catch {
       // A malformed error response is handled by the generic status-only path.
     }
+    const expiredError = readDecisionExpiredError(
+      body,
+      response.status,
+      recoveryId,
+    );
+    if (expiredError !== null) {
+      throw expiredError;
+    }
     const capacityError = readDecisionCapacityError(body, response.status);
     if (capacityError !== null) {
       throw capacityError;
@@ -762,6 +798,12 @@ export async function postDecisionResume(
     } catch {
       // A malformed error response is handled by the generic status-only path.
     }
+    const expiredError = readDecisionExpiredError(
+      body,
+      response.status,
+      recoveryId,
+    );
+    if (expiredError !== null) throw expiredError;
     const capacityError = readDecisionCapacityError(body, response.status);
     if (capacityError !== null) throw capacityError;
     throw new Error(`Decision resume failed with status ${response.status}`);

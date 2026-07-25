@@ -130,22 +130,33 @@ describe("Receipt", () => {
       ...declinedReceipt(),
       status: "outcome_unknown",
       providerExecution: null,
-      providerResult: "Provider dispatch may have begun; its outcome is unknown.",
+      providerResult: "Claimed decision expired; provider outcome remains unknown.",
       authorizationSource:
-        "Decline arrived after execution or dispatch may have begun; cancellation was not claimed.",
+        "A durable exact decision was claimed before consent expiry; no provider outcome is asserted.",
       verificationResults: [
-        "Exact interruption rejected.",
-        "Prior execution or dispatch evidence detected.",
-        "Outcome marked unknown instead of cancelled.",
+        "Human consent requested.",
+        "An exact decision was claimed before consent expiry.",
+        "Durable evidence cannot prove that provider dispatch did not begin.",
+        "Cancellation and zero execution are not claimed.",
         "Temporary permission revoked.",
-        "Uncertain-outcome receipt sealed.",
+        "Uncertain claim-expiry receipt sealed.",
       ],
-      approvalCount: 0,
+      approvalCount: 1,
     };
     render(<Receipt events={[]} receipt={unknown} />);
 
     const receipt = screen.getByRole("region", { name: "Outcome unknown" });
-    expect(within(receipt).getByText("Provider dispatch may have begun; its outcome is unknown.")).toBeVisible();
+    expect(within(receipt).getByText("Claimed decision expired; provider outcome remains unknown.")).toBeVisible();
+    expect(within(receipt).getByText("Approval count").parentElement).toHaveTextContent(
+      "Approval count1",
+    );
+    expect(
+      within(receipt).getByText("Approved remedy digest").parentElement,
+    ).toHaveTextContent("Approved remedy digestNone");
+    expect(within(receipt).queryByText("Completed")).not.toBeInTheDocument();
+    expect(
+      within(receipt).queryByText("Matched immediately before execution"),
+    ).not.toBeInTheDocument();
     expect(within(receipt).queryByText("executionCount = 0")).not.toBeInTheDocument();
     expect(within(receipt).queryByText("Closed without action")).not.toBeInTheDocument();
     expect(within(receipt).queryByText("Cancellation receipt sealed.")).not.toBeInTheDocument();

@@ -558,7 +558,19 @@ class RecoveryReceipt(ApiModel):
             and self.approval_count not in {0, 1}
         ):
             raise ValueError("SDK completion approval count must be zero or one")
-        if self.status != "completed" and self.approval_count != 0:
+        if (
+            self.status == RecoveryStatus.OUTCOME_UNKNOWN.value
+            and self.approval_count not in {0, 1}
+        ):
+            raise ValueError("Unknown-outcome receipts allow zero or one approval")
+        if (
+            self.status
+            not in {
+                "completed",
+                RecoveryStatus.OUTCOME_UNKNOWN.value,
+            }
+            and self.approval_count != 0
+        ):
             raise ValueError("Non-completed receipts cannot claim an approval")
         if self.status == RecoveryStatus.CLOSED_WITHOUT_ACTION.value and (
             self.provider_execution is not False or self.approved_remedy_digest is not None

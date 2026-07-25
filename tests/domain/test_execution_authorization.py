@@ -99,6 +99,7 @@ def _approved_execution(
     if mark_approved:
         active_store.update_pending_approval_status(
             recovery_id,
+            expected_status="pending",
             status="approved",
         )
     return ApprovedExecutionFixture(
@@ -526,10 +527,15 @@ def test_two_completed_rows_make_even_exact_replay_ambiguous(
         fixture.claim,
         _completed_response(fixture),
     )
-    fixture.store.update_pending_approval_status(
-        fixture.recovery_id,
-        status="completed",
-    )
+    with sqlite3.connect(fixture.database_path) as connection:
+        connection.execute(
+            """
+            UPDATE pending_approvals
+            SET status = 'completed'
+            WHERE recovery_id = ?
+            """,
+            (fixture.recovery_id,),
+        )
     monkeypatch.setattr(fixture.store, "_now", lambda: fixture.expiry)
     before = (
         _execution_row(fixture),

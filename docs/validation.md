@@ -98,16 +98,19 @@ artifacts, or hotel-adapter dispatch. It is injected local test evidence, not a 
 The expiry suites prove SDK/live zero-dispatch receipts, live-admission release with cooldown and
 usage preservation, restart idempotence, decision-versus-expiry writer serialization,
 access-check ordering, synchronous snapshot/SSE/receipt/decision truth, bounded UTC maintenance,
-stable `remedy_expired` retries, and fake-timer controls that refresh once without posting a
-stale decision or continuing after unmount.
+stable `remedy_expired` retries, conservative claimed approve/decline terminalization, canonical
+completed-execution reconciliation after expiry, and fake-timer controls that refresh once
+without posting a stale decision or continuing after unmount.
 The decision-resume suites prove a minimal mutually exclusive claimed view, full stored-request
 fingerprint verification, session authorization before JSON or claim inspection, exact empty
 requests, stored approve/decline continuation, zero-dispatch declines, completed-response replay,
-and expiry before live capacity or dispatch. Browser coverage proves StrictMode/reload performs
-no resume POST, rapid explicit activation coalesces, response action/digest mismatches fail
-closed, and only the server-authored action remains available. The proof is signed-session scoped
-and establishes at most one demo-adapter dispatch, not original-tab ownership, cross-process
-live-model serialization, deployment, or provider execution outside the demo adapter.
+expiry before live capacity or dispatch, and post-expiry replay of the sole already-committed
+provider result without capacity or redispatch. Browser coverage proves StrictMode/reload
+performs no resume POST, rapid explicit activation coalesces, response action/digest mismatches
+fail closed, and only the server-authored action remains available. The proof is signed-session
+scoped and establishes at most one demo-adapter dispatch, not original-tab ownership,
+cross-process live-model serialization, deployment, or provider execution outside the demo
+adapter.
 The execution-authorization suite moves the deterministic clock at writer-lock acquisition and
 proves that a missing or incomplete execution rechecks unexpired consent, the raw unfinished
 approve claim, its fingerprint and exact bindings, the SDK-approved pending marker, action and

@@ -3,7 +3,6 @@ import json
 import sqlite3
 
 import pytest
-from agents.exceptions import UserError
 
 from server.models import ApprovalDecisionRequest, ExecutionMode, RecoveryStatus
 from server.orchestrator import RecoveryOrchestrator
@@ -90,7 +89,7 @@ def test_startup_reconciles_a_committed_execution_without_redispatch(
     )
     recovery_id = pending.recovery.recovery_id
     request = approval_request(pending, "crash-reconcile")
-    original_finalize = store.finalize_completed_execution
+    original_finalize = store.finalize_completed_execution_claim
 
     class SimulatedProcessCrash(RuntimeError):
         pass
@@ -100,9 +99,13 @@ def test_startup_reconciles_a_committed_execution_without_redispatch(
             raise SimulatedProcessCrash("crash after provider commit")
         return original_finalize(*args, **kwargs)
 
-    monkeypatch.setattr(store, "finalize_completed_execution", crash_after_execution)
+    monkeypatch.setattr(
+        store,
+        "finalize_completed_execution_claim",
+        crash_after_execution,
+    )
 
-    with pytest.raises(UserError, match="crash after provider commit"):
+    with pytest.raises(SimulatedProcessCrash, match="crash after provider commit"):
         asyncio.run(orchestrator.approve_decision(recovery_id, request))
 
     assert provider.dispatch_count == 1

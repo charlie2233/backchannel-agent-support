@@ -12,7 +12,7 @@ from server.cleanup import MAX_CLEANUP_BATCH_SIZE, expire_pending_approvals
 from server.models import ApprovalDecisionRequest, ExecutionMode, RecoveryStatus
 from server.orchestrator import RecoveryOrchestrator
 from server.providers.hotel_simulator import HotelSimulator
-from server.store import ApprovalDecisionError, RecoveryNotFoundError, SQLiteStore
+from server.store import ApprovalDecisionError, SQLiteStore
 
 EXPIRATION_SUMMARY = (
     "Consent expired without a decision; no provider dispatch was authorized."
@@ -238,7 +238,7 @@ def test_expiry_sweep_is_restart_idempotent_and_does_not_rewrite_evidence(
         ).fetchone() == first_rows
 
 
-def test_committed_decision_claim_wins_and_is_never_expired(tmp_path) -> None:
+def test_claim_stays_resumable_before_expiry_then_seals_at_expiry(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "claimed-wins.sqlite3")
     snapshot, approval, _provider = _pending_sdk(store)
     recovery_id = snapshot.recovery_id
@@ -254,13 +254,21 @@ def test_committed_decision_claim_wins_and_is_never_expired(tmp_path) -> None:
     )
 
     assert claim.resume_required is True
-    assert expire_pending_approvals(store, now=approval.expiry, batch_size=1) == 0
+    assert (
+        expire_pending_approvals(
+            store,
+            now=approval.expiry - timedelta(microseconds=1),
+            batch_size=1,
+        )
+        == 0
+    )
+    assert store.get_recovery(recovery_id).status is RecoveryStatus.PENDING_APPROVAL
+    assert expire_pending_approvals(store, now=approval.expiry, batch_size=1) == 1
     assert store.count_decisions(recovery_id) == 1
     assert store.count_executions(recovery_id) == 0
-    assert store.get_recovery(recovery_id).status is RecoveryStatus.PENDING_APPROVAL
-    assert store.recovery_has_expiration_evidence(recovery_id) is False
-    with pytest.raises(RecoveryNotFoundError, match="Receipt not found"):
-        store.get_receipt(recovery_id)
+    assert store.get_recovery(recovery_id).status is RecoveryStatus.OUTCOME_UNKNOWN
+    assert store.get_receipt(recovery_id).approval_count == 1
+    assert store.recovery_has_expiration_evidence(recovery_id) is True
 
 
 def test_approval_claim_and_expiry_writer_race_has_exactly_one_winner(tmp_path) -> None:
@@ -302,16 +310,17 @@ def test_approval_claim_and_expiry_writer_race_has_exactly_one_winner(tmp_path) 
         swept = sweep_future.result(timeout=20)
         claim_result = claim_future.result(timeout=20)
 
-    if swept == 1:
+    assert swept == 1
+    if claim_result == "decision_unavailable":
         assert claim_result == "decision_unavailable"
         assert expiry_store.count_decisions(recovery_id) == 0
         assert expiry_store.get_recovery(recovery_id).status is RecoveryStatus.CLOSED_WITHOUT_ACTION
     else:
-        assert swept == 0
         assert claim_result == "claimed"
         assert expiry_store.count_decisions(recovery_id) == 1
-        assert expiry_store.get_recovery(recovery_id).status is RecoveryStatus.PENDING_APPROVAL
+        assert expiry_store.get_recovery(recovery_id).status is RecoveryStatus.OUTCOME_UNKNOWN
     assert expiry_store.count_executions(recovery_id) == 0
+    assert expiry_store.recovery_has_expiration_evidence(recovery_id) is True
 
 
 @pytest.mark.parametrize("batch_size", [0, MAX_CLEANUP_BATCH_SIZE + 1])

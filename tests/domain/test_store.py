@@ -33,6 +33,7 @@ REQUIRED_TABLES = {
 }
 
 APPROVED_DIGEST = f"sha256:{'a' * 64}"
+OTHER_VALID_DIGEST = f"sha256:{'b' * 64}"
 
 
 def test_task7_migrates_legacy_sdk_receipt_from_durable_pending_provenance(
@@ -478,6 +479,55 @@ def test_task6_action_migration_preserves_completed_approval_replay(tmp_path) ->
     with pytest.raises(ApprovalDecisionError) as conflict:
         store.claim_approval_decision(recovery_id, changed_action)
     assert conflict.value.code == "decision_id_conflict"
+
+    canonical_response = replayed.response.model_dump_json(by_alias=True)
+    raw_tuple_mutations = [
+        "UPDATE approval_decisions SET status = 'claimed' WHERE recovery_id = ?",
+        "UPDATE approval_decisions SET result_json = NULL WHERE recovery_id = ?",
+        "UPDATE approval_decisions SET completed_at = NULL WHERE recovery_id = ?",
+    ]
+    for mutation in raw_tuple_mutations:
+        with sqlite3.connect(database_path) as connection:
+            connection.execute("PRAGMA ignore_check_constraints = ON")
+            connection.execute(mutation, (recovery_id,))
+            connection.execute("PRAGMA ignore_check_constraints = OFF")
+        with pytest.raises(ApprovalDecisionError) as raw_incompatible:
+            store.claim_approval_decision(recovery_id, request)
+        assert raw_incompatible.value.code == "resume_incompatible"
+        with sqlite3.connect(database_path) as connection:
+            connection.execute("PRAGMA ignore_check_constraints = ON")
+            connection.execute(
+                """
+                UPDATE approval_decisions
+                SET status = 'completed', result_json = ?, completed_at = ?
+                WHERE recovery_id = ?
+                """,
+                (canonical_response, timestamp, recovery_id),
+            )
+            connection.execute("PRAGMA ignore_check_constraints = OFF")
+
+    mismatched_response = replayed.response.model_copy(
+        update={
+            "client_decision_id": "other-legacy-decision",
+            "recovery_id": "other-legacy-recovery",
+            "approved_remedy_digest": OTHER_VALID_DIGEST,
+        }
+    )
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            UPDATE approval_decisions
+            SET result_json = ?
+            WHERE recovery_id = ?
+            """,
+            (
+                mismatched_response.model_dump_json(by_alias=True),
+                recovery_id,
+            ),
+        )
+    with pytest.raises(ApprovalDecisionError) as incompatible:
+        store.claim_approval_decision(recovery_id, request)
+    assert incompatible.value.code == "resume_incompatible"
 
 
 def test_concurrent_action_migration_never_rewrites_a_new_decline(tmp_path) -> None:

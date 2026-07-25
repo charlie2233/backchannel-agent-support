@@ -8,7 +8,6 @@ from uuid import uuid4
 
 import pytest
 from agents.agent_output import AgentOutputSchemaBase
-from agents.exceptions import UserError
 from agents.handoffs import Handoff
 from agents.items import (
     ModelResponse,
@@ -598,7 +597,7 @@ def test_live_crash_reconciliation_preserves_live_receipt_provenance(
     )
     pending = asyncio.run(orchestrator.start("hotel", execution_mode=ExecutionMode.OPENAI_LIVE))
     recovery_id = pending.recovery.recovery_id
-    original_finalize = store.finalize_completed_execution
+    original_finalize = store.finalize_completed_execution_claim
 
     class SimulatedProcessCrash(RuntimeError):
         pass
@@ -608,10 +607,17 @@ def test_live_crash_reconciliation_preserves_live_receipt_provenance(
             raise SimulatedProcessCrash("crash after live provider commit")
         return original_finalize(*args, **kwargs)
 
-    monkeypatch.setattr(store, "finalize_completed_execution", crash_after_execution)
+    monkeypatch.setattr(
+        store,
+        "finalize_completed_execution_claim",
+        crash_after_execution,
+    )
     from server.models import ApprovalDecisionRequest
 
-    with pytest.raises(UserError, match="crash after live provider commit"):
+    with pytest.raises(
+        SimulatedProcessCrash,
+        match="crash after live provider commit",
+    ):
         asyncio.run(
             orchestrator.approve_decision(
                 recovery_id,
