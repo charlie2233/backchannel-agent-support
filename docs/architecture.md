@@ -188,6 +188,11 @@ neutral awaiting evidence; neither state presents the bundled replay fixture as 
 `scripts/start.py`; local mode binds to `127.0.0.1`, while explicit deployed mode binds to
 `0.0.0.0`. FastAPI mounts hashed `/assets` and uses a restricted route-like SPA fallback;
 API, documentation, missing asset, and suspicious paths remain non-HTML 404s.
+The launcher configures Uvicorn's process-local admission threshold at 64 tracked
+connections/tasks, a 128-connection listen backlog, and a five-second keep-alive timeout. Once
+the threshold is reached, newly parsed requests receive HTTP 503. These controls do not bound
+pre-request sockets, replace edge connection/header timeouts, or prove fleet-wide and
+multi-container saturation behavior.
 
 The multi-stage Dockerfile builds Node assets separately, installs the frozen Python runtime,
 runs as UID/GID 10001, stores SQLite under writable `/data`, and checks `/readyz`.

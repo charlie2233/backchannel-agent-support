@@ -611,7 +611,7 @@ def test_start_bind_is_loopback_locally_and_all_interfaces_only_when_deployed() 
     assert bind_host({"BACKCHANNEL_DEPLOYED_MODE": "true"}) == "0.0.0.0"
 
 
-def test_production_launcher_uses_one_process_for_process_local_stream_limits(
+def test_production_launcher_uses_one_bounded_process(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
@@ -628,6 +628,12 @@ def test_production_launcher_uses_one_process_for_process_local_stream_limits(
 
     assert captured["app"] == "server.main:app"
     assert captured["workers"] == 1
+    assert captured["limit_concurrency"] == 64
+    assert captured["backlog"] == 128
+    assert captured["timeout_keep_alive"] == 5
+    assert start.HTTP_CONCURRENCY_LIMIT == 64
+    assert start.HTTP_LISTEN_BACKLOG == 128
+    assert start.HTTP_KEEP_ALIVE_TIMEOUT_SECONDS == 5
     assert captured["timeout_graceful_shutdown"] == 3
     assert start.GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS == 3
     assert (

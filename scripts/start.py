@@ -7,6 +7,9 @@ from collections.abc import Mapping
 
 import uvicorn
 
+HTTP_CONCURRENCY_LIMIT = 64
+HTTP_LISTEN_BACKLOG = 128
+HTTP_KEEP_ALIVE_TIMEOUT_SECONDS = 5
 GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS = 3
 
 
@@ -34,6 +37,9 @@ def main() -> None:
         host=bind_host(os.environ),
         port=_port(os.environ),
         workers=1,
+        limit_concurrency=HTTP_CONCURRENCY_LIMIT,
+        backlog=HTTP_LISTEN_BACKLOG,
+        timeout_keep_alive=HTTP_KEEP_ALIVE_TIMEOUT_SECONDS,
         proxy_headers=False,
         server_header=False,
         timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS,
