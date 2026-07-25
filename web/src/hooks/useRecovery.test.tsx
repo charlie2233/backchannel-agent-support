@@ -45,6 +45,16 @@ async function flushAsyncWork(): Promise<void> {
   await Promise.resolve();
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((nextResolve, nextReject) => {
+    resolve = nextResolve;
+    reject = nextReject;
+  });
+  return { promise, reject, resolve };
+}
+
 function event(seq: number, type = `event.${seq}`): RecoveryEvent {
   return {
     recoveryId,
@@ -714,6 +724,487 @@ describe("useRecovery event-stream recovery", () => {
     });
 
     expect(openEvents).toHaveBeenCalledOnce();
+  });
+});
+
+describe("useRecovery authoritative evidence deadlines", () => {
+  it("times out a never-settling initial snapshot at the default 12 second deadline", async () => {
+    vi.useFakeTimers();
+    let requestSignal: AbortSignal | undefined;
+    const getRecovery = vi.fn(
+      (_activeRecoveryId: string, signal?: AbortSignal) =>
+        new Promise<RecoverySnapshot>(() => {
+          requestSignal = signal;
+        }),
+    );
+    const openEvents = pendingOpenEvents();
+    const view = renderHook(() =>
+      useRecovery(recoveryId, {
+        getRecovery,
+        openEvents,
+      }),
+    );
+
+    await act(flushAsyncWork);
+    act(() => vi.advanceTimersByTime(11_999));
+    await act(flushAsyncWork);
+    expect(view.result.current.error).toBeNull();
+    expect(view.result.current.loading).toBe(true);
+
+    act(() => vi.advanceTimersByTime(1));
+    await act(flushAsyncWork);
+
+    expect(requestSignal?.aborted).toBe(true);
+    expect(view.result.current.loading).toBe(false);
+    expect(view.result.current.error).toBe(
+      "Recovery evidence request timed out.",
+    );
+    expect(view.result.current.errorPhase).toBe("initial");
+    expect(view.result.current.errorStatus).toBeNull();
+  });
+
+  it("bounds a terminal snapshot and receipt pair with one shared deadline", async () => {
+    vi.useFakeTimers();
+    const readSignals: AbortSignal[] = [];
+    const getRecovery = vi.fn(
+      (_activeRecoveryId: string, signal?: AbortSignal) =>
+        new Promise<RecoverySnapshot>(() => {
+          if (signal !== undefined) {
+            readSignals.push(signal);
+          }
+        }),
+    );
+    const getReceipt = vi.fn(
+      (_activeRecoveryId: string, signal?: AbortSignal) =>
+        new Promise<RecoveryReceipt>(() => {
+          if (signal !== undefined) {
+            readSignals.push(signal);
+          }
+        }),
+    );
+    const terminalEvent = {
+      ...event(1, "recovery.closed_without_action"),
+      terminal: true,
+    };
+    const initial = snapshot("pending_approval");
+    const openEvents = vi.fn<OpenEvents>(
+      (_request, handlers) =>
+        new Promise(() => {
+          handlers.onOpen();
+          handlers.onEvent(terminalEvent);
+        }),
+    );
+    const view = renderHook(() =>
+      useRecovery(recoveryId, {
+        initialSnapshot: initial,
+        getRecovery,
+        getReceipt,
+        openEvents,
+        authoritativeReadDeadlineMs: 100,
+      }),
+    );
+
+    await act(flushAsyncWork);
+    expect(getRecovery).toHaveBeenCalledOnce();
+    expect(getReceipt).toHaveBeenCalledOnce();
+    act(() => vi.advanceTimersByTime(100));
+    await act(flushAsyncWork);
+
+    expect(readSignals).toHaveLength(2);
+    expect(readSignals.every((signal) => signal.aborted)).toBe(true);
+    expect(view.result.current.snapshot).toEqual(initial);
+    expect(view.result.current.receipt).toBeNull();
+    expect(view.result.current.error).toBe(
+      "Recovery evidence request timed out.",
+    );
+    expect(view.result.current.errorPhase).toBe("terminal");
+  });
+
+  it("does not stack terminal retries when one paired read fails and the other hangs", async () => {
+    vi.useFakeTimers();
+    const receiptSignals: AbortSignal[] = [];
+    const getRecovery = vi
+      .fn()
+      .mockRejectedValue(new Error("private snapshot transport detail"));
+    const getReceipt = vi.fn(
+      (_activeRecoveryId: string, signal?: AbortSignal) =>
+        new Promise<RecoveryReceipt>(() => {
+          if (signal !== undefined) {
+            receiptSignals.push(signal);
+          }
+        }),
+    );
+    const terminalEvent = {
+      ...event(1, "recovery.closed_without_action"),
+      terminal: true,
+    };
+    const initial = snapshot("pending_approval");
+    const openEvents = vi.fn<OpenEvents>(
+      (_request, handlers) =>
+        new Promise(() => {
+          handlers.onOpen();
+          handlers.onEvent(terminalEvent);
+        }),
+    );
+    const view = renderHook(() =>
+      useRecovery(recoveryId, {
+        initialSnapshot: initial,
+        getRecovery,
+        getReceipt,
+        openEvents,
+        terminalRetryDelayMs: 0,
+        authoritativeReadDeadlineMs: 100,
+      }),
+    );
+
+    await act(flushAsyncWork);
+    act(() => vi.advanceTimersByTime(0));
+    await act(flushAsyncWork);
+    expect(getRecovery).toHaveBeenCalledOnce();
+    expect(getReceipt).toHaveBeenCalledOnce();
+    expect(view.result.current.error).toBeNull();
+
+    act(() => vi.advanceTimersByTime(99));
+    await act(flushAsyncWork);
+    expect(getRecovery).toHaveBeenCalledOnce();
+    expect(getReceipt).toHaveBeenCalledOnce();
+    expect(receiptSignals[0]?.aborted).toBe(false);
+
+    act(() => vi.advanceTimersByTime(1));
+    await act(flushAsyncWork);
+    expect(receiptSignals[0]?.aborted).toBe(true);
+    expect(view.result.current.error).toBe(
+      "Recovery evidence request timed out.",
+    );
+    expect(view.result.current.errorPhase).toBe("terminal");
+
+    act(() => vi.advanceTimersByTime(0));
+    await act(flushAsyncWork);
+    expect(getRecovery).toHaveBeenCalledTimes(2);
+    expect(getReceipt).toHaveBeenCalledTimes(2);
+  });
+
+  it("restores one manual event retry after a hung snapshot read and ignores its late resolution", async () => {
+    vi.useFakeTimers();
+    const initial = snapshot("pending_approval");
+    const first = event(1);
+    const lateSnapshot = deferred<RecoverySnapshot>();
+    let requestSignal: AbortSignal | undefined;
+    const getRecovery = vi
+      .fn()
+      .mockImplementationOnce(
+        (_activeRecoveryId: string, signal?: AbortSignal) => {
+          requestSignal = signal;
+          return lateSnapshot.promise;
+        },
+      )
+      .mockResolvedValueOnce(initial);
+    let resumedRequest: RecoveryEventStreamRequest | undefined;
+    let resumedHandlers: RecoveryEventStreamHandlers | undefined;
+    const openEvents = vi
+      .fn<OpenEvents>()
+      .mockImplementationOnce(async (_request, handlers) => {
+        handlers.onOpen();
+        handlers.onEvent(first);
+        throw capacityError();
+      })
+      .mockImplementationOnce(
+        (request, handlers) =>
+          new Promise<RecoveryEventStreamResult>(() => {
+            resumedRequest = request;
+            resumedHandlers = handlers;
+          }),
+      );
+    const view = renderHook(() =>
+      useRecovery(recoveryId, {
+        initialSnapshot: initial,
+        getRecovery,
+        openEvents,
+        authoritativeReadDeadlineMs: 100,
+      }),
+    );
+
+    await act(flushAsyncWork);
+    act(() => vi.advanceTimersByTime(1_000));
+    await act(flushAsyncWork);
+    expect(view.result.current.eventsRetryAvailable).toBe(true);
+
+    act(() => {
+      view.result.current.retryEvents();
+      view.result.current.retryEvents();
+    });
+    await act(flushAsyncWork);
+    expect(getRecovery).toHaveBeenCalledOnce();
+    expect(view.result.current.eventsRetrying).toBe(true);
+
+    act(() => vi.advanceTimersByTime(100));
+    await act(flushAsyncWork);
+
+    expect(requestSignal?.aborted).toBe(true);
+    expect(view.result.current.snapshot).toEqual(initial);
+    expect(view.result.current.events).toEqual([first]);
+    expect(view.result.current.lastSeq).toBe(1);
+    expect(view.result.current.error).toBe(
+      "The event stream is currently at capacity.",
+    );
+    expect(view.result.current.errorPhase).toBe("events");
+    expect(view.result.current.eventsRetryAvailable).toBe(true);
+    expect(view.result.current.eventsRetrying).toBe(false);
+    expect(openEvents).toHaveBeenCalledOnce();
+
+    act(() => {
+      view.result.current.retryEvents();
+      view.result.current.retryEvents();
+    });
+    await act(flushAsyncWork);
+    expect(getRecovery).toHaveBeenCalledTimes(2);
+    expect(openEvents).toHaveBeenCalledTimes(2);
+    expect(resumedRequest).toMatchObject({
+      afterSeq: 1,
+      lastEvent: first,
+    });
+    expect(view.result.current.eventsRetryAvailable).toBe(false);
+    expect(view.result.current.eventsRetrying).toBe(true);
+
+    await act(async () => {
+      lateSnapshot.resolve(
+        snapshot("closed_without_action", "Late terminal snapshot."),
+      );
+      await flushAsyncWork();
+    });
+    expect(view.result.current.snapshot).toEqual(initial);
+    expect(view.result.current.receipt).toBeNull();
+    expect(openEvents).toHaveBeenCalledTimes(2);
+
+    act(() => resumedHandlers?.onOpen());
+    expect(view.result.current.error).toBeNull();
+    expect(view.result.current.errorPhase).toBeNull();
+    expect(view.result.current.eventsRetrying).toBe(false);
+  });
+
+  it("retains terminal evidence and one retry after a hung receipt read", async () => {
+    vi.useFakeTimers();
+    const terminal = snapshot(
+      "closed_without_action",
+      "Closed without provider action.",
+    );
+    const receipt = declinedReceipt();
+    const lateReceipt = deferred<RecoveryReceipt>();
+    let retryReceiptSignal: AbortSignal | undefined;
+    const getRecovery = vi.fn().mockResolvedValue(terminal);
+    const getReceipt = vi
+      .fn()
+      .mockResolvedValueOnce(receipt)
+      .mockImplementationOnce(
+        (_activeRecoveryId: string, signal?: AbortSignal) => {
+          retryReceiptSignal = signal;
+          return lateReceipt.promise;
+        },
+      );
+    const openEvents = vi
+      .fn<OpenEvents>()
+      .mockRejectedValue(capacityError());
+    const view = renderHook(() =>
+      useRecovery(recoveryId, {
+        initialSnapshot: terminal,
+        getRecovery,
+        getReceipt,
+        openEvents,
+        authoritativeReadDeadlineMs: 100,
+      }),
+    );
+
+    await act(flushAsyncWork);
+    expect(view.result.current.receipt).toEqual(receipt);
+    act(() => vi.advanceTimersByTime(1_000));
+    await act(flushAsyncWork);
+    expect(view.result.current.eventsRetryAvailable).toBe(true);
+
+    act(() => view.result.current.retryEvents());
+    await act(flushAsyncWork);
+    expect(getRecovery).toHaveBeenCalledOnce();
+    expect(getReceipt).toHaveBeenCalledTimes(2);
+    expect(view.result.current.eventsRetrying).toBe(true);
+
+    act(() => vi.advanceTimersByTime(100));
+    await act(flushAsyncWork);
+
+    expect(retryReceiptSignal?.aborted).toBe(true);
+    expect(view.result.current.snapshot).toEqual(terminal);
+    expect(view.result.current.receipt).toEqual(receipt);
+    expect(view.result.current.error).toBe(
+      "The event stream is currently at capacity.",
+    );
+    expect(view.result.current.errorPhase).toBe("events");
+    expect(view.result.current.eventsRetryAvailable).toBe(true);
+    expect(view.result.current.eventsRetrying).toBe(false);
+    expect(openEvents).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      lateReceipt.reject(new Error("late private receipt detail"));
+      await flushAsyncWork();
+    });
+    expect(view.result.current.receipt).toEqual(receipt);
+    expect(view.result.current.error).not.toContain("private");
+    expect(openEvents).toHaveBeenCalledOnce();
+  });
+
+  it("caps an oversized injected evidence deadline at 60 seconds", async () => {
+    vi.useFakeTimers();
+    let requestSignal: AbortSignal | undefined;
+    const getRecovery = vi.fn(
+      (_activeRecoveryId: string, signal?: AbortSignal) =>
+        new Promise<RecoverySnapshot>(() => {
+          requestSignal = signal;
+        }),
+    );
+    const openEvents = pendingOpenEvents();
+    const view = renderHook(() =>
+      useRecovery(recoveryId, {
+        getRecovery,
+        openEvents,
+        authoritativeReadDeadlineMs: 600_000,
+      }),
+    );
+
+    await act(flushAsyncWork);
+    act(() => vi.advanceTimersByTime(59_999));
+    await act(flushAsyncWork);
+    expect(requestSignal?.aborted).toBe(false);
+    expect(view.result.current.error).toBeNull();
+
+    act(() => vi.advanceTimersByTime(1));
+    await act(flushAsyncWork);
+    expect(requestSignal?.aborted).toBe(true);
+    expect(view.result.current.error).toBe(
+      "Recovery evidence request timed out.",
+    );
+  });
+
+  it.each([0, -1, 1.5, Number.NaN])(
+    "defaults an invalid evidence deadline (%s) to exactly 12 seconds",
+    async (authoritativeReadDeadlineMs) => {
+      vi.useFakeTimers();
+      let requestSignal: AbortSignal | undefined;
+      const getRecovery = vi.fn(
+        (_activeRecoveryId: string, signal?: AbortSignal) =>
+          new Promise<RecoverySnapshot>(() => {
+            requestSignal = signal;
+          }),
+      );
+      const openEvents = pendingOpenEvents();
+      const view = renderHook(() =>
+        useRecovery(recoveryId, {
+          getRecovery,
+          openEvents,
+          authoritativeReadDeadlineMs,
+        }),
+      );
+
+      await act(flushAsyncWork);
+      act(() => vi.advanceTimersByTime(11_999));
+      await act(flushAsyncWork);
+      expect(requestSignal?.aborted).toBe(false);
+      expect(view.result.current.error).toBeNull();
+
+      act(() => vi.advanceTimersByTime(1));
+      await act(flushAsyncWork);
+      expect(requestSignal?.aborted).toBe(true);
+      expect(view.result.current.error).toBe(
+        "Recovery evidence request timed out.",
+      );
+    },
+  );
+
+  it("fences the first authoritative read across a real StrictMode effect restart", async () => {
+    vi.useFakeTimers();
+    const first = deferred<RecoverySnapshot>();
+    const second = deferred<RecoverySnapshot>();
+    const readSignals: AbortSignal[] = [];
+    const getRecovery = vi
+      .fn()
+      .mockImplementationOnce(
+        (_activeRecoveryId: string, signal?: AbortSignal) => {
+          if (signal !== undefined) {
+            readSignals.push(signal);
+          }
+          return first.promise;
+        },
+      )
+      .mockImplementationOnce(
+        (_activeRecoveryId: string, signal?: AbortSignal) => {
+          if (signal !== undefined) {
+            readSignals.push(signal);
+          }
+          return second.promise;
+        },
+      );
+    const openEvents = pendingOpenEvents();
+    const view = renderHook(
+      () =>
+        useRecovery(recoveryId, {
+          getRecovery,
+          openEvents,
+          authoritativeReadDeadlineMs: 100,
+        }),
+      { reactStrictMode: true },
+    );
+    await act(flushAsyncWork);
+
+    expect(getRecovery).toHaveBeenCalledTimes(2);
+    expect(readSignals).toHaveLength(2);
+    expect(readSignals[0]?.aborted).toBe(true);
+    expect(readSignals[1]?.aborted).toBe(false);
+    expect(vi.getTimerCount()).toBe(1);
+
+    await act(async () => {
+      first.resolve(
+        snapshot("closed_without_action", "Stale StrictMode snapshot."),
+      );
+      await flushAsyncWork();
+    });
+    expect(view.result.current.snapshot).toBeNull();
+    expect(view.result.current.error).toBeNull();
+
+    await act(async () => {
+      second.resolve(snapshot("pending_approval"));
+      await flushAsyncWork();
+    });
+    expect(view.result.current.snapshot).toEqual(
+      snapshot("pending_approval"),
+    );
+    expect(view.result.current.error).toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("aborts and clears an owned evidence deadline on unmount without a stale failure", async () => {
+    vi.useFakeTimers();
+    let requestSignal: AbortSignal | undefined;
+    const getRecovery = vi.fn(
+      (_activeRecoveryId: string, signal?: AbortSignal) =>
+        new Promise<RecoverySnapshot>(() => {
+          requestSignal = signal;
+        }),
+    );
+    const openEvents = pendingOpenEvents();
+    const view = renderHook(() =>
+      useRecovery(recoveryId, {
+        getRecovery,
+        openEvents,
+        authoritativeReadDeadlineMs: 100,
+      }),
+    );
+    await act(flushAsyncWork);
+    const beforeUnmount = view.result.current;
+
+    view.unmount();
+    expect(requestSignal?.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+    act(() => vi.advanceTimersByTime(1_000));
+    await act(flushAsyncWork);
+
+    expect(view.result.current).toEqual(beforeUnmount);
+    expect(view.result.current.error).toBeNull();
   });
 });
 

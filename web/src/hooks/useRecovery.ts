@@ -151,6 +151,7 @@ interface UseRecoveryOptions {
   terminalRetryDelayMs?: number;
   eventReconnectDelayMs?: number;
   eventReconnectAttempts?: number;
+  authoritativeReadDeadlineMs?: number;
 }
 
 function terminalPairIsConsistent(
@@ -263,6 +264,80 @@ function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError";
 }
 
+const DEFAULT_AUTHORITATIVE_READ_DEADLINE_MS = 12_000;
+const MAX_AUTHORITATIVE_READ_DEADLINE_MS = 60_000;
+
+class AuthoritativeReadTimeoutError extends Error {
+  constructor() {
+    super("Recovery evidence request timed out.");
+    this.name = "AuthoritativeReadTimeoutError";
+  }
+}
+
+function abortError(): DOMException {
+  return new DOMException("The operation was aborted.", "AbortError");
+}
+
+function withAuthoritativeReadDeadline<T>(
+  read: (signal: AbortSignal) => Promise<T>,
+  parentSignal: AbortSignal,
+  deadlineMs: number,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const controller = new AbortController();
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const cleanup = () => {
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      parentSignal.removeEventListener("abort", abortFromParent);
+    };
+    const settle = (complete: () => void) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      complete();
+    };
+    const abortFromParent = () => {
+      controller.abort();
+      settle(() => reject(abortError()));
+    };
+
+    parentSignal.addEventListener("abort", abortFromParent, {
+      once: true,
+    });
+    timer = setTimeout(() => {
+      controller.abort();
+      settle(() => reject(new AuthoritativeReadTimeoutError()));
+    }, deadlineMs);
+    if (parentSignal.aborted) {
+      abortFromParent();
+      return;
+    }
+
+    let pending: Promise<T>;
+    try {
+      pending = read(controller.signal);
+    } catch (error) {
+      controller.abort();
+      settle(() => reject(error));
+      return;
+    }
+    void pending.then(
+      (value) => settle(() => resolve(value)),
+      (error: unknown) => {
+        controller.abort();
+        settle(() => reject(error));
+      },
+    );
+  });
+}
+
 export function useRecovery(
   recoveryId: string | null,
   options: UseRecoveryOptions = {},
@@ -282,6 +357,8 @@ export function useRecovery(
     terminalRetryDelayMs = 250,
     eventReconnectDelayMs = 250,
     eventReconnectAttempts = 3,
+    authoritativeReadDeadlineMs =
+      DEFAULT_AUTHORITATIVE_READ_DEADLINE_MS,
   } = options;
   const boundedReconnectAttempts =
     Number.isInteger(eventReconnectAttempts) &&
@@ -292,6 +369,14 @@ export function useRecovery(
     Number.isFinite(eventReconnectDelayMs) && eventReconnectDelayMs >= 0
       ? Math.min(eventReconnectDelayMs, 30_000)
       : 250;
+  const boundedAuthoritativeReadDeadlineMs =
+    Number.isInteger(authoritativeReadDeadlineMs) &&
+    authoritativeReadDeadlineMs >= 1
+      ? Math.min(
+          authoritativeReadDeadlineMs,
+          MAX_AUTHORITATIVE_READ_DEADLINE_MS,
+        )
+      : DEFAULT_AUTHORITATIVE_READ_DEADLINE_MS;
 
   useEffect(() => {
     const updateEventRetryState = (next: EventRetryState) => {
@@ -320,6 +405,16 @@ export function useRecovery(
     let retryEligibilityGeneration = 0;
     let retryEligibilityTimer: ReturnType<typeof setTimeout> | null = null;
     dispatch({ type: "reset" });
+
+    const readAuthoritative = <T>(
+      read: (signal: AbortSignal) => Promise<T>,
+      parentSignal: AbortSignal,
+    ) =>
+      withAuthoritativeReadDeadline(
+        read,
+        parentSignal,
+        boundedAuthoritativeReadDeadlineMs,
+      );
 
     const fail = (error: unknown, phase: RecoveryErrorPhase) => {
       if (disposed || isAbortError(error)) {
@@ -411,7 +506,10 @@ export function useRecovery(
       terminalRefreshStarted = true;
       const controller = authoritativeController;
       const generation = authoritativeGeneration;
-      void getReceipt(activeRecoveryId, controller.signal)
+      void readAuthoritative(
+        (signal) => getReceipt(activeRecoveryId, signal),
+        controller.signal,
+      )
         .then((receipt) => {
           if (
             disposed ||
@@ -434,10 +532,20 @@ export function useRecovery(
       terminalRefreshStarted = true;
       const controller = authoritativeController;
       const generation = authoritativeGeneration;
-      void Promise.all([
-        getRecovery(activeRecoveryId, controller.signal),
-        getReceipt(activeRecoveryId, controller.signal),
-      ])
+      void readAuthoritative(async (signal) => {
+        const [snapshotResult, receiptResult] =
+          await Promise.allSettled([
+            getRecovery(activeRecoveryId, signal),
+            getReceipt(activeRecoveryId, signal),
+          ]);
+        if (snapshotResult.status === "rejected") {
+          throw snapshotResult.reason;
+        }
+        if (receiptResult.status === "rejected") {
+          throw receiptResult.reason;
+        }
+        return [snapshotResult.value, receiptResult.value] as const;
+      }, controller.signal)
         .then(([snapshot, receipt]) => {
           if (
             disposed ||
@@ -484,7 +592,10 @@ export function useRecovery(
       dispatch({ type: "loading" });
       const generation = authoritativeGeneration;
       const controller = authoritativeController;
-      void getRecovery(activeRecoveryId, controller.signal)
+      void readAuthoritative(
+        (signal) => getRecovery(activeRecoveryId, signal),
+        controller.signal,
+      )
         .then((snapshot) => acceptInitialSnapshot(snapshot, generation))
         .catch((error: unknown) => {
           if (
@@ -692,8 +803,8 @@ export function useRecovery(
       void (async () => {
         let refreshedSnapshot: RecoverySnapshot;
         try {
-          refreshedSnapshot = await getRecovery(
-            activeRecoveryId,
+          refreshedSnapshot = await readAuthoritative(
+            (signal) => getRecovery(activeRecoveryId, signal),
             controller.signal,
           );
         } catch (error) {
@@ -719,8 +830,8 @@ export function useRecovery(
         if (isTerminalRecoveryStatus(refreshedSnapshot.status)) {
           let refreshedReceipt: RecoveryReceipt;
           try {
-            refreshedReceipt = await getReceipt(
-              activeRecoveryId,
+            refreshedReceipt = await readAuthoritative(
+              (signal) => getReceipt(activeRecoveryId, signal),
               controller.signal,
             );
           } catch (error) {
@@ -789,6 +900,7 @@ export function useRecovery(
       }
     };
   }, [
+    boundedAuthoritativeReadDeadlineMs,
     boundedReconnectAttempts,
     boundedReconnectDelayMs,
     getReceipt,
