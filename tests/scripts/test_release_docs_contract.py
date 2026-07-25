@@ -20,20 +20,31 @@ def _read(relative_path: str) -> str:
     return (ROOT / relative_path).read_text(encoding="utf-8")
 
 
-def test_package_wires_a_pinned_standalone_capture_contract() -> None:
+def test_package_wires_capture_contract_and_manifest_verifier_into_check() -> None:
     package = json.loads(_read("package.json"))
     scripts = package["scripts"]
+    workflow = _read(".github/workflows/ci.yml")
 
     assert package["devDependencies"]["playwright-core"] == "1.61.1"
     assert scripts["test:capture-contract"] == (
         "node --test e2e/judge-flow.test.mjs e2e/capture-manifest.test.mjs"
     )
+    assert scripts["capture:verify"] == "node e2e/capture-manifest.mjs"
     assert scripts["pretest:e2e"] == "npm run build"
     assert scripts["test:e2e"] == (
         "npm run test:capture-contract && node e2e/judge-flow.mjs"
     )
     assert scripts["capture:judge"] == "npm run test:e2e"
-    assert "npm run test:capture-contract" in scripts["check"]
+    assert scripts["check"] == (
+        "npm run test:capture-contract && npm run capture:verify && "
+        "npm --workspace web run check && uv run ruff check server scripts tests && "
+        "uv run mypy server scripts/start.py scripts/docker_smoke.py "
+        "scripts/export_openapi.py scripts/secret_scan.py && uv run pytest -q"
+    )
+    assert (
+        "      - name: Run canonical checks\n"
+        "        run: npm run check\n"
+    ) in workflow
 
     ignored = _read(".gitignore").splitlines()
     assert "output/playwright/" in ignored
