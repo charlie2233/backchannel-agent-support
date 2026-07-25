@@ -33,13 +33,22 @@ def test_readyz_requires_database_and_configured_complete_bundle(tmp_path: Path)
 
     recoveries_before = store.count_recoveries()
     with TestClient(create_app(settings, store=store)) as client:
-        response = client.get("/readyz")
+        response = client.get(
+            "/readyz",
+            headers={"Origin": "http://localhost:5173"},
+        )
 
     assert response.status_code == 200
     assert response.json() == {"status": "ready"}
     assert response.headers["cache-control"] == "no-store"
     assert "set-cookie" not in response.headers
-    assert response.headers.get("vary", "").lower() != "cookie"
+    vary_tokens = {
+        token.strip().lower()
+        for token in response.headers.get("vary", "").split(",")
+        if token.strip()
+    }
+    assert "origin" in vary_tokens
+    assert "cookie" not in vary_tokens
     assert store.count_recoveries() == recoveries_before
 
 
@@ -184,13 +193,14 @@ def test_readyz_transition_is_never_stored_when_database_readiness_changes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = SQLiteStore(tmp_path / "readiness-transition.sqlite3")
-    readiness = iter((True, False))
-    monkeypatch.setattr(store, "is_ready", lambda: next(readiness))
+    readiness = {"value": True}
+    monkeypatch.setattr(store, "is_ready", lambda: readiness["value"])
 
     with TestClient(
         create_app(RuntimeSettings(live_ready=False), store=store)
     ) as client:
         ready = client.get("/readyz")
+        readiness["value"] = False
         unavailable = client.get("/readyz")
 
     assert ready.status_code == 200

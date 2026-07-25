@@ -13,7 +13,10 @@ def test_health_without_key_reports_truthful_stub_boundary(monkeypatch) -> None:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     client = TestClient(create_app())
 
-    response = client.get("/health")
+    response = client.get(
+        "/health",
+        headers={"Origin": "http://localhost:5173"},
+    )
 
     assert response.status_code == 200
     body = response.json()
@@ -23,7 +26,13 @@ def test_health_without_key_reports_truthful_stub_boundary(monkeypatch) -> None:
     assert body["providerBoundary"] == "demo_adapter_only"
     assert response.headers["cache-control"] == "no-store"
     assert "set-cookie" not in response.headers
-    assert response.headers.get("vary", "").lower() != "cookie"
+    vary_tokens = {
+        token.strip().lower()
+        for token in response.headers.get("vary", "").split(",")
+        if token.strip()
+    }
+    assert "origin" in vary_tokens
+    assert "cookie" not in vary_tokens
     assert "key" not in json.dumps(body).lower()
 
 
