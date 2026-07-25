@@ -5,7 +5,7 @@ import json
 import logging
 import sys
 from typing import NoReturn
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -16,7 +16,7 @@ from server.config import RuntimeSettings
 from server.controls import ClientIdentity, PublicDemoControls
 from server.logging import SafeLogFilter
 from server.main import create_app
-from server.models import ExecutionMode, ScenarioId
+from server.models import ExecutionMode, RecoverySnapshot, ScenarioId
 from server.store import SQLiteStore
 
 
@@ -44,17 +44,55 @@ def _new_demo_identity(controls: PublicDemoControls) -> ClientIdentity:
 
 
 class ExplodingOrchestrator:
+    def __init__(self) -> None:
+        self.recovery_ids: list[str] = []
+
     async def start(
         self,
         _scenario_id: str,
         *,
         execution_mode: ExecutionMode,
+        recovery_id: str | None = None,
         session_key: str | None = None,
     ) -> NoReturn:
         del session_key
+        assert execution_mode is ExecutionMode.SDK_STUB
+        assert recovery_id is not None
+        self.recovery_ids.append(recovery_id)
         raise RuntimeError(
             "sk-secret Authorization: Bearer private-token prompt=private-prompt "
             "state_json=serialized-state tool_args=private-args tool_results=private-result"
+        )
+
+
+class ExplodingResetStore(SQLiteStore):
+    def reset(self, _session_key: str) -> NoReturn:
+        raise RuntimeError(
+            "sk-secret Authorization: Bearer private-token prompt=private-prompt "
+            "state_json=serialized-state tool_args=private-args tool_results=private-result"
+        )
+
+
+class ReadyIntegrityExplodingStore(SQLiteStore):
+    explode_ready_lookup = False
+
+    def get_authoritative_recovery_creation(
+        self,
+        *,
+        recovery_id: str,
+        scenario_id: ScenarioId,
+        execution_mode: ExecutionMode,
+        session_key: str,
+    ) -> RecoverySnapshot:
+        if self.explode_ready_lookup:
+            raise RuntimeError(
+                "sk-ready-marker state_json=private-ready-integrity"
+            )
+        return super().get_authoritative_recovery_creation(
+            recovery_id=recovery_id,
+            scenario_id=scenario_id,
+            execution_mode=execution_mode,
+            session_key=session_key,
         )
 
 
@@ -82,20 +120,31 @@ class LiveStartExplodingOrchestrator:
         raise RuntimeError("sk-live-start-secret prompt=private-live-start")
 
 
+def _assert_creation_outcome_unknown(response: httpx.Response) -> None:
+    assert response.status_code == 409
+    assert response.headers["x-request-id"]
+    assert response.json() == {
+        "code": "creation_outcome_unknown",
+        "message": (
+            "The recovery start outcome could not be confirmed. "
+            "No replacement run was started."
+        ),
+        "requestId": response.headers["x-request-id"],
+    }
+
+
 def test_unhandled_exception_maps_to_generic_correlated_public_error(tmp_path, caplog) -> None:
     caplog.set_level(logging.ERROR)
     client = TestClient(
         create_app(
-            RuntimeSettings(live_ready=False),
-            store=SQLiteStore(tmp_path / "public-errors.sqlite3"),
-            orchestrator=ExplodingOrchestrator(),  # type: ignore[arg-type]
+            RuntimeSettings(live_ready=False, demo_reset_enabled=True),
+            store=ExplodingResetStore(tmp_path / "public-errors.sqlite3"),
         ),
         raise_server_exceptions=False,
     )
 
     response = client.post(
-        "/api/recoveries",
-        json={"scenarioId": "hotel", "executionMode": "sdk_stub"},
+        "/api/demo/reset",
         headers={"Authorization": "Bearer request-header-secret"},
         cookies={"backchannel_demo_session": "cookie-secret"},
     )
@@ -124,17 +173,13 @@ def test_unhandled_exception_maps_to_generic_correlated_public_error(tmp_path, c
 def test_unhandled_exception_is_sanitized_before_testclient_reraises(tmp_path) -> None:
     client = TestClient(
         create_app(
-            RuntimeSettings(live_ready=False),
-            store=SQLiteStore(tmp_path / "testclient-reraise.sqlite3"),
-            orchestrator=ExplodingOrchestrator(),  # type: ignore[arg-type]
+            RuntimeSettings(live_ready=False, demo_reset_enabled=True),
+            store=ExplodingResetStore(tmp_path / "testclient-reraise.sqlite3"),
         )
     )
 
     with pytest.raises(RuntimeError) as raised:
-        client.post(
-            "/api/recoveries",
-            json={"scenarioId": "hotel", "executionMode": "sdk_stub"},
-        )
+        client.post("/api/demo/reset")
 
     assert type(raised.value).__name__ == "SanitizedApplicationError"
     assert "sk-secret" not in str(raised.value)
@@ -226,18 +271,114 @@ def test_unexpected_live_start_error_logs_generated_recovery_correlation(
         raise_server_exceptions=False,
     )
 
+    client_request_id = "live-start-client-secret"
     response = client.post(
         "/api/recoveries",
-        json={"scenarioId": "hotel", "executionMode": "openai_live"},
+        json={
+            "scenarioId": "hotel",
+            "executionMode": "openai_live",
+            "clientRequestId": client_request_id,
+        },
     )
 
-    assert response.status_code == 500
+    _assert_creation_outcome_unknown(response)
     assert len(orchestrator.recovery_ids) == 1
     UUID(orchestrator.recovery_ids[0])
+    assert f"request_id={response.headers['x-request-id']}" in caplog.text
     assert f"recovery_id={orchestrator.recovery_ids[0]}" in caplog.text
     assert "recovery_id=none" not in caplog.text
-    assert "sk-live-start-secret" not in caplog.text
-    assert "private-live-start" not in caplog.text
+    combined = response.text + caplog.text
+    for secret in (
+        client_request_id,
+        "sk-live-start-secret",
+        "private-live-start",
+    ):
+        assert secret not in combined
+
+
+def test_unexpected_sdk_start_error_logs_generated_recovery_correlation(
+    tmp_path,
+    caplog,
+) -> None:
+    caplog.set_level(logging.ERROR)
+    orchestrator = ExplodingOrchestrator()
+    client = TestClient(
+        create_app(
+            RuntimeSettings(live_ready=False),
+            store=SQLiteStore(tmp_path / "sdk-start-correlation.sqlite3"),
+            orchestrator=orchestrator,  # type: ignore[arg-type]
+        ),
+        raise_server_exceptions=False,
+    )
+    client_request_id = "sdk-start-client-secret"
+
+    response = client.post(
+        "/api/recoveries",
+        json={
+            "scenarioId": "hotel",
+            "executionMode": "sdk_stub",
+            "clientRequestId": client_request_id,
+        },
+    )
+
+    _assert_creation_outcome_unknown(response)
+    assert len(orchestrator.recovery_ids) == 1
+    UUID(orchestrator.recovery_ids[0])
+    assert f"request_id={response.headers['x-request-id']}" in caplog.text
+    assert f"recovery_id={orchestrator.recovery_ids[0]}" in caplog.text
+    assert "recovery_id=none" not in caplog.text
+    combined = response.text + caplog.text
+    for secret in (
+        client_request_id,
+        "sk-secret",
+        "private-token",
+        "private-prompt",
+        "serialized-state",
+        "private-args",
+        "private-result",
+    ):
+        assert secret not in combined
+
+
+def test_ready_integrity_error_logs_reserved_recovery_correlation(
+    tmp_path,
+    caplog,
+) -> None:
+    caplog.set_level(logging.ERROR)
+    store = ReadyIntegrityExplodingStore(tmp_path / "ready-integrity.sqlite3")
+    client = TestClient(
+        create_app(
+            RuntimeSettings(live_ready=False),
+            store=store,
+        ),
+        raise_server_exceptions=False,
+    )
+    client_request_id = "ready-integrity-client-secret"
+    payload = {
+        "scenarioId": "hotel",
+        "executionMode": "sdk_stub",
+        "clientRequestId": client_request_id,
+    }
+    created = client.post("/api/recoveries", json=payload)
+    assert created.status_code == 201
+    recovery_id = created.json()["recoveryId"]
+    UUID(recovery_id)
+    caplog.clear()
+    store.explode_ready_lookup = True
+
+    response = client.post("/api/recoveries", json=payload)
+
+    _assert_creation_outcome_unknown(response)
+    assert f"request_id={response.headers['x-request-id']}" in caplog.text
+    assert f"recovery_id={recovery_id}" in caplog.text
+    assert "recovery_id=none" not in caplog.text
+    combined = response.text + caplog.text
+    for secret in (
+        client_request_id,
+        "sk-ready-marker",
+        "private-ready-integrity",
+    ):
+        assert secret not in combined
 
 
 @pytest.mark.parametrize(
@@ -338,6 +479,7 @@ def test_validation_error_never_echoes_oversized_or_extra_payload(tmp_path) -> N
         json={
             "scenarioId": "hotel",
             "executionMode": "sdk_stub",
+            "clientRequestId": uuid4().hex,
             "prompt": marker,
         },
     )

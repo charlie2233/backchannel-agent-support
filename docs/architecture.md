@@ -11,7 +11,7 @@ Browser (React/Vite)
   `-- long-lived GET /api/recoveries/{id}/events (SSE)
                          |
 FastAPI + public-demo controls + recovery orchestrator
-  |-- SQLite: recoveries, approvals, decisions, executions, events, receipts
+  |-- SQLite: creation claims, recoveries, approvals, decisions, executions, events, receipts
   |-- OpenAI Agents SDK: openai_live or deterministic sdk_stub
   `-- simulated hotel/quota demo adapters
 ```
@@ -39,21 +39,55 @@ message, while a terminal event still closes the source.
 
 A live-ready page load is deliberately idle. **Start live recovery** is the only UI action that
 creates an `openai_live` hotel run, and an in-flight guard coalesces rapid activation before
-React can re-render the disabled control. After any validated hotel snapshot, the browser may
-store only its canonical UUID in same-tab `sessionStorage`; the signed HttpOnly cookie remains
-the access credential. Reload performs the authorized snapshot GET before any fallback or new
-start. A valid snapshot restores its SSE, consent, and receipt lifecycle. Malformed local hints,
-generic 404s, and valid correlated wrong-scenario lookup results are terminal: they are cleared
-and leave the UI in a truthful no-run state. Network failures, non-404 responses, and malformed,
-contract-invalid, or miscorrelated success responses are indeterminate instead. They retain exactly
-the canonical UUID, trust no snapshot, and expose only **Retry saved recovery**; rapid activation
-coalesces to the same authorized GET, with no automatic POST, decision resume, or fallback. If that
-retry returns a generic 404 the hint is cleared; a valid hotel snapshot restores normally. If live
+React can re-render the disabled control. Same-tab `sessionStorage` may hold the canonical UUID
+of the last validated hotel snapshot and, while creation is unresolved, a pending tuple with
+the raw UUID `clientRequestId`, exact scenario, and exact execution mode. The tuple is cleared
+after a matching snapshot is accepted or the user explicitly abandons the conflicting start.
+It stores no cookie, keyed session correlation, serialized run state, approval or decision
+payload, or provenance claim; the signed HttpOnly cookie remains the access credential. The
+server never persists, logs, or responds with the raw token and stores only its session-scoped
+HMAC.
+
+Reload performs the authorized snapshot GET before any fallback or new start. A valid snapshot
+restores its SSE, consent, and receipt lifecycle. Malformed local hints, generic 404s, and valid
+correlated wrong-scenario lookup results are terminal: they are cleared and leave the UI in a
+truthful no-run state. Network failures, non-404 responses, and malformed, contract-invalid, or
+miscorrelated success responses are indeterminate instead. They retain exactly the canonical
+UUID, trust no snapshot, and expose only **Retry saved recovery**; rapid activation coalesces to
+the same authorized GET, with no automatic POST, decision resume, or fallback. If that retry
+returns a generic 404 the hint is cleared; a valid hotel snapshot restores normally. If live
 mode is unavailable after a terminal lookup, the no-run state offers explicit replay and SDK QA
-actions without automatically creating a replacement. While a lookup, retry, or explicit start is
-unresolved, the lifecycle remains neutral at **Awaiting server evidence** with no current step or
-execution-mode claim. React StrictMode can probe the idempotent GET effect twice in development, but
-it does not create a recovery; live creation remains explicitly initiated and one-POST.
+actions without automatically creating a replacement. While a lookup, retry, or explicit start
+is unresolved, the lifecycle remains neutral at **Awaiting server evidence** with no current
+step or execution-mode claim. React StrictMode can probe the idempotent GET effect twice in
+development, but it does not create a recovery; live creation remains explicitly initiated and
+one-POST.
+
+Every creation POST includes a bounded `clientRequestId`. The server derives a
+session-scoped HMAC from it and stores only that digest with the opaque session correlation,
+signed-cookie expiry, canonical scenario/mode fingerprint, and reserved recovery UUID. A
+short SQLite `BEGIN IMMEDIATE` elects one owner; the transaction ends before replay, SDK, or
+live work begins. Exact ready retries in the same surviving signed session return the
+authoritative stored snapshot without another orchestration, admission, or budget charge.
+Changed payloads fail with `idempotency_conflict`, active contenders receive
+`creation_pending`, and uncertain post-start outcomes fail closed as
+`creation_outcome_unknown` without launching a replacement.
+
+Ready and reconciled claims do not trust a recovery status alone. Replay retries pass through
+the canonical fixture/event/receipt integrity validator. Hotel SDK/live results require either
+valid pending or claimed consent evidence, or a terminal mode-matched receipt. SDK quota
+creation requires its canonical completed receipt and QA trace evidence. Missing or tampered
+evidence converts the claim to unknown.
+
+This is request deduplication inside one signed-session and identity-secret scope, not an
+exactly-once guarantee for an external provider outcome. Losing or expiring the cookie, or
+rotating the identity secret, creates a new scope that cannot recover the old request token
+binding. Claims expire with their signed cookie and are removed in bounded startup, periodic,
+and per-create cleanup. Explicit demo reset returns `409 reset_creation_pending` without
+mutation while the caller session has a reserved, started, or unknown creation claim; it may be
+retried after the owner resolves or the signed session expires. A ready claim is resettable.
+Successful reset deletes only the caller session's claims and access; another session's claim
+and access to a shared canonical replay remain intact.
 
 SQLite persists the pending Agents SDK state envelope, consent evidence, decision claim,
 provider execution record, event ledger, receipt, and opaque recovery-access association. A
@@ -184,9 +218,13 @@ sessions all receive the same generic 404. Canonical replay rows may be associat
 than one session only after each session explicitly starts that replay scenario.
 
 The reset endpoint is disabled by default and is intended only for disposable capture runs.
-When enabled, it detaches only the caller's associations, deletes recovery detail only when no
-other session retains access, and marks the caller's live admissions released. Cooldown history
-and the global usage ledger remain intact, so reset cannot restore live budget or bypass an IP
-or session cooldown. Retention cleanup cascades access rows with expired recovery detail while
-preserving aggregate usage. Secrets remain runtime inputs: they are not copied into the
-frontend build or container image.
+When enabled, the reset transaction first refuses without mutation if the caller owns a
+reserved, started, or unknown creation claim; this prevents reset from deleting the
+deduplication claim beneath an owner that can still finish. After that owner resolves the claim
+to ready, reset detaches only the caller's associations, deletes recovery detail only when no
+other session retains access, and marks the caller's live admissions released. An unresolved
+unknown claim remains fenced until owner reconciliation or signed-session expiry. Cooldown
+history and the global usage ledger remain intact, so reset cannot restore live budget or
+bypass an IP or session cooldown. Retention cleanup cascades access rows with expired recovery
+detail while preserving aggregate usage. Secrets remain runtime inputs: they are not copied
+into the frontend build or container image.

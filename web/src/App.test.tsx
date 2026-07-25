@@ -4,6 +4,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import App from "./App";
 
+const CLIENT_REQUEST_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
 afterEach(() => {
   cleanup();
   window.sessionStorage.clear();
@@ -157,7 +160,12 @@ describe("Backchannel console", () => {
     expect(screen.queryByText("Old terminal refresh must not win.")).not.toBeInTheDocument();
   }, 15_000);
 
-  it("clears a stale replay failure when an intentional SDK run succeeds", async () => {
+  it("retains one replay intent after an ambiguous rejection and retries it explicitly", async () => {
+    const requestBodies: Array<{
+      clientRequestId: string;
+      scenarioId: string;
+      executionMode: string;
+    }> = [];
     vi.stubGlobal(
       "fetch",
       vi.fn().mockImplementation((input: string | URL | Request, init?: RequestInit) => {
@@ -175,29 +183,14 @@ describe("Backchannel console", () => {
           );
         }
         if (url === "/api/recoveries") {
-          const { executionMode } = JSON.parse(String(init?.body)) as { executionMode: string };
-          if (executionMode === "replay_fixture") {
-            return Promise.resolve(new Response(null, { status: 503 }));
-          }
-          return Promise.resolve(
-            new Response(
-              JSON.stringify({
-                recoveryId: "bbbbbbbb-2222-4333-8444-555555555555",
-                scenarioId: "hotel",
-                executionMode: "sdk_stub",
-                modelIds: [],
-                rootTraceId: "qa_trace_0123456789abcdef0123456789abcdef",
-                status: "in_progress",
-                currentStep: 2,
-                currentStepSummary: "SDK run recovered the workspace.",
-                createdAt: "2026-07-19T12:00:00Z",
-                updatedAt: "2026-07-19T12:00:01Z",
-                claimedDecision: null,
-                pendingApproval: null,
-              }),
-              { status: 201, headers: { "Content-Type": "application/json" } },
-            ),
+          requestBodies.push(
+            JSON.parse(String(init?.body)) as {
+              clientRequestId: string;
+              scenarioId: string;
+              executionMode: string;
+            },
           );
+          return Promise.resolve(new Response(null, { status: 503 }));
         }
         throw new Error(`Unexpected request: ${url}`);
       }),
@@ -207,13 +200,19 @@ describe("Backchannel console", () => {
     expect(
       await screen.findByText("The replay fixture could not be started. You can retry explicitly."),
     ).toBeVisible();
-
-    fireEvent.click(screen.getByRole("button", { name: "Run SDK QA trace" }));
-
-    expect((await screen.findAllByText("SDK run recovered the workspace."))[0]).toBeVisible();
+    expect(requestBodies).toHaveLength(1);
+    expect(requestBodies[0]).toMatchObject({
+      scenarioId: "hotel",
+      executionMode: "replay_fixture",
+    });
     expect(
-      screen.queryByText("The replay fixture could not be started. You can retry explicitly."),
+      screen.queryByRole("button", { name: "Run SDK QA trace" }),
     ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry recovery start" }));
+
+    await waitFor(() => expect(requestBodies).toHaveLength(2));
+    expect(requestBodies[1]).toEqual(requestBodies[0]);
   });
 
   it("keeps recovery B receipt visible when recovery A receipt resolves later", async () => {
@@ -351,8 +350,9 @@ describe("Backchannel console", () => {
     expect(screen.queryByText("Old A replay receipt.")).not.toBeInTheDocument();
   });
 
-  it("keeps the intentional SDK QA run when the automatic replay resolves late", async () => {
+  it("keeps an unresolved automatic replay singular until its snapshot arrives", async () => {
     let settleReplay: ((response: Response) => void) | undefined;
+    const requestModes: string[] = [];
     vi.stubGlobal(
       "fetch",
       vi.fn().mockImplementation((input: string | URL | Request, init?: RequestInit) => {
@@ -371,6 +371,7 @@ describe("Backchannel console", () => {
         }
         if (url === "/api/recoveries") {
           const body = JSON.parse(String(init?.body)) as { executionMode: string };
+          requestModes.push(body.executionMode);
           if (body.executionMode === "replay_fixture") {
             return new Promise<Response>((resolve) => {
               settleReplay = resolve;
@@ -419,14 +420,14 @@ describe("Backchannel console", () => {
     );
 
     render(<App />);
-    const sdkAction = await screen.findByRole(
-      "button",
-      { name: "Run SDK QA trace" },
-      { timeout: 3_000 },
-    );
-    fireEvent.click(sdkAction);
-    expect((await screen.findAllByText("SDK consent is authoritative."))[0]).toBeVisible();
-    expect(screen.getByText(/viewing the deterministic SDK QA trace/i)).toBeVisible();
+    await waitFor(() => expect(settleReplay).toBeTypeOf("function"));
+    expect(requestModes).toEqual(["replay_fixture"]);
+    expect(
+      screen.queryByRole("button", { name: "Run SDK QA trace" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Retrying recovery start…" }),
+    ).toBeDisabled();
 
     settleReplay?.(
       new Response(
@@ -438,7 +439,7 @@ describe("Backchannel console", () => {
           rootTraceId: null,
           status: "in_progress",
           currentStep: 1,
-          currentStepSummary: "Late replay must not replace SDK consent.",
+          currentStepSummary: "Delayed replay snapshot accepted once.",
           createdAt: "2026-07-19T12:00:00Z",
           updatedAt: "2026-07-19T12:00:02Z",
           claimedDecision: null,
@@ -449,13 +450,20 @@ describe("Backchannel console", () => {
     );
 
     await waitFor(() =>
-      expect(screen.getAllByText("SDK consent is authoritative.")[0]).toBeVisible(),
+      expect(
+        screen.getAllByText("Delayed replay snapshot accepted once.")[0],
+      ).toBeVisible(),
     );
-    expect(screen.queryAllByText("Late replay must not replace SDK consent.")).toHaveLength(0);
+    expect(requestModes).toEqual(["replay_fixture"]);
+    expect(screen.getByText("Replay fixture")).toBeVisible();
   });
 
   it("runs API quota only through the zero-approval SDK stub and renders its proof", async () => {
-    const requests: Array<{ scenarioId: string; executionMode: string }> = [];
+    const requests: Array<{
+      clientRequestId: string;
+      scenarioId: string;
+      executionMode: string;
+    }> = [];
     vi.stubGlobal(
       "fetch",
       vi.fn().mockImplementation((input: string | URL | Request, init?: RequestInit) => {
@@ -474,6 +482,7 @@ describe("Backchannel console", () => {
         }
         if (url === "/api/recoveries") {
           const request = JSON.parse(String(init?.body)) as {
+            clientRequestId: string;
             scenarioId: string;
             executionMode: string;
           };
@@ -525,9 +534,18 @@ describe("Backchannel console", () => {
       ),
     ).toBeVisible();
     expect(requests).toEqual([
-      { scenarioId: "hotel", executionMode: "openai_live" },
-      { scenarioId: "api-quota", executionMode: "sdk_stub" },
+      {
+        clientRequestId: expect.stringMatching(CLIENT_REQUEST_ID_PATTERN),
+        scenarioId: "hotel",
+        executionMode: "openai_live",
+      },
+      {
+        clientRequestId: expect.stringMatching(CLIENT_REQUEST_ID_PATTERN),
+        scenarioId: "api-quota",
+        executionMode: "sdk_stub",
+      },
     ]);
+    expect(requests[0]?.clientRequestId).not.toBe(requests[1]?.clientRequestId);
     const lifecycle = screen.getByRole("list", { name: "Recovery lifecycle" });
     expect(within(lifecycle).getByText("Provider proved a 1000-unit baseline ceiling.")).toBeVisible();
     expect(
@@ -550,7 +568,11 @@ describe("Backchannel console", () => {
   });
 
   it("keeps the automatic hotel replay fallback out of the API quota workspace", async () => {
-    const requests: Array<{ scenarioId: string; executionMode: string }> = [];
+    const requests: Array<{
+      clientRequestId: string;
+      scenarioId: string;
+      executionMode: string;
+    }> = [];
     vi.stubGlobal(
       "fetch",
       vi.fn().mockImplementation((input: string | URL | Request, init?: RequestInit) => {
@@ -569,6 +591,7 @@ describe("Backchannel console", () => {
         }
         if (url === "/api/recoveries") {
           const request = JSON.parse(String(init?.body)) as {
+            clientRequestId: string;
             scenarioId: string;
             executionMode: string;
           };
@@ -614,9 +637,18 @@ describe("Backchannel console", () => {
     expect(screen.queryByText(/replay fixture is starting automatically/i)).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Run replay fixture" })).not.toBeInTheDocument();
     expect(requests).toEqual([
-      { scenarioId: "hotel", executionMode: "replay_fixture" },
-      { scenarioId: "api-quota", executionMode: "sdk_stub" },
+      {
+        clientRequestId: expect.stringMatching(CLIENT_REQUEST_ID_PATTERN),
+        scenarioId: "hotel",
+        executionMode: "replay_fixture",
+      },
+      {
+        clientRequestId: expect.stringMatching(CLIENT_REQUEST_ID_PATTERN),
+        scenarioId: "api-quota",
+        executionMode: "sdk_stub",
+      },
     ]);
+    expect(requests[0]?.clientRequestId).not.toBe(requests[1]?.clientRequestId);
   });
 
   it("coalesces rapid quota clicks, waits for server provenance on failure, and permits retry", async () => {
@@ -1044,7 +1076,25 @@ describe("Backchannel console", () => {
               executionMode: string;
             };
             if (executionMode === "replay_fixture") {
-              return Promise.resolve(new Response(null, { status: 503 }));
+              return Promise.resolve(
+                new Response(
+                  JSON.stringify({
+                    recoveryId: "aaaaaaaa-2222-4333-8444-555555555555",
+                    scenarioId: "hotel",
+                    executionMode: "replay_fixture",
+                    modelIds: [],
+                    rootTraceId: null,
+                    status: "in_progress",
+                    currentStep: 1,
+                    currentStepSummary: "Replay fixture prepared the workspace.",
+                    createdAt: "2026-07-18T20:00:00Z",
+                    updatedAt: "2026-07-18T20:00:01Z",
+                    claimedDecision: null,
+                    pendingApproval: null,
+                  }),
+                  { status: 201, headers: { "Content-Type": "application/json" } },
+                ),
+              );
             }
             return Promise.resolve(
               new Response(

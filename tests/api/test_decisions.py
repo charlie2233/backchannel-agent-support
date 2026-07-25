@@ -55,7 +55,11 @@ def sdk_client(tmp_path):
 def create_sdk_recovery(client: TestClient) -> dict[str, object]:
     response = client.post(
         "/api/recoveries",
-        json={"scenarioId": "hotel", "executionMode": "sdk_stub"},
+        json={
+            "scenarioId": "hotel",
+            "executionMode": "sdk_stub",
+            "clientRequestId": uuid4().hex,
+        },
     )
     assert response.status_code == 201
     snapshot = response.json()
@@ -464,7 +468,11 @@ def test_openai_live_creation_remains_rejected(sdk_client) -> None:
 
     response = client.post(
         "/api/recoveries",
-        json={"scenarioId": "hotel", "executionMode": "openai_live"},
+        json={
+            "scenarioId": "hotel",
+            "executionMode": "openai_live",
+            "clientRequestId": uuid4().hex,
+        },
     )
 
     assert response.status_code == 422

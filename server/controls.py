@@ -126,6 +126,7 @@ class SanitizedApplicationError(RuntimeError):
 class ClientIdentity:
     ip_key: str
     session_key: str
+    session_expires_at: datetime
     new_session_cookie: str | None
 
 
@@ -161,6 +162,19 @@ class PublicDemoControls:
             hashlib.sha256,
         ).hexdigest()
 
+    def recovery_creation_request_key(
+        self,
+        *,
+        session_key: str,
+        client_request_id: str,
+    ) -> str:
+        """Derive a session-scoped durable key without retaining the raw token."""
+
+        return self._correlation_key(
+            "recovery-creation",
+            f"{session_key}:{client_request_id}",
+        )
+
     def _session_cookie_signature(self, payload: str) -> str:
         return hmac.new(
             self._identity_secret,
@@ -168,19 +182,25 @@ class PublicDemoControls:
             hashlib.sha256,
         ).hexdigest()
 
-    def _issue_session_cookie(self, current: datetime) -> tuple[str, str]:
+    def _issue_session_cookie(
+        self,
+        current: datetime,
+    ) -> tuple[str, str, datetime]:
         nonce = secrets.token_urlsafe(32)
-        expires_at = int(current.timestamp()) + self._settings.demo_session_lifetime_seconds
-        payload = f"{_SESSION_COOKIE_VERSION}.{expires_at}.{nonce}"
+        expires_at_timestamp = (
+            int(current.timestamp()) + self._settings.demo_session_lifetime_seconds
+        )
+        payload = f"{_SESSION_COOKIE_VERSION}.{expires_at_timestamp}.{nonce}"
         signature = self._session_cookie_signature(payload)
-        return f"{payload}.{signature}", nonce
+        expires_at = datetime.fromtimestamp(expires_at_timestamp, tz=UTC)
+        return f"{payload}.{signature}", nonce, expires_at
 
     def _verified_session_nonce(
         self,
         raw_cookie: str,
         *,
         current: datetime,
-    ) -> str | None:
+    ) -> tuple[str, datetime] | None:
         if not 1 <= len(raw_cookie) <= _SESSION_COOKIE_MAX_LENGTH:
             return None
         parts = raw_cookie.split(".")
@@ -212,7 +232,7 @@ class PublicDemoControls:
         remaining_lifetime = expires_at - now_timestamp
         if not 0 < remaining_lifetime <= self._settings.demo_session_lifetime_seconds:
             return None
-        return nonce
+        return nonce, datetime.fromtimestamp(expires_at, tz=UTC)
 
     def _client_ip(self, request: Request) -> str:
         direct = request.client.host if request.client is not None else "unknown"
@@ -252,17 +272,24 @@ class PublicDemoControls:
         current = now or datetime.now(UTC)
         raw_cookie = request.cookies.get(self._settings.demo_session_cookie_name)
         new_session_cookie: str | None = None
-        session_nonce = (
+        verified_session = (
             self._verified_session_nonce(raw_cookie, current=current)
             if raw_cookie is not None
             else None
         )
-        if session_nonce is None:
-            new_session_cookie, session_nonce = self._issue_session_cookie(current)
+        if verified_session is None:
+            (
+                new_session_cookie,
+                session_nonce,
+                session_expires_at,
+            ) = self._issue_session_cookie(current)
+        else:
+            session_nonce, session_expires_at = verified_session
 
         return ClientIdentity(
             ip_key=self._correlation_key("ip", self._client_ip(request)),
             session_key=self._correlation_key("session", session_nonce),
+            session_expires_at=session_expires_at,
             new_session_cookie=new_session_cookie,
         )
 

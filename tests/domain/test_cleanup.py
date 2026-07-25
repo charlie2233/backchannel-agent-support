@@ -4,11 +4,15 @@ import asyncio
 import sqlite3
 import time
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 
-from server.cleanup import cleanup_terminal_recoveries
+from server.cleanup import (
+    cleanup_expired_recovery_creations,
+    cleanup_terminal_recoveries,
+)
 from server.config import RuntimeSettings
 from server.main import create_app
 from server.models import ExecutionMode, RecoveryStatus, ScenarioId
@@ -77,6 +81,27 @@ def _create_recovery(
             event_type="recovery.completed",
             event_data={"summary": "Terminal cleanup fixture."},
         )
+
+
+def _create_scoped_creation_claim(
+    store: SQLiteStore,
+    *,
+    request_key: str,
+    session_key: str,
+    created_at: datetime,
+    expires_at: datetime,
+) -> None:
+    claim = store.claim_recovery_creation(
+        request_key=request_key,
+        request_fingerprint="f" * 64,
+        scenario_id=ScenarioId.HOTEL,
+        execution_mode=ExecutionMode.SDK_STUB,
+        reserved_recovery_id=str(uuid4()),
+        session_key=session_key,
+        expires_at=expires_at,
+        now=created_at,
+    )
+    assert claim.disposition == "owner"
 
 
 def test_cleanup_deletes_only_expired_terminal_rows_and_preserves_usage(tmp_path) -> None:
@@ -263,6 +288,68 @@ def test_lifespan_periodically_removes_idle_expired_terminal_detail(tmp_path) ->
         ).fetchall() == [("live_demo_budget_unit", 1)]
 
 
+def test_creation_claim_cleanup_runs_at_startup_and_on_periodic_cadence(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "periodic-creation-claims.sqlite3"
+    store = SQLiteStore(database_path)
+    now = datetime.now(UTC)
+    _create_scoped_creation_claim(
+        store,
+        request_key="a" * 64,
+        session_key="1" * 64,
+        created_at=now - timedelta(hours=2),
+        expires_at=now - timedelta(hours=1),
+    )
+    _create_scoped_creation_claim(
+        store,
+        request_key="b" * 64,
+        session_key="2" * 64,
+        created_at=now,
+        expires_at=now + timedelta(hours=1),
+    )
+    settings = RuntimeSettings(
+        live_ready=False,
+        terminal_recovery_ttl_seconds=3_600,
+        terminal_cleanup_interval_seconds=1,
+    )
+
+    with TestClient(create_app(settings, store=store)):
+        with sqlite3.connect(database_path) as connection:
+            assert connection.execute(
+                "SELECT request_key FROM recovery_creations"
+            ).fetchall() == [("b" * 64,)]
+            connection.execute(
+                "UPDATE recovery_creations SET expires_at = ?",
+                ((datetime.now(UTC) - timedelta(seconds=1)).isoformat(),),
+            )
+        deadline = time.monotonic() + 3
+        remaining = 1
+        while remaining and time.monotonic() < deadline:
+            time.sleep(0.05)
+            with sqlite3.connect(database_path) as connection:
+                remaining = connection.execute(
+                    "SELECT COUNT(*) FROM recovery_creations"
+                ).fetchone()[0]
+
+    assert remaining == 0
+    store.close()
+
+
+def test_creation_claim_cleanup_wrapper_validates_bounds_and_utc(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "creation-claim-cleanup-bounds.sqlite3")
+
+    with pytest.raises(ValueError, match="batch_size"):
+        cleanup_expired_recovery_creations(store, batch_size=0)
+    with pytest.raises(ValueError, match="timezone-aware UTC"):
+        cleanup_expired_recovery_creations(
+            store,
+            now=datetime(2026, 7, 24),
+        )
+
+    store.close()
+
+
 def test_lifespan_expires_untouched_consent_at_startup_and_on_cleanup_cadence(
     tmp_path,
 ) -> None:
@@ -285,7 +372,11 @@ def test_lifespan_expires_untouched_consent_at_startup_and_on_cleanup_cadence(
 
         response = client.post(
             "/api/recoveries",
-            json={"scenarioId": "hotel", "executionMode": "sdk_stub"},
+            json={
+                "scenarioId": "hotel",
+                "executionMode": "sdk_stub",
+                "clientRequestId": uuid4().hex,
+            },
         )
         assert response.status_code == 201
         periodic_recovery_id = str(response.json()["recoveryId"])
@@ -320,7 +411,11 @@ def test_create_runs_expiry_before_retention_without_deleting_new_terminal_evide
     with TestClient(create_app(settings, store=store)) as client:
         first = client.post(
             "/api/recoveries",
-            json={"scenarioId": "hotel", "executionMode": "sdk_stub"},
+            json={
+                "scenarioId": "hotel",
+                "executionMode": "sdk_stub",
+                "clientRequestId": uuid4().hex,
+            },
         )
         assert first.status_code == 201
         expired_recovery_id = str(first.json()["recoveryId"])
@@ -328,7 +423,11 @@ def test_create_runs_expiry_before_retention_without_deleting_new_terminal_evide
 
         second = client.post(
             "/api/recoveries",
-            json={"scenarioId": "hotel", "executionMode": "sdk_stub"},
+            json={
+                "scenarioId": "hotel",
+                "executionMode": "sdk_stub",
+                "clientRequestId": uuid4().hex,
+            },
         )
 
         assert second.status_code == 201

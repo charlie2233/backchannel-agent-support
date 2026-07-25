@@ -213,7 +213,11 @@ def _create_restart_fixture(client: SmokeClient) -> RestartFixture:
 
     replay_snapshot = client.post(
         "/api/recoveries",
-        {"scenarioId": "api-quota", "executionMode": "replay_fixture"},
+        {
+            "scenarioId": "api-quota",
+            "executionMode": "replay_fixture",
+            "clientRequestId": f"restart-smoke-{secrets.token_hex(16)}",
+        },
     ).json()
     replay_id = _recovery_id(replay_snapshot, status="completed")
     _require(

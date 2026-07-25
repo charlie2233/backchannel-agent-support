@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Event, RLock
 from typing import Any, Literal, cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from pydantic import JsonValue
 
@@ -43,6 +43,7 @@ from server.policy import (
 from server.trace_ids import is_valid_live_trace_id, is_valid_qa_trace_id
 
 MAX_STORE_EXPIRY_BATCH_SIZE = 1_000
+RECOVERY_CREATION_STALE_AFTER = timedelta(minutes=5)
 EXPIRATION_SUMMARY = (
     "Consent expired without a decision; no provider dispatch was authorized."
 )
@@ -218,6 +219,26 @@ ON live_admissions(ip_key, admitted_at);
 CREATE INDEX IF NOT EXISTS live_admissions_session_time_idx
 ON live_admissions(session_key, admitted_at);
 
+CREATE TABLE IF NOT EXISTS recovery_creations (
+    request_key TEXT PRIMARY KEY,
+    request_fingerprint TEXT NOT NULL,
+    session_key TEXT NOT NULL CHECK (length(session_key) = 64),
+    scenario_id TEXT NOT NULL CHECK (scenario_id IN ('hotel', 'api-quota')),
+    execution_mode TEXT NOT NULL CHECK (
+        execution_mode IN ('openai_live', 'sdk_stub', 'replay_fixture')
+    ),
+    recovery_id TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (
+        status IN ('reserved', 'started', 'ready', 'unknown')
+    ),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS recovery_creations_status_updated_idx
+ON recovery_creations(status, updated_at);
+
 CREATE TABLE IF NOT EXISTS readiness_probe (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     generation INTEGER NOT NULL CHECK (generation IN (0, 1))
@@ -241,6 +262,29 @@ class ReplayIntegrityError(RuntimeError):
 
 class ExecutionConflictError(ValueError):
     """Raised when a durable idempotency key is reused for different terms."""
+
+
+class ResetCreationPendingError(RuntimeError):
+    """Raised when reset would invalidate this session's unresolved start owner."""
+
+
+RecoveryCreationDisposition = Literal[
+    "owner",
+    "ready",
+    "pending",
+    "unknown",
+    "conflict",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryCreationClaim:
+    """One session-scoped durable ownership decision for recovery creation."""
+
+    disposition: RecoveryCreationDisposition
+    recovery_id: str
+    scenario_id: ScenarioId
+    execution_mode: ExecutionMode
 
 
 class ApprovalDecisionError(ValueError):
@@ -407,6 +451,7 @@ class SQLiteStore:
             self._migrate_task8_usage_ledger(connection)
             self._migrate_stateless_demo_sessions(connection)
             self._migrate_recovery_access(connection)
+            self._migrate_recovery_creations(connection)
             event_columns = {
                 cast(str, row["name"])
                 for row in connection.execute("PRAGMA table_info(events)").fetchall()
@@ -438,6 +483,49 @@ class SQLiteStore:
         """Clear legacy server-side sessions now replaced by signed cookies."""
 
         connection.execute("DELETE FROM demo_sessions")
+
+    @staticmethod
+    def _migrate_recovery_creations(connection: sqlite3.Connection) -> None:
+        """Fail closed when upgrading pre-session-bound creation claims."""
+
+        columns = {
+            cast(str, row["name"])
+            for row in connection.execute(
+                "PRAGMA table_info(recovery_creations)"
+            ).fetchall()
+        }
+        legacy_expiry = (datetime.now(UTC) + timedelta(days=7)).isoformat()
+        if "session_key" not in columns:
+            connection.execute(
+                "ALTER TABLE recovery_creations ADD COLUMN session_key TEXT"
+            )
+            connection.execute(
+                """
+                UPDATE recovery_creations
+                SET session_key = request_key, status = 'unknown'
+                WHERE session_key IS NULL
+                """
+            )
+        if "expires_at" not in columns:
+            connection.execute(
+                "ALTER TABLE recovery_creations ADD COLUMN expires_at TEXT"
+            )
+            connection.execute(
+                """
+                UPDATE recovery_creations
+                SET expires_at = ?, status = 'unknown'
+                WHERE expires_at IS NULL
+                """,
+                (legacy_expiry,),
+            )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS recovery_creations_session_idx "
+            "ON recovery_creations(session_key)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS recovery_creations_expiry_idx "
+            "ON recovery_creations(expires_at)"
+        )
 
     @staticmethod
     def _migrate_recovery_access(connection: sqlite3.Connection) -> None:
@@ -1586,6 +1674,649 @@ class SQLiteStore:
             agent_graph_version=cast(str | None, row["agent_graph_version"]),
             definition_digest=cast(str | None, row["definition_digest"]),
         )
+
+    @staticmethod
+    def _require_creation_digest(value: str, *, name: str) -> None:
+        if len(value) != 64 or any(
+            character not in "0123456789abcdef" for character in value
+        ):
+            raise ValueError(f"{name} must be a lowercase SHA-256 digest")
+
+    @staticmethod
+    def _require_creation_recovery_id(recovery_id: str) -> None:
+        try:
+            canonical = str(UUID(recovery_id))
+        except ValueError as error:
+            raise ValueError("Creation recovery ID must be a UUID") from error
+        if canonical != recovery_id:
+            raise ValueError("Creation recovery ID must use canonical UUID text")
+
+    @staticmethod
+    def _require_creation_time(value: datetime, *, name: str) -> None:
+        if value.tzinfo is None or value.utcoffset() != timedelta(0):
+            raise ValueError(f"{name} must be timezone-aware UTC")
+
+    @staticmethod
+    def _creation_receipt_matches(
+        row: sqlite3.Row,
+        receipt: RecoveryReceipt,
+        *,
+        scenario_id: ScenarioId,
+        execution_mode: ExecutionMode,
+    ) -> bool:
+        try:
+            stored_status = RecoveryStatus(cast(str, row["status"]))
+            stored_model_ids = json.loads(cast(str, row["model_ids_json"]))
+        except (TypeError, ValueError):
+            return False
+        if (
+            not stored_status.terminal
+            or receipt.recovery_id != cast(str, row["id"])
+            or receipt.execution_mode is not execution_mode
+            or receipt.status != stored_status.value
+            or receipt.model_ids != stored_model_ids
+            or receipt.root_trace_id != cast(str | None, row["root_trace_id"])
+            or receipt.model_call != bool(cast(int, row["model_call"]))
+            or receipt.sdk_version != cast(str | None, row["sdk_version"])
+            or receipt.protocol_version
+            != cast(str | None, row["protocol_version"])
+            or receipt.agent_graph_version
+            != cast(str | None, row["agent_graph_version"])
+            or receipt.definition_digest
+            != cast(str | None, row["definition_digest"])
+        ):
+            return False
+        if scenario_id is ScenarioId.API_QUOTA:
+            return (
+                execution_mode is ExecutionMode.SDK_STUB
+                and stored_status is RecoveryStatus.COMPLETED
+                and receipt.approval_count == 0
+                and receipt.has_canonical_quota_evidence
+            )
+        if scenario_id is not ScenarioId.HOTEL:
+            return False
+        return (
+            stored_status is not RecoveryStatus.COMPLETED
+            or receipt.approval_count == 1
+        )
+
+    def _creation_pending_matches_recovery(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        row: sqlite3.Row,
+        recovery_id: str,
+        pending_view: PendingApprovalView | None,
+        claimed_view: ClaimedDecisionView | None,
+    ) -> bool:
+        if (pending_view is None) == (claimed_view is None):
+            return False
+        pending_row = connection.execute(
+            "SELECT * FROM pending_approvals WHERE recovery_id = ?",
+            (recovery_id,),
+        ).fetchone()
+        if pending_row is None:
+            return False
+        try:
+            pending = self._pending_approval_from_row(pending_row)
+            stored_model_ids = json.loads(cast(str, row["model_ids_json"]))
+        except (TypeError, ValueError):
+            return False
+        return (
+            pending.execution_mode
+            is ExecutionMode(cast(str, row["execution_mode"]))
+            and list(pending.model_ids) == stored_model_ids
+            and pending.root_trace_id == cast(str | None, row["root_trace_id"])
+            and pending.sdk_version == cast(str | None, row["sdk_version"])
+            and pending.protocol_version
+            == cast(str | None, row["protocol_version"])
+            and pending.agent_graph_version
+            == cast(str | None, row["agent_graph_version"])
+            and pending.definition_digest
+            == cast(str | None, row["definition_digest"])
+        )
+
+    def _creation_authoritative_snapshot(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        recovery_id: str,
+        scenario_id: ScenarioId,
+        execution_mode: ExecutionMode,
+        session_key: str,
+    ) -> RecoverySnapshot | None:
+        row = connection.execute(
+            """
+            SELECT recoveries.*
+            FROM recoveries
+            WHERE recoveries.id = ?
+              AND recoveries.scenario_id = ?
+              AND recoveries.execution_mode = ?
+              AND EXISTS (
+                  SELECT 1
+                  FROM recovery_access
+                  WHERE recovery_access.recovery_id = recoveries.id
+                    AND recovery_access.session_key = ?
+              )
+            """,
+            (
+                recovery_id,
+                scenario_id.value,
+                execution_mode.value,
+                session_key,
+            ),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            if execution_mode is ExecutionMode.REPLAY_FIXTURE:
+                return self._recovery_from_row(row)
+            recovery_status = RecoveryStatus(cast(str, row["status"]))
+            if (
+                scenario_id is ScenarioId.HOTEL
+                and recovery_status is RecoveryStatus.PENDING_APPROVAL
+            ):
+                pending_view = self._public_pending_view(connection, recovery_id)
+                claimed_view = self._public_claimed_decision_view(
+                    connection,
+                    recovery_id,
+                )
+                if not self._creation_pending_matches_recovery(
+                    connection,
+                    row=row,
+                    recovery_id=recovery_id,
+                    pending_view=pending_view,
+                    claimed_view=claimed_view,
+                ):
+                    return None
+                return self._recovery_from_row(
+                    row,
+                    pending_approval=pending_view,
+                    claimed_decision=claimed_view,
+                )
+            if not recovery_status.terminal:
+                return None
+            receipt_row = connection.execute(
+                "SELECT receipt_json FROM receipts WHERE recovery_id = ?",
+                (recovery_id,),
+            ).fetchone()
+            if receipt_row is None:
+                return None
+            receipt = RecoveryReceipt.model_validate_json(
+                cast(str, receipt_row["receipt_json"])
+            )
+            if not self._creation_receipt_matches(
+                row,
+                receipt,
+                scenario_id=scenario_id,
+                execution_mode=execution_mode,
+            ):
+                return None
+            return self._recovery_from_row(row)
+        except (TypeError, ValueError):
+            return None
+
+    def get_authoritative_recovery_creation(
+        self,
+        *,
+        recovery_id: str,
+        scenario_id: ScenarioId,
+        execution_mode: ExecutionMode,
+        session_key: str,
+    ) -> RecoverySnapshot:
+        """Load one mode-valid result rather than trusting a bare recovery row."""
+
+        self._require_creation_recovery_id(recovery_id)
+        self._require_opaque_session_key(session_key)
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN")
+            snapshot = self._creation_authoritative_snapshot(
+                connection,
+                recovery_id=recovery_id,
+                scenario_id=scenario_id,
+                execution_mode=execution_mode,
+                session_key=session_key,
+            )
+        if snapshot is None:
+            raise RecoveryNotFoundError(
+                "Recovery creation has no authoritative outcome evidence"
+            )
+        return snapshot
+
+    @staticmethod
+    def _creation_claim_from_row(
+        row: sqlite3.Row,
+        *,
+        disposition: RecoveryCreationDisposition,
+    ) -> RecoveryCreationClaim:
+        return RecoveryCreationClaim(
+            disposition=disposition,
+            recovery_id=cast(str, row["recovery_id"]),
+            scenario_id=ScenarioId(cast(str, row["scenario_id"])),
+            execution_mode=ExecutionMode(cast(str, row["execution_mode"])),
+        )
+
+    def claim_recovery_creation(
+        self,
+        *,
+        request_key: str,
+        request_fingerprint: str,
+        scenario_id: ScenarioId,
+        execution_mode: ExecutionMode,
+        reserved_recovery_id: str,
+        session_key: str,
+        expires_at: datetime,
+        stale_after: timedelta = RECOVERY_CREATION_STALE_AFTER,
+        now: datetime | None = None,
+    ) -> RecoveryCreationClaim:
+        """Claim one durable start without holding the transaction across work."""
+
+        self._require_creation_digest(request_key, name="request_key")
+        self._require_creation_digest(
+            request_fingerprint,
+            name="request_fingerprint",
+        )
+        self._require_creation_recovery_id(reserved_recovery_id)
+        self._require_opaque_session_key(session_key)
+        self._require_creation_time(expires_at, name="expires_at")
+        if stale_after <= timedelta(0):
+            raise ValueError("Creation claim stale interval must be positive")
+        current = now or self._now()
+        self._require_creation_time(current, name="now")
+        if expires_at <= current:
+            raise ValueError("Creation claim expiry must follow its creation time")
+        current_text = current.isoformat()
+        expires_at_text = expires_at.isoformat()
+
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT *
+                FROM recovery_creations
+                WHERE request_key = ?
+                """,
+                (request_key,),
+            ).fetchone()
+            if row is None:
+                connection.execute(
+                    """
+                    INSERT INTO recovery_creations (
+                        request_key, request_fingerprint, session_key, scenario_id,
+                        execution_mode, recovery_id, status,
+                        created_at, updated_at, expires_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'reserved', ?, ?, ?)
+                    """,
+                    (
+                        request_key,
+                        request_fingerprint,
+                        session_key,
+                        scenario_id.value,
+                        execution_mode.value,
+                        reserved_recovery_id,
+                        current_text,
+                        current_text,
+                        expires_at_text,
+                    ),
+                )
+                return RecoveryCreationClaim(
+                    disposition="owner",
+                    recovery_id=reserved_recovery_id,
+                    scenario_id=scenario_id,
+                    execution_mode=execution_mode,
+                )
+
+            if (
+                cast(str | None, row["session_key"]) != session_key
+                or cast(str | None, row["expires_at"]) != expires_at_text
+            ):
+                connection.execute(
+                    """
+                    UPDATE recovery_creations
+                    SET status = 'unknown', updated_at = ?
+                    WHERE request_key = ?
+                    """,
+                    (current_text, request_key),
+                )
+                return self._creation_claim_from_row(
+                    row,
+                    disposition="unknown",
+                )
+
+            if (
+                cast(str, row["request_fingerprint"]) != request_fingerprint
+                or cast(str, row["scenario_id"]) != scenario_id.value
+                or cast(str, row["execution_mode"]) != execution_mode.value
+            ):
+                return self._creation_claim_from_row(
+                    row,
+                    disposition="conflict",
+                )
+
+            stored_recovery_id = cast(str, row["recovery_id"])
+            stored_status = cast(str, row["status"])
+            if stored_status == "ready":
+                if self._creation_authoritative_snapshot(
+                    connection,
+                    recovery_id=stored_recovery_id,
+                    scenario_id=scenario_id,
+                    execution_mode=execution_mode,
+                    session_key=session_key,
+                ) is not None:
+                    return self._creation_claim_from_row(
+                        row,
+                        disposition="ready",
+                    )
+                connection.execute(
+                    """
+                    UPDATE recovery_creations
+                    SET status = 'unknown', updated_at = ?
+                    WHERE request_key = ?
+                    """,
+                    (current_text, request_key),
+                )
+                return self._creation_claim_from_row(
+                    row,
+                    disposition="unknown",
+                )
+
+            if self._creation_authoritative_snapshot(
+                connection,
+                recovery_id=stored_recovery_id,
+                scenario_id=scenario_id,
+                execution_mode=execution_mode,
+                session_key=session_key,
+            ) is not None:
+                connection.execute(
+                    """
+                    UPDATE recovery_creations
+                    SET status = 'ready', updated_at = ?
+                    WHERE request_key = ?
+                    """,
+                    (current_text, request_key),
+                )
+                return self._creation_claim_from_row(
+                    row,
+                    disposition="ready",
+                )
+
+            if stored_status == "unknown":
+                return self._creation_claim_from_row(
+                    row,
+                    disposition="unknown",
+                )
+
+            try:
+                updated_at = datetime.fromisoformat(cast(str, row["updated_at"]))
+            except (TypeError, ValueError):
+                updated_at = current - stale_after
+            if (
+                updated_at.tzinfo is None
+                or updated_at.utcoffset() != timedelta(0)
+                or updated_at > current
+                or current - updated_at >= stale_after
+            ):
+                connection.execute(
+                    """
+                    UPDATE recovery_creations
+                    SET status = 'unknown', updated_at = ?
+                    WHERE request_key = ?
+                    """,
+                    (current_text, request_key),
+                )
+                return self._creation_claim_from_row(
+                    row,
+                    disposition="unknown",
+                )
+            return self._creation_claim_from_row(
+                row,
+                disposition="pending",
+            )
+
+    def mark_recovery_creation_started(
+        self,
+        *,
+        request_key: str,
+        request_fingerprint: str,
+        now: datetime | None = None,
+    ) -> None:
+        """Move the exact reserved owner to started before uncertain work."""
+
+        self._require_creation_digest(request_key, name="request_key")
+        self._require_creation_digest(
+            request_fingerprint,
+            name="request_fingerprint",
+        )
+        current = now or self._now()
+        current_text = current.isoformat()
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            updated = connection.execute(
+                """
+                UPDATE recovery_creations
+                SET status = 'started', updated_at = ?
+                WHERE request_key = ?
+                  AND request_fingerprint = ?
+                  AND status = 'reserved'
+                """,
+                (current_text, request_key, request_fingerprint),
+            )
+            if updated.rowcount == 1:
+                return
+            row = connection.execute(
+                """
+                SELECT status, request_fingerprint
+                FROM recovery_creations
+                WHERE request_key = ?
+                """,
+                (request_key,),
+            ).fetchone()
+            if (
+                row is not None
+                and cast(str, row["request_fingerprint"]) == request_fingerprint
+                and cast(str, row["status"]) == "started"
+            ):
+                return
+            raise RuntimeError("Recovery creation owner is no longer reserved")
+
+    def abandon_reserved_recovery_creation(
+        self,
+        *,
+        request_key: str,
+        request_fingerprint: str,
+    ) -> bool:
+        """Delete only an untouched reservation after a known admission denial."""
+
+        self._require_creation_digest(request_key, name="request_key")
+        self._require_creation_digest(
+            request_fingerprint,
+            name="request_fingerprint",
+        )
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            deleted = connection.execute(
+                """
+                DELETE FROM recovery_creations
+                WHERE request_key = ?
+                  AND request_fingerprint = ?
+                  AND status = 'reserved'
+                """,
+                (request_key, request_fingerprint),
+            )
+        return deleted.rowcount == 1
+
+    def mark_recovery_creation_ready(
+        self,
+        *,
+        request_key: str,
+        request_fingerprint: str,
+        recovery_id: str,
+        session_key: str,
+        now: datetime | None = None,
+    ) -> RecoveryCreationClaim:
+        """Bind an authoritative accessible recovery to the durable claim."""
+
+        self._require_creation_digest(request_key, name="request_key")
+        self._require_creation_digest(
+            request_fingerprint,
+            name="request_fingerprint",
+        )
+        self._require_creation_recovery_id(recovery_id)
+        self._require_opaque_session_key(session_key)
+        current_text = (now or self._now()).isoformat()
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT *
+                FROM recovery_creations
+                WHERE request_key = ?
+                """,
+                (request_key,),
+            ).fetchone()
+            if row is None or cast(str, row["request_fingerprint"]) != request_fingerprint:
+                raise RuntimeError("Recovery creation claim no longer matches")
+            scenario_id = ScenarioId(cast(str, row["scenario_id"]))
+            execution_mode = ExecutionMode(cast(str, row["execution_mode"]))
+            reserved_recovery_id = cast(str, row["recovery_id"])
+            if (
+                reserved_recovery_id != recovery_id
+                and execution_mode is not ExecutionMode.REPLAY_FIXTURE
+            ):
+                raise RuntimeError("Recovery creation changed its reserved ID")
+            if self._creation_authoritative_snapshot(
+                connection,
+                recovery_id=recovery_id,
+                scenario_id=scenario_id,
+                execution_mode=execution_mode,
+                session_key=session_key,
+            ) is None:
+                raise RuntimeError("Recovery creation result is not authoritative")
+            connection.execute(
+                """
+                UPDATE recovery_creations
+                SET recovery_id = ?, status = 'ready', updated_at = ?
+                WHERE request_key = ? AND request_fingerprint = ?
+                """,
+                (
+                    recovery_id,
+                    current_text,
+                    request_key,
+                    request_fingerprint,
+                ),
+            )
+            return RecoveryCreationClaim(
+                disposition="ready",
+                recovery_id=recovery_id,
+                scenario_id=scenario_id,
+                execution_mode=execution_mode,
+            )
+
+    def mark_recovery_creation_unknown_or_reconcile(
+        self,
+        *,
+        request_key: str,
+        request_fingerprint: str,
+        session_key: str,
+        now: datetime | None = None,
+    ) -> RecoveryCreationClaim:
+        """Fail closed after started work unless a complete result is durable."""
+
+        self._require_creation_digest(request_key, name="request_key")
+        self._require_creation_digest(
+            request_fingerprint,
+            name="request_fingerprint",
+        )
+        self._require_opaque_session_key(session_key)
+        current_text = (now or self._now()).isoformat()
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT *
+                FROM recovery_creations
+                WHERE request_key = ?
+                """,
+                (request_key,),
+            ).fetchone()
+            if row is None or cast(str, row["request_fingerprint"]) != request_fingerprint:
+                raise RuntimeError("Recovery creation claim no longer matches")
+            scenario_id = ScenarioId(cast(str, row["scenario_id"]))
+            execution_mode = ExecutionMode(cast(str, row["execution_mode"]))
+            recovery_id = cast(str, row["recovery_id"])
+            authoritative = (
+                self._creation_authoritative_snapshot(
+                    connection,
+                    recovery_id=recovery_id,
+                    scenario_id=scenario_id,
+                    execution_mode=execution_mode,
+                    session_key=session_key,
+                )
+                is not None
+            )
+            if authoritative:
+                disposition: RecoveryCreationDisposition = "ready"
+            else:
+                disposition = "unknown"
+            connection.execute(
+                """
+                UPDATE recovery_creations
+                SET status = ?, updated_at = ?
+                WHERE request_key = ? AND request_fingerprint = ?
+                """,
+                (
+                    disposition,
+                    current_text,
+                    request_key,
+                    request_fingerprint,
+                ),
+            )
+            return RecoveryCreationClaim(
+                disposition=disposition,
+                recovery_id=recovery_id,
+                scenario_id=scenario_id,
+                execution_mode=execution_mode,
+            )
+
+    def mark_recovery_creation_unknown(
+        self,
+        *,
+        request_key: str,
+        request_fingerprint: str,
+        now: datetime | None = None,
+    ) -> RecoveryCreationClaim:
+        """Irreversibly fail closed when mode-specific integrity validation fails."""
+
+        self._require_creation_digest(request_key, name="request_key")
+        self._require_creation_digest(
+            request_fingerprint,
+            name="request_fingerprint",
+        )
+        current = now or self._now()
+        self._require_creation_time(current, name="now")
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM recovery_creations WHERE request_key = ?",
+                (request_key,),
+            ).fetchone()
+            if (
+                row is None
+                or cast(str, row["request_fingerprint"]) != request_fingerprint
+            ):
+                raise RuntimeError("Recovery creation claim no longer matches")
+            connection.execute(
+                """
+                UPDATE recovery_creations
+                SET status = 'unknown', updated_at = ?
+                WHERE request_key = ? AND request_fingerprint = ?
+                """,
+                (current.isoformat(), request_key, request_fingerprint),
+            )
+            return self._creation_claim_from_row(
+                row,
+                disposition="unknown",
+            )
 
     def create_recovery(
         self,
@@ -3333,6 +4064,41 @@ class SQLiteStore:
                 )
         return len(recovery_ids)
 
+    def delete_expired_recovery_creations(
+        self,
+        *,
+        expired_at: datetime,
+        batch_size: int,
+    ) -> int:
+        """Delete a bounded oldest batch after its signed-session scope expires."""
+
+        self._require_creation_time(expired_at, name="expired_at")
+        if not 1 <= batch_size <= MAX_STORE_EXPIRY_BATCH_SIZE:
+            raise ValueError(
+                f"batch_size must be between 1 and {MAX_STORE_EXPIRY_BATCH_SIZE}"
+            )
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """
+                SELECT request_key
+                FROM recovery_creations
+                WHERE expires_at <= ?
+                ORDER BY expires_at ASC, request_key ASC
+                LIMIT ?
+                """,
+                (expired_at.isoformat(), batch_size),
+            ).fetchall()
+            request_keys = [cast(str, row["request_key"]) for row in rows]
+            if request_keys:
+                placeholders = ",".join("?" for _ in request_keys)
+                connection.execute(
+                    f"DELETE FROM recovery_creations "
+                    f"WHERE request_key IN ({placeholders})",
+                    request_keys,
+                )
+        return len(request_keys)
+
     def get_pending_approval(self, recovery_id: str) -> PendingApprovalEnvelope:
         """Load the opaque SDK state envelope without exposing it through public models."""
 
@@ -3689,6 +4455,20 @@ class SQLiteStore:
         self._require_opaque_session_key(session_key)
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            unresolved_creation = connection.execute(
+                """
+                SELECT 1
+                FROM recovery_creations
+                WHERE session_key = ?
+                  AND status IN ('reserved', 'started', 'unknown')
+                LIMIT 1
+                """,
+                (session_key,),
+            ).fetchone()
+            if unresolved_creation is not None:
+                raise ResetCreationPendingError(
+                    "Session has an unresolved recovery creation"
+                )
             now_text = self._now().isoformat()
             connection.execute(
                 """
@@ -3697,6 +4477,10 @@ class SQLiteStore:
                 WHERE session_key = ?
                 """,
                 (now_text, session_key),
+            )
+            connection.execute(
+                "DELETE FROM recovery_creations WHERE session_key = ?",
+                (session_key,),
             )
             connection.execute(
                 """

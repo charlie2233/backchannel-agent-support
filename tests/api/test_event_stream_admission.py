@@ -6,6 +6,7 @@ import sqlite3
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from unittest.mock import Mock
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -36,7 +37,11 @@ def _settings() -> RuntimeSettings:
 def _create_terminal_recovery(client: TestClient) -> str:
     response = client.post(
         "/api/recoveries",
-        json={"scenarioId": "api-quota", "executionMode": "replay_fixture"},
+        json={
+            "scenarioId": "api-quota",
+            "executionMode": "replay_fixture",
+            "clientRequestId": uuid4().hex,
+        },
     )
     assert response.status_code == 201
     return str(response.json()["recoveryId"])
@@ -263,7 +268,11 @@ def test_invalid_authorized_cursor_precedes_targeted_expiry_side_effect(tmp_path
     with TestClient(app) as client:
         pending = client.post(
             "/api/recoveries",
-            json={"scenarioId": "hotel", "executionMode": "sdk_stub"},
+            json={
+                "scenarioId": "hotel",
+                "executionMode": "sdk_stub",
+                "clientRequestId": uuid4().hex,
+            },
         )
         assert pending.status_code == 201
         recovery_id = str(pending.json()["recoveryId"])
@@ -310,7 +319,11 @@ def test_duplicate_cursor_is_rejected_before_expiry_admission_read_or_log(
     with TestClient(app) as client:
         pending = client.post(
             "/api/recoveries",
-            json={"scenarioId": "hotel", "executionMode": "sdk_stub"},
+            json={
+                "scenarioId": "hotel",
+                "executionMode": "sdk_stub",
+                "clientRequestId": uuid4().hex,
+            },
         )
         assert pending.status_code == 201
         recovery_id = str(pending.json()["recoveryId"])
@@ -391,7 +404,11 @@ def test_target_expiry_is_committed_before_saturated_admission(tmp_path) -> None
     with TestClient(app) as client:
         pending = client.post(
             "/api/recoveries",
-            json={"scenarioId": "hotel", "executionMode": "sdk_stub"},
+            json={
+                "scenarioId": "hotel",
+                "executionMode": "sdk_stub",
+                "clientRequestId": uuid4().hex,
+            },
         )
         assert pending.status_code == 201
         recovery_id = str(pending.json()["recoveryId"])

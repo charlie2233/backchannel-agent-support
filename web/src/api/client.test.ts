@@ -5,6 +5,8 @@ import {
   DecisionCapacityError,
   LIVE_ADMISSION_MESSAGES,
   LiveAdmissionError,
+  RECOVERY_CREATION_MESSAGES,
+  RecoveryCreationError,
   RecoveryLookupError,
   createRecovery,
   getHealth,
@@ -14,6 +16,8 @@ import {
   postDecision,
   postDecisionResume,
 } from "./client";
+
+const CLIENT_REQUEST_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
 
 const expectedMessages = {
   live_unavailable:
@@ -80,7 +84,9 @@ describe("createRecovery public errors", () => {
         ),
       );
 
-      await expect(createRecovery("hotel", "openai_live")).rejects.toEqual(
+      await expect(
+        createRecovery("hotel", "openai_live", CLIENT_REQUEST_ID),
+      ).rejects.toEqual(
         expect.objectContaining<Partial<LiveAdmissionError>>({
           code,
           message: LIVE_ADMISSION_MESSAGES[code],
@@ -107,10 +113,14 @@ describe("createRecovery public errors", () => {
       ),
     );
 
-    await expect(createRecovery("hotel", "openai_live")).rejects.toThrow(
+    await expect(
+      createRecovery("hotel", "openai_live", CLIENT_REQUEST_ID),
+    ).rejects.toThrow(
       "Recovery creation failed with status 429",
     );
-    await expect(createRecovery("hotel", "openai_live")).rejects.not.toThrow(unsafeMessage);
+    await expect(
+      createRecovery("hotel", "openai_live", CLIENT_REQUEST_ID),
+    ).rejects.not.toThrow(unsafeMessage);
   });
 
   it.each([
@@ -136,14 +146,63 @@ describe("createRecovery public errors", () => {
         ),
       );
 
-      const caught = await createRecovery("hotel", "openai_live").catch(
-        (error: unknown) => error,
-      );
+      const caught = await createRecovery(
+        "hotel",
+        "openai_live",
+        CLIENT_REQUEST_ID,
+      ).catch((error: unknown) => error);
 
       expect(caught).toBeInstanceOf(Error);
       expect(caught).not.toBeInstanceOf(LiveAdmissionError);
       expect((caught as Error).message).toBe(
         `Recovery creation failed with status ${status}`,
+      );
+    },
+  );
+
+  it.each([
+    {
+      code: "idempotency_conflict",
+      message:
+        "This recovery start no longer matches its original request. No additional run was started.",
+    },
+    {
+      code: "creation_pending",
+      message:
+        "Recovery creation is still in progress. Retry the same start shortly.",
+    },
+    {
+      code: "creation_outcome_unknown",
+      message:
+        "The recovery start outcome could not be confirmed. No replacement run was started.",
+    },
+  ] as const)(
+    "returns a typed exact-shaped $code without exposing arbitrary response text",
+    async ({ code, message }) => {
+      expect(RECOVERY_CREATION_MESSAGES[code]).toBe(message);
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(
+          new Response(
+            JSON.stringify({
+              code,
+              message,
+              requestId: "0123456789abcdef0123456789abcdef",
+            }),
+            { status: 409 },
+          ),
+        ),
+      );
+
+      await expect(
+        createRecovery("hotel", "openai_live", CLIENT_REQUEST_ID),
+      ).rejects.toEqual(
+        expect.objectContaining<Partial<RecoveryCreationError>>({
+          name: "RecoveryCreationError",
+          code,
+          message,
+          requestId: "0123456789abcdef0123456789abcdef",
+        }),
       );
     },
   );
@@ -434,7 +493,9 @@ describe("getReceipt runtime validation", () => {
       ),
     );
 
-    await expect(createRecovery("hotel", "openai_live")).resolves.toEqual(
+    await expect(
+      createRecovery("hotel", "openai_live", CLIENT_REQUEST_ID),
+    ).resolves.toEqual(
       expect.objectContaining({ modelIds: ["recorded-model-a", "recorded-model-b"] }),
     );
   });
@@ -650,8 +711,8 @@ describe("recovery response correlation", () => {
       ),
     );
 
-    await expect(createRecovery("hotel", "sdk_stub")).rejects.toThrow(
-      "Recovery response did not match the requested creation",
-    );
+    await expect(
+      createRecovery("hotel", "sdk_stub", CLIENT_REQUEST_ID),
+    ).rejects.toThrow("Recovery response did not match the requested creation");
   });
 });

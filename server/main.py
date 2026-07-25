@@ -1,6 +1,8 @@
 """FastAPI entry point for truthful recovery persistence and streaming."""
 
 import asyncio
+import hashlib
+import json
 import re
 import sqlite3
 from collections.abc import AsyncIterator, Callable, Mapping
@@ -20,7 +22,11 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.types import Receive, Scope, Send
 
-from server.cleanup import cleanup_terminal_recoveries, expire_pending_approvals
+from server.cleanup import (
+    cleanup_expired_recovery_creations,
+    cleanup_terminal_recoveries,
+    expire_pending_approvals,
+)
 from server.config import RuntimeSettings
 from server.controls import (
     ClientIdentity,
@@ -59,13 +65,21 @@ from server.models import (
 from server.orchestrator import (
     RecoveryOrchestrator,
     ResumeIncompatibleError,
-    UnsupportedOrchestrationError,
 )
 from server.providers.hotel_simulator import HotelSimulator
 from server.providers.quota_simulator import QuotaSimulator
-from server.replay.engine import ReplayEngine, UnsupportedExecutionModeError
+from server.replay.engine import (
+    ReplayEngine,
+    replay_recovery_id,
+)
 from server.replay.loader import ScenarioLoader, ScenarioNotFoundError
-from server.store import ApprovalDecisionError, RecoveryNotFoundError, SQLiteStore
+from server.store import (
+    ApprovalDecisionError,
+    RecoveryCreationClaim,
+    RecoveryNotFoundError,
+    ResetCreationPendingError,
+    SQLiteStore,
+)
 
 logger = get_safe_logger(__name__)
 
@@ -177,6 +191,20 @@ _READY_SCHEMA_COLUMNS = {
             "released_at",
         }
     ),
+    "recovery_creations": frozenset(
+        {
+            "request_key",
+            "request_fingerprint",
+            "session_key",
+            "scenario_id",
+            "execution_mode",
+            "recovery_id",
+            "status",
+            "created_at",
+            "updated_at",
+            "expires_at",
+        }
+    ),
     "readiness_probe": frozenset({"id", "generation"}),
 }
 _READY_PROBE_COLUMNS = [
@@ -185,10 +213,128 @@ _READY_PROBE_COLUMNS = [
 ]
 _READY_DB_BUSY_TIMEOUT_MS = 350
 _READY_DB_CACHE_SECONDS = 5.0
+_CREATION_PENDING_RETRY_SECONDS = 2
+_CREATION_ERROR_MESSAGES = {
+    "idempotency_conflict": (
+        "This recovery start no longer matches its original request. "
+        "No additional run was started."
+    ),
+    "creation_pending": (
+        "Recovery creation is still in progress. Retry the same start shortly."
+    ),
+    "creation_outcome_unknown": (
+        "The recovery start outcome could not be confirmed. "
+        "No replacement run was started."
+    ),
+}
+_RECOVERY_CREATION_CONFLICT_RESPONSE: dict[str, Any] = {
+    "description": (
+        "The session-scoped recovery creation key is already in use, still being "
+        "resolved, or has an outcome that cannot be confirmed. Retry-After is "
+        "returned only for creation_pending."
+    ),
+    "headers": {
+        "Retry-After": {
+            "description": (
+                "Seconds to wait before retrying the same clientRequestId. "
+                "Present only when code is creation_pending."
+            ),
+            "schema": {
+                "enum": [str(_CREATION_PENDING_RETRY_SECONDS)],
+                "type": "string",
+            },
+        }
+    },
+    "content": {
+        "application/json": {
+            "schema": {
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["code", "message", "requestId"],
+                        "properties": {
+                            "code": {
+                                "type": "string",
+                                "enum": [code],
+                            },
+                            "message": {
+                                "type": "string",
+                                "enum": [message],
+                            },
+                            "requestId": {
+                                "type": "string",
+                                "pattern": "^[0-9a-f]{32}$",
+                            },
+                        },
+                    }
+                    for code, message in _CREATION_ERROR_MESSAGES.items()
+                ]
+            }
+        }
+    },
+}
+_RESET_CREATION_PENDING_MESSAGE = (
+    "Demo reset is unavailable while a recovery start is unresolved. "
+    "Retry reset after the start resolves or the signed session expires."
+)
+_DEMO_RESET_CONFLICT_RESPONSE: dict[str, Any] = {
+    "description": (
+        "Reset is refused without mutation while this session owns an unresolved "
+        "recovery start."
+    ),
+    "content": {
+        "application/json": {
+            "schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["code", "message", "requestId"],
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "enum": ["reset_creation_pending"],
+                    },
+                    "message": {
+                        "type": "string",
+                        "enum": [_RESET_CREATION_PENDING_MESSAGE],
+                    },
+                    "requestId": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{32}$",
+                    },
+                },
+            }
+        }
+    },
+}
 _SPA_SEGMENT = re.compile(r"^[A-Za-z0-9_-]+$")
 _RESERVED_ROUTE_ROOTS = frozenset(
     {"api", "assets", "docs", "health", "openapi.json", "readyz", "redoc"}
 )
+
+
+class _RecoveryCreationPublicError(RuntimeError):
+    """Stable public creation error without a raw client request token."""
+
+    def __init__(self, code: str, *, retry_after: int | None = None) -> None:
+        self.code = code
+        self.retry_after = retry_after
+        super().__init__(code)
+
+
+def _recovery_creation_fingerprint(payload: CreateRecoveryRequest) -> str:
+    canonical = json.dumps(
+        {
+            "executionMode": payload.execution_mode.value,
+            "scenarioId": payload.scenario_id.value,
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    return hashlib.sha256(canonical).hexdigest()
+
+
 _PRIVATE_RECOVERY_DESCRIPTION = (
     "Requires the signed opaque demo session issued when the recovery was created. "
     "Missing, expired, tampered, unrelated, and unknown sessions receive the same "
@@ -735,6 +881,10 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_application: FastAPI) -> AsyncIterator[None]:
+        cleanup_expired_recovery_creations(
+            recovery_store,
+            batch_size=100,
+        )
         expire_pending_approvals(
             recovery_store,
             batch_size=100,
@@ -755,6 +905,10 @@ def create_app(
                     )
                 except TimeoutError:
                     try:
+                        cleanup_expired_recovery_creations(
+                            recovery_store,
+                            batch_size=100,
+                        )
                         expire_pending_approvals(
                             recovery_store,
                             batch_size=100,
@@ -804,6 +958,43 @@ def create_app(
         controls=public_controls,
         settings=runtime_settings,
     )
+
+    @application.exception_handler(_RecoveryCreationPublicError)
+    async def recovery_creation_error(
+        request: Request,
+        error: _RecoveryCreationPublicError,
+    ) -> JSONResponse:
+        if (
+            error.code == "creation_outcome_unknown"
+            and error.__cause__ is not None
+        ):
+            log_safe_exception(
+                logger,
+                request_id=_request_id(request),
+                recovery_id=_validated_recovery_id(request),
+                error=error.__cause__,
+            )
+        response = _public_error_response(
+            request,
+            status_code=status.HTTP_409_CONFLICT,
+            code=error.code,
+            message=_CREATION_ERROR_MESSAGES[error.code],
+        )
+        if error.retry_after is not None:
+            response.headers["Retry-After"] = str(error.retry_after)
+        return response
+
+    @application.exception_handler(ResetCreationPendingError)
+    async def reset_creation_pending(
+        request: Request,
+        _error: ResetCreationPendingError,
+    ) -> JSONResponse:
+        return _public_error_response(
+            request,
+            status_code=status.HTTP_409_CONFLICT,
+            code="reset_creation_pending",
+            message=_RESET_CREATION_PENDING_MESSAGE,
+        )
 
     @application.exception_handler(LiveAdmissionError)
     async def live_admission_error(
@@ -909,12 +1100,19 @@ def create_app(
         "/api/recoveries",
         response_model=RecoverySnapshot,
         status_code=status.HTTP_201_CREATED,
+        responses={
+            status.HTTP_409_CONFLICT: _RECOVERY_CREATION_CONFLICT_RESPONSE,
+        },
     )
     async def create_recovery(
         payload: CreateRecoveryRequest,
         request: Request,
     ) -> RecoverySnapshot:
         identity = cast(ClientIdentity, request.state.demo_identity)
+        cleanup_expired_recovery_creations(
+            recovery_store,
+            batch_size=25,
+        )
         expire_pending_approvals(
             recovery_store,
             batch_size=25,
@@ -926,24 +1124,13 @@ def create_app(
             ),
             batch_size=25,
         )
-        if payload.execution_mode is ExecutionMode.REPLAY_FIXTURE:
-            try:
-                replay = replay_engine.start(
-                    payload.scenario_id,
-                    execution_mode=payload.execution_mode,
-                    session_key=identity.session_key,
-                )
-                if not recovery_store.recovery_is_accessible(
-                    replay.recovery_id,
-                    identity.session_key,
-                ):
-                    raise RuntimeError("Recovery access binding was not persisted")
-                return replay
-            except (ScenarioNotFoundError, UnsupportedExecutionModeError) as error:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                    detail={"code": "invalid_scenario"},
-                ) from error
+        try:
+            scenario = scenario_loader.get(payload.scenario_id)
+        except ScenarioNotFoundError as error:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={"code": "invalid_scenario"},
+            ) from error
         if (
             payload.scenario_id.value == "api-quota"
             and payload.execution_mode is ExecutionMode.OPENAI_LIVE
@@ -952,12 +1139,8 @@ def create_app(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail={"code": "unsupported_scenario_mode"},
             )
-        if (
-            payload.execution_mode is ExecutionMode.OPENAI_LIVE
-            and not runtime_settings.live_ready
-        ):
-            raise LiveAdmissionError(LiveAdmissionCode.LIVE_UNAVAILABLE)
         if payload.execution_mode not in {
+            ExecutionMode.REPLAY_FIXTURE,
             ExecutionMode.SDK_STUB,
             ExecutionMode.OPENAI_LIVE,
         }:
@@ -965,50 +1148,210 @@ def create_app(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="Unsupported execution mode",
             )
-        try:
-            if payload.execution_mode is ExecutionMode.OPENAI_LIVE:
-                recovery_id = str(uuid4())
-                request.state.recovery_id = recovery_id
-                public_controls.admit_live(
-                    recovery_id=recovery_id,
-                    ip_key=identity.ip_key,
-                    session_key=identity.session_key,
-                )
+
+        request_key = public_controls.recovery_creation_request_key(
+            session_key=identity.session_key,
+            client_request_id=payload.client_request_id,
+        )
+        request_fingerprint = _recovery_creation_fingerprint(payload)
+        reserved_recovery_id = (
+            replay_recovery_id(scenario)
+            if payload.execution_mode is ExecutionMode.REPLAY_FIXTURE
+            else str(uuid4())
+        )
+        claim = recovery_store.claim_recovery_creation(
+            request_key=request_key,
+            request_fingerprint=request_fingerprint,
+            scenario_id=payload.scenario_id,
+            execution_mode=payload.execution_mode,
+            reserved_recovery_id=reserved_recovery_id,
+            session_key=identity.session_key,
+            expires_at=identity.session_expires_at,
+        )
+        request.state.recovery_id = claim.recovery_id
+
+        if claim.disposition == "conflict":
+            raise _RecoveryCreationPublicError("idempotency_conflict")
+        if claim.disposition == "pending":
+            raise _RecoveryCreationPublicError(
+                "creation_pending",
+                retry_after=_CREATION_PENDING_RETRY_SECONDS,
+            )
+        if claim.disposition == "unknown":
+            raise _RecoveryCreationPublicError("creation_outcome_unknown")
+
+        def authoritative_snapshot(ready_claim: RecoveryCreationClaim) -> RecoverySnapshot:
+            if (
+                ready_claim.scenario_id is not payload.scenario_id
+                or ready_claim.execution_mode is not payload.execution_mode
+            ):
+                raise _RecoveryCreationPublicError("idempotency_conflict")
+            if payload.execution_mode is not ExecutionMode.REPLAY_FIXTURE:
                 try:
-                    async with public_controls.live_model_slot(recovery_id):
-                        pending = await recovery_orchestrator.start(
-                            payload.scenario_id,
-                            execution_mode=payload.execution_mode,
-                            recovery_id=recovery_id,
-                            session_key=identity.session_key,
+                    expire_pending_approvals(
+                        recovery_store,
+                        batch_size=1,
+                        recovery_id=ready_claim.recovery_id,
+                    )
+                except Exception as error:
+                    raise _RecoveryCreationPublicError(
+                        "creation_outcome_unknown"
+                    ) from error
+            try:
+                if payload.execution_mode is ExecutionMode.REPLAY_FIXTURE:
+                    snapshot = replay_engine.start(
+                        payload.scenario_id,
+                        execution_mode=payload.execution_mode,
+                        session_key=identity.session_key,
+                    )
+                else:
+                    snapshot = recovery_store.get_authoritative_recovery_creation(
+                        recovery_id=ready_claim.recovery_id,
+                        scenario_id=payload.scenario_id,
+                        execution_mode=payload.execution_mode,
+                        session_key=identity.session_key,
+                    )
+                if (
+                    snapshot.recovery_id != ready_claim.recovery_id
+                    or snapshot.scenario_id is not payload.scenario_id
+                    or snapshot.execution_mode is not payload.execution_mode
+                ):
+                    raise RuntimeError("Recovery creation result changed identity")
+                return snapshot
+            except Exception as error:
+                try:
+                    if payload.execution_mode is ExecutionMode.REPLAY_FIXTURE:
+                        recovery_store.mark_recovery_creation_unknown(
+                            request_key=request_key,
+                            request_fingerprint=request_fingerprint,
                         )
-                    if not recovery_store.recovery_is_accessible(
-                        pending.recovery.recovery_id,
-                        identity.session_key,
-                    ):
-                        raise RuntimeError("Recovery access binding was not persisted")
-                except asyncio.CancelledError:
-                    public_controls.release_live(recovery_id)
-                    raise
+                    else:
+                        resolution = (
+                            recovery_store.mark_recovery_creation_unknown_or_reconcile(
+                                request_key=request_key,
+                                request_fingerprint=request_fingerprint,
+                                session_key=identity.session_key,
+                            )
+                        )
+                        if resolution.disposition == "ready":
+                            return recovery_store.get_authoritative_recovery_creation(
+                                recovery_id=resolution.recovery_id,
+                                scenario_id=payload.scenario_id,
+                                execution_mode=payload.execution_mode,
+                                session_key=identity.session_key,
+                            )
                 except Exception:
-                    public_controls.release_live(recovery_id)
-                    raise
-            else:
-                pending = await recovery_orchestrator.start(
+                    pass
+                raise _RecoveryCreationPublicError(
+                    "creation_outcome_unknown"
+                ) from error
+
+        if claim.disposition == "ready":
+            return authoritative_snapshot(claim)
+
+        started = False
+        live_admitted = False
+        try:
+            if payload.execution_mode is ExecutionMode.REPLAY_FIXTURE:
+                recovery_store.mark_recovery_creation_started(
+                    request_key=request_key,
+                    request_fingerprint=request_fingerprint,
+                )
+                started = True
+                created = replay_engine.start(
                     payload.scenario_id,
                     execution_mode=payload.execution_mode,
                     session_key=identity.session_key,
                 )
-                if not recovery_store.recovery_is_accessible(
-                    pending.recovery.recovery_id,
-                    identity.session_key,
+            else:
+                if (
+                    payload.execution_mode is ExecutionMode.OPENAI_LIVE
+                    and not runtime_settings.live_ready
                 ):
-                    raise RuntimeError("Recovery access binding was not persisted")
-            return pending.recovery
-        except UnsupportedOrchestrationError as error:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail={"code": "orchestration_unavailable"},
+                    recovery_store.abandon_reserved_recovery_creation(
+                        request_key=request_key,
+                        request_fingerprint=request_fingerprint,
+                    )
+                    raise LiveAdmissionError(LiveAdmissionCode.LIVE_UNAVAILABLE)
+                if payload.execution_mode is ExecutionMode.OPENAI_LIVE:
+                    try:
+                        public_controls.admit_live(
+                            recovery_id=claim.recovery_id,
+                            ip_key=identity.ip_key,
+                            session_key=identity.session_key,
+                        )
+                    except LiveAdmissionError:
+                        recovery_store.abandon_reserved_recovery_creation(
+                            request_key=request_key,
+                            request_fingerprint=request_fingerprint,
+                        )
+                        raise
+                    live_admitted = True
+                recovery_store.mark_recovery_creation_started(
+                    request_key=request_key,
+                    request_fingerprint=request_fingerprint,
+                )
+                started = True
+                if payload.execution_mode is ExecutionMode.OPENAI_LIVE:
+                    async with public_controls.live_model_slot(claim.recovery_id):
+                        pending = await recovery_orchestrator.start(
+                            payload.scenario_id,
+                            execution_mode=payload.execution_mode,
+                            recovery_id=claim.recovery_id,
+                            session_key=identity.session_key,
+                        )
+                else:
+                    pending = await recovery_orchestrator.start(
+                        payload.scenario_id,
+                        execution_mode=payload.execution_mode,
+                        recovery_id=claim.recovery_id,
+                        session_key=identity.session_key,
+                    )
+                created = pending.recovery
+
+            ready_claim = recovery_store.mark_recovery_creation_ready(
+                request_key=request_key,
+                request_fingerprint=request_fingerprint,
+                recovery_id=created.recovery_id,
+                session_key=identity.session_key,
+            )
+            if payload.execution_mode is ExecutionMode.REPLAY_FIXTURE:
+                return created
+            return authoritative_snapshot(ready_claim)
+        except asyncio.CancelledError:
+            if live_admitted:
+                public_controls.release_live(claim.recovery_id)
+            if started:
+                try:
+                    recovery_store.mark_recovery_creation_unknown_or_reconcile(
+                        request_key=request_key,
+                        request_fingerprint=request_fingerprint,
+                        session_key=identity.session_key,
+                    )
+                except Exception:
+                    pass
+            raise
+        except _RecoveryCreationPublicError:
+            if live_admitted:
+                public_controls.release_live(claim.recovery_id)
+            raise
+        except Exception as error:
+            if live_admitted:
+                public_controls.release_live(claim.recovery_id)
+            if not started:
+                raise
+            try:
+                resolution = recovery_store.mark_recovery_creation_unknown_or_reconcile(
+                    request_key=request_key,
+                    request_fingerprint=request_fingerprint,
+                    session_key=identity.session_key,
+                )
+            except Exception:
+                resolution = None
+            if resolution is not None and resolution.disposition == "ready":
+                return authoritative_snapshot(resolution)
+            raise _RecoveryCreationPublicError(
+                "creation_outcome_unknown"
             ) from error
 
     @application.post(
@@ -1299,7 +1642,13 @@ def create_app(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Not found"
             ) from error
 
-    @application.post("/api/demo/reset", response_model=DemoResetResponse)
+    @application.post(
+        "/api/demo/reset",
+        response_model=DemoResetResponse,
+        responses={
+            status.HTTP_409_CONFLICT: _DEMO_RESET_CONFLICT_RESPONSE,
+        },
+    )
     def reset_demo(request: Request) -> DemoResetResponse:
         if not runtime_settings.demo_reset_enabled:
             raise HTTPException(

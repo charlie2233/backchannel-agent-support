@@ -803,9 +803,14 @@ def test_first_container_creates_two_pending_sdk_recoveries_and_terminal_replay(
     assert client.posts == [
         (
             "/api/recoveries",
-            {"scenarioId": "api-quota", "executionMode": "replay_fixture"},
+            {
+                "scenarioId": "api-quota",
+                "executionMode": "replay_fixture",
+                "clientRequestId": ANY,
+            },
         )
     ]
+    assert client.posts[0][1]["clientRequestId"].startswith("restart-smoke-")
     assert fixture.approval_snapshot == approval
     assert fixture.decline_snapshot == decline
     assert fixture.replay_snapshot == replay

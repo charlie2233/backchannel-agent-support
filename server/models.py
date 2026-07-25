@@ -144,6 +144,13 @@ class ScenarioResponse(ApiModel):
 class CreateRecoveryRequest(ApiModel):
     scenario_id: ScenarioId = Field(alias="scenarioId")
     execution_mode: ExecutionMode = Field(alias="executionMode")
+    client_request_id: str = Field(
+        alias="clientRequestId",
+        strict=True,
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$",
+    )
 
 
 class HotelReplacementTerms(ApiModel):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any, cast
+from uuid import uuid4
 
 import pytest
 from agents import RunState
@@ -18,7 +19,11 @@ from server.store import SQLiteStore
 def _create_pending(client: TestClient) -> dict[str, object]:
     response = client.post(
         "/api/recoveries",
-        json={"scenarioId": "hotel", "executionMode": "sdk_stub"},
+        json={
+            "scenarioId": "hotel",
+            "executionMode": "sdk_stub",
+            "clientRequestId": uuid4().hex,
+        },
     )
     assert response.status_code == 201
     return cast(dict[str, object], response.json())

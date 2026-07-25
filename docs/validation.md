@@ -32,6 +32,7 @@ uv run pytest -q tests/domain/test_pending_expiry.py tests/api/test_expiry_lifec
 uv run pytest -q tests/domain/test_decision_resume.py tests/api/test_decision_resume.py
 uv run pytest -q tests/domain/test_event_stream_admission.py tests/api/test_event_stream_admission.py
 uv run pytest -q tests/api/test_readiness.py tests/domain/test_store.py
+uv run pytest -q tests/api/test_creation_idempotency.py
 uv run pytest -q tests/integration/test_policy_eligibility.py
 uv run pytest -q tests/integration/test_live_contract.py::test_mocked_live_policy_denial_is_generic_and_releases_exact_admission
 npm --workspace web exec -- vitest run src/components/EvidenceInspector.test.tsx
@@ -44,6 +45,17 @@ It proves foreign snapshot/SSE/receipt/approve/decline all match an absent recov
 404, owner approval remains at-most-once under a foreign race, the signed cookie survives a
 same-secret restart, tampered cookies fail closed, shared replay access detaches per session,
 reset preserves cooldown/budget history, and retention cleanup cascades access rows.
+The creation-idempotency suite proves strict bounded request IDs, session-scoped HMAC
+storage with no raw-token persistence, one SDK/live owner across sequential, concurrent, and
+restart retries, conflict before admission or budget accounting, fixed pending retry metadata,
+response-loss replay, permanent no-rerun handling for uncertain or stale starts, safe
+abandonment after a known live admission denial, and canonical replay sharing across sessions.
+It also proves canonical replay integrity is revalidated on exact retry; bare or tampered
+status/receipt/event evidence cannot become ready; authoritative terminal evidence can be
+reconciled; claim expiry matches the signed cookie; cleanup is bounded and runs per-create,
+at startup, and periodically; and reset removes only the caller session's claims while
+preserving another session's shared replay claim.
+The result is same-session request deduplication, not exactly-once external-provider proof.
 The readiness suite proves required schema checks plus the trigger-free probe's exact visible and
 hidden column/primary-key shape, full singleton row and binary value, one committed generation
 toggle per uncached interval, five-second success and failure caching, concurrent request

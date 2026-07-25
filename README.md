@@ -29,9 +29,16 @@ The keyless replay contract can also be started directly while the app is runnin
 
 ```bash
 curl -sS http://127.0.0.1:8000/api/recoveries \
+  --cookie-jar /tmp/backchannel-demo.cookies \
+  --cookie /tmp/backchannel-demo.cookies \
   -H 'Content-Type: application/json' \
-  -d '{"scenarioId":"hotel","executionMode":"replay_fixture"}'
+  -d '{"scenarioId":"hotel","executionMode":"replay_fixture","clientRequestId":"readme-replay-001"}'
 ```
+
+Use a fresh `clientRequestId` for each new start intent. Reuse the same value only when
+retrying that exact request after a timeout or lost response, with the same cookie jar and
+unchanged server identity secret. Remove `/tmp/backchannel-demo.cookies` when finished.
+A lost or expired cookie creates a new idempotency scope.
 
 For a live-ready local process, supply `OPENAI_API_KEY` only to the server environment,
 restart `npm run start`, and select **Start live recovery** in the hotel scenario. A page load
@@ -51,12 +58,22 @@ model call nor a provider dispatch.
 - The server, not the browser, owns recovery state, ordered events, decisions, and receipts.
 - Recovery detail is bound to the signed HttpOnly demo session that created or explicitly
   started it. Foreign, expired, missing, and tampered sessions receive the same generic 404.
-- The browser keeps only the last validated hotel recovery UUID in `sessionStorage`. Reload
-  first asks the session-authorized snapshot endpoint to restore that run. A malformed local
-  hint, generic authorized 404, or valid correlated wrong-scenario snapshot is terminal and
-  clears it. Network, non-404, malformed-response, and miscorrelated-response failures retain
-  the UUID and expose only a coalesced **Retry saved recovery** GET; they trust no snapshot and
-  never cause a replacement run or automatic decision resume.
+- Same-tab `sessionStorage` may hold the last validated hotel recovery UUID and, while a
+  creation request is unresolved, the pending tuple containing its raw UUID
+  `clientRequestId`, scenario, and execution mode. The pending tuple is cleared only after a
+  matching server snapshot is accepted or the user explicitly abandons the conflicting start.
+  It contains no cookie, keyed session correlation, serialized run state, approval or decision
+  payload, or provenance claim. The server never persists, logs, or responds with the raw
+  token; it stores only its session-scoped HMAC.
+- Reload first asks the session-authorized snapshot endpoint to restore a saved hotel run. A
+  malformed local hint, generic authorized 404, or valid correlated wrong-scenario snapshot is
+  terminal and clears it. Network, non-404, malformed-response, and
+  miscorrelated-response failures retain the UUID and expose only a coalesced **Retry saved
+  recovery** GET; they trust no snapshot and never cause a replacement run or automatic
+  decision resume.
+- When demo reset is enabled, it refuses with `409 reset_creation_pending` and makes no
+  mutation while the signed session has a reserved, started, or unknown creation claim. Reset
+  can be retried after the owner resolves the claim or the signed session expires.
 - Hotel execution pauses at the Agents SDK `commit_remedy` interruption. Consent displays
   exact terms, a UTC expiry, and a canonical `sha256:` digest.
 - Approval rechecks the digest, interruption, expiry, hard constraints, and delegated

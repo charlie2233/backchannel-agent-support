@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from typing import Any, cast
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -30,7 +31,11 @@ def rejection_client(tmp_path: Any):
 def _pending_recovery(client: TestClient) -> dict[str, object]:
     response = client.post(
         "/api/recoveries",
-        json={"scenarioId": "hotel", "executionMode": "sdk_stub"},
+        json={
+            "scenarioId": "hotel",
+            "executionMode": "sdk_stub",
+            "clientRequestId": uuid4().hex,
+        },
     )
     assert response.status_code == 201
     return cast(dict[str, object], response.json())

@@ -5,9 +5,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import App, { SAVED_RECOVERY_RESTORE_TIMEOUT_MS } from "./App";
 
 const HOTEL_RECOVERY_KEY = "backchannel.hotelRecoveryId";
+const HOTEL_CREATION_INTENT_KEY =
+  "backchannel.pendingRecoveryCreation.v1.hotel";
 const LIVE_RECOVERY_ID = "11111111-2222-4333-8444-555555555555";
-const AWAITING_DEMO_COPY =
-  "Awaiting authoritative server evidence for the explicitly requested demo run.";
 const RETRYABLE_RESUME_COPY =
   "Saved recovery evidence is temporarily unavailable. Its same-tab recovery ID was retained, and no server state or action has been accepted.";
 
@@ -1097,7 +1097,7 @@ describe("explicit, reload-safe live recovery", () => {
     { action: "Run replay fixture", mode: "replay_fixture" },
     { action: "Run SDK QA trace", mode: "sdk_stub" },
   ] as const)(
-    "offers an explicit $mode after a failed keyless resume without auto-starting",
+    "keeps an explicitly requested $mode singular while its start is unresolved",
     async ({ action, mode }) => {
       window.sessionStorage.setItem(HOTEL_RECOVERY_KEY, LIVE_RECOVERY_ID);
       const requestModes: string[] = [];
@@ -1151,14 +1151,15 @@ describe("explicit, reload-safe live recovery", () => {
       expect(screen.queryByText("No server run started.")).not.toBeInTheDocument();
       expect(screen.queryByText("Replay fixture")).not.toBeInTheDocument();
       expect(screen.queryByText("SDK stub")).not.toBeInTheDocument();
-      if (mode === "replay_fixture") {
-        const sdkWhileReplayPending = screen.getByRole("button", {
-          name: "Run SDK QA trace",
-        });
-        expect(sdkWhileReplayPending).toBeDisabled();
-        fireEvent.click(sdkWhileReplayPending);
-        expect(requestModes).toEqual(["replay_fixture"]);
-      }
+      expect(
+        screen.getByRole("button", { name: "Retrying recovery start…" }),
+      ).toBeDisabled();
+      expect(
+        screen.queryByRole("button", { name: "Run replay fixture" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Run SDK QA trace" }),
+      ).not.toBeInTheDocument();
     },
   );
 
@@ -1166,10 +1167,14 @@ describe("explicit, reload-safe live recovery", () => {
     { action: "Run replay fixture", mode: "replay_fixture" },
     { action: "Run SDK QA trace", mode: "sdk_stub" },
   ] as const)(
-    "restores explicit demo choices when a requested $mode is rejected",
+    "retains and explicitly retries the same $mode intent after an ambiguous rejection",
     async ({ action, mode }) => {
       window.sessionStorage.setItem(HOTEL_RECOVERY_KEY, LIVE_RECOVERY_ID);
-      const requestModes: string[] = [];
+      const requestBodies: Array<{
+        clientRequestId: string;
+        scenarioId: string;
+        executionMode: string;
+      }> = [];
       vi.stubGlobal(
         "fetch",
         vi.fn().mockImplementation((input: string | URL | Request, init?: RequestInit) => {
@@ -1187,8 +1192,12 @@ describe("explicit, reload-safe live recovery", () => {
             return Promise.resolve(new Response(null, { status: 404 }));
           }
           if (url === "/api/recoveries") {
-            requestModes.push(
-              (JSON.parse(String(init?.body)) as { executionMode: string }).executionMode,
+            requestBodies.push(
+              JSON.parse(String(init?.body)) as {
+                clientRequestId: string;
+                scenarioId: string;
+                executionMode: string;
+              },
             );
             return Promise.resolve(new Response(null, { status: 503 }));
           }
@@ -1201,14 +1210,28 @@ describe("explicit, reload-safe live recovery", () => {
         await screen.findByRole("button", { name: action }, { timeout: 10_000 }),
       );
 
-      expect(requestModes).toEqual([mode]);
+      await screen.findByRole("alert");
+      expect(requestBodies).toHaveLength(1);
+      expect(requestBodies[0]).toMatchObject({
+        scenarioId: "hotel",
+        executionMode: mode,
+      });
       expect(
-        await screen.findByText(/No fallback run has started/i, {}, { timeout: 10_000 }),
-      ).toBeVisible();
-      expect(screen.queryByText(AWAITING_DEMO_COPY)).not.toBeInTheDocument();
-      expect(screen.getByRole("button", { name: "Run replay fixture" })).toBeEnabled();
-      expect(screen.getByRole("button", { name: "Run SDK QA trace" })).toBeEnabled();
-      expectNoSnapshotLifecycle("Not started");
+        screen.queryByRole("button", { name: "Run replay fixture" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Run SDK QA trace" }),
+      ).not.toBeInTheDocument();
+      const retry = screen.getByRole("button", {
+        name: "Retry recovery start",
+      });
+      expect(retry).toBeEnabled();
+      expectNoSnapshotLifecycle("Awaiting server evidence");
+
+      fireEvent.click(retry);
+
+      await waitFor(() => expect(requestBodies).toHaveLength(2));
+      expect(requestBodies[1]).toEqual(requestBodies[0]);
     },
   );
 
@@ -1237,7 +1260,12 @@ describe("explicit, reload-safe live recovery", () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    expect(window.sessionStorage.getItem(HOTEL_RECOVERY_KEY)).toBeNull();
+    expect(window.sessionStorage.getItem(HOTEL_RECOVERY_KEY)).toBe(
+      LIVE_RECOVERY_ID,
+    );
+    expect(
+      window.sessionStorage.getItem(HOTEL_CREATION_INTENT_KEY),
+    ).toBeNull();
   });
 
   it("does not accept a resume result after unmount", async () => {

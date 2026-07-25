@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -22,9 +23,11 @@ from server.controls import (
 )
 from server.main import create_app
 from server.models import (
+    OPENAI_LIVE_BOUNDARY,
     ApprovalDecisionResponse,
     DecisionAction,
     ExecutionMode,
+    RecoveryReceipt,
     RecoveryStatus,
     ScenarioId,
 )
@@ -54,9 +57,8 @@ def _new_demo_identity(controls: PublicDemoControls) -> ClientIdentity:
 
 
 class RecordingLiveOrchestrator:
-    def __init__(self, store: SQLiteStore, *, terminal: bool = False) -> None:
+    def __init__(self, store: SQLiteStore) -> None:
         self.store = store
-        self.terminal = terminal
         self.calls: list[str] = []
 
     async def start(
@@ -70,31 +72,57 @@ class RecordingLiveOrchestrator:
         assert execution_mode is ExecutionMode.OPENAI_LIVE
         assert recovery_id is not None
         self.calls.append(recovery_id)
-        recovery = self.store.create_recovery(
+        model_ids = ["gpt-5.6-luna", "gpt-5.6-terra"]
+        root_trace_id = f"trace_{len(self.calls):032x}"
+        sdk_version = "0.18.3"
+        protocol_version = "backchannel.approval.v1"
+        agent_graph_version = "backchannel.hotel-agent.live.v1"
+        definition_digest = "d" * 64
+        self.store.create_recovery(
             recovery_id=recovery_id,
             scenario_id=ScenarioId.HOTEL,
             execution_mode=ExecutionMode.OPENAI_LIVE,
             current_step=0,
             current_step_summary="Live model start completed.",
-            model_ids=["gpt-5.6-luna", "gpt-5.6-terra"],
-            root_trace_id=f"trace_{len(self.calls):032x}",
+            model_ids=model_ids,
+            root_trace_id=root_trace_id,
             model_call=True,
-            sdk_version="0.18.3",
-            protocol_version="backchannel.approval.v1",
-            agent_graph_version="backchannel.hotel-agent.live.v1",
-            definition_digest="live-definition",
+            sdk_version=sdk_version,
+            protocol_version=protocol_version,
+            agent_graph_version=agent_graph_version,
+            definition_digest=definition_digest,
             session_key=session_key,
         )
-        if self.terminal:
-            recovery = self.store.record_transition(
-                recovery_id,
-                status=RecoveryStatus.COMPLETED,
-                current_step=5,
-                current_step_summary="Live recovery completed.",
-                event_type="recovery.completed",
-                event_data={"summary": "Live recovery completed."},
-            )
-        return SimpleNamespace(recovery=recovery)
+        receipt = RecoveryReceipt(
+            recoveryId=recovery_id,
+            executionMode=ExecutionMode.OPENAI_LIVE,
+            status="completed",
+            simulated=True,
+            providerExecution=True,
+            modelCall=True,
+            modelIds=model_ids,
+            rootTraceId=root_trace_id,
+            sdkVersion=sdk_version,
+            protocolVersion=protocol_version,
+            agentGraphVersion=agent_graph_version,
+            definitionDigest=definition_digest,
+            boundary=OPENAI_LIVE_BOUNDARY,
+            providerResult="Injected demo provider result was durably verified.",
+            authorizationSource="Injected exact approval evidence.",
+            verificationResults=["Injected terminal receipt was durably sealed."],
+            approvalCount=1,
+            approvedRemedyDigest=f"sha256:{'e' * 64}",
+        )
+        completed = self.store.record_transition(
+            recovery_id,
+            status=RecoveryStatus.COMPLETED,
+            current_step=5,
+            current_step_summary="Live recovery completed with receipt evidence.",
+            event_type="recovery.completed",
+            event_data={"summary": "Live terminal evidence persisted."},
+            receipt=receipt,
+        )
+        return SimpleNamespace(recovery=completed)
 
 
 class RecordingLiveDecisionOrchestrator:
@@ -691,11 +719,22 @@ def test_live_create_postcondition_failure_releases_reserved_admission(tmp_path)
 
     response = client.post(
         "/api/recoveries",
-        json={"scenarioId": "hotel", "executionMode": "openai_live"},
+        json={
+            "scenarioId": "hotel",
+            "executionMode": "openai_live",
+            "clientRequestId": uuid4().hex,
+        },
     )
 
-    assert response.status_code == 500
-    assert response.json()["code"] == "internal_error"
+    assert response.status_code == 409
+    assert response.json() == {
+        "code": "creation_outcome_unknown",
+        "message": (
+            "The recovery start outcome could not be confirmed. "
+            "No replacement run was started."
+        ),
+        "requestId": response.headers["x-request-id"],
+    }
     with sqlite3.connect(database_path) as connection:
         admission = connection.execute(
             "SELECT recovery_id, released_at FROM live_admissions"
@@ -774,7 +813,11 @@ def test_direct_asgi_cancel_before_live_persistence_releases_only_admission(
             request_task = asyncio.create_task(
                 client.post(
                     "/api/recoveries",
-                    json={"scenarioId": "hotel", "executionMode": "openai_live"},
+                    json={
+                        "scenarioId": "hotel",
+                        "executionMode": "openai_live",
+                        "clientRequestId": uuid4().hex,
+                    },
                 )
             )
             await asyncio.wait_for(entered.wait(), timeout=1)
@@ -929,10 +972,9 @@ def _live_app(
     database_path,
     *,
     settings: RuntimeSettings,
-    terminal: bool = False,
 ):
     store = SQLiteStore(database_path)
-    orchestrator = RecordingLiveOrchestrator(store, terminal=terminal)
+    orchestrator = RecordingLiveOrchestrator(store)
     return create_app(
         settings,
         store=store,
@@ -944,7 +986,11 @@ def _post_live(client: TestClient, *, forwarded_for: str | None = None):
     headers = {"X-Forwarded-For": forwarded_for} if forwarded_for is not None else None
     return client.post(
         "/api/recoveries",
-        json={"scenarioId": "hotel", "executionMode": "openai_live"},
+        json={
+            "scenarioId": "hotel",
+            "executionMode": "openai_live",
+            "clientRequestId": uuid4().hex,
+        },
         headers=headers,
     )
 
@@ -979,6 +1025,11 @@ def test_capacity_and_daily_budget_errors_do_not_expose_internal_keys(tmp_path) 
     second_app, second_orchestrator = _live_app(database_path, settings=capacity_settings)
     with TestClient(first_app, client=("198.51.100.1", 5000)) as first_client:
         assert _post_live(first_client).status_code == 201
+    second_app.state.public_demo_controls.admit_live(
+        recovery_id="capacity-holder",
+        ip_key="capacity-holder-ip",
+        session_key="capacity-holder-session",
+    )
     with TestClient(second_app, client=("198.51.100.2", 5000)) as second_client:
         capacity = _post_live(second_client)
 
@@ -996,7 +1047,7 @@ def test_capacity_and_daily_budget_errors_do_not_expose_internal_keys(tmp_path) 
         daily_demo_budget_units=1,
     )
     budget_path = tmp_path / "budget-api.sqlite3"
-    budget_app, _ = _live_app(budget_path, settings=budget_settings, terminal=True)
+    budget_app, _ = _live_app(budget_path, settings=budget_settings)
     with TestClient(budget_app, client=("198.51.100.3", 5000)) as first_budget:
         assert _post_live(first_budget).status_code == 201
     with TestClient(budget_app, client=("198.51.100.4", 5000)) as second_budget:
@@ -1082,7 +1133,11 @@ def test_cookieless_health_requests_do_not_touch_durable_demo_sessions(
         client.cookies.clear()
         assert client.post(
             "/api/recoveries",
-            json={"scenarioId": "api-quota", "executionMode": "replay_fixture"},
+            json={
+                "scenarioId": "api-quota",
+                "executionMode": "replay_fixture",
+                "clientRequestId": uuid4().hex,
+            },
         ).status_code == 201
         client.cookies.clear()
         assert client.get("/static/missing.js").status_code == 404
@@ -1184,7 +1239,7 @@ def test_stateless_cookie_identity_preserves_live_ip_and_session_cooldowns(
         daily_demo_budget_units=10,
     )
     first_store = DemoSessionAccessRecordingStore(database_path)
-    first_orchestrator = RecordingLiveOrchestrator(first_store, terminal=True)
+    first_orchestrator = RecordingLiveOrchestrator(first_store)
     first_app = create_app(
         settings,
         store=first_store,
@@ -1196,7 +1251,7 @@ def test_stateless_cookie_identity_preserves_live_ip_and_session_cooldowns(
         session_cookie = first.cookies[settings.demo_session_cookie_name]
 
     second_store = DemoSessionAccessRecordingStore(database_path)
-    second_orchestrator = RecordingLiveOrchestrator(second_store, terminal=True)
+    second_orchestrator = RecordingLiveOrchestrator(second_store)
     second_app = create_app(
         settings,
         store=second_store,
@@ -1205,7 +1260,11 @@ def test_stateless_cookie_identity_preserves_live_ip_and_session_cooldowns(
     with TestClient(second_app, client=("198.51.100.2", 5000)) as session_client:
         same_session = session_client.post(
             "/api/recoveries",
-            json={"scenarioId": "hotel", "executionMode": "openai_live"},
+            json={
+                "scenarioId": "hotel",
+                "executionMode": "openai_live",
+                "clientRequestId": uuid4().hex,
+            },
             headers={
                 "Cookie": f"{settings.demo_session_cookie_name}={session_cookie}",
             },
@@ -1214,7 +1273,11 @@ def test_stateless_cookie_identity_preserves_live_ip_and_session_cooldowns(
     with TestClient(second_app, client=("198.51.100.1", 5001)) as ip_client:
         same_ip = ip_client.post(
             "/api/recoveries",
-            json={"scenarioId": "hotel", "executionMode": "openai_live"},
+            json={
+                "scenarioId": "hotel",
+                "executionMode": "openai_live",
+                "clientRequestId": uuid4().hex,
+            },
             headers={
                 "Cookie": f"{settings.demo_session_cookie_name}={tampered}",
             },
@@ -1339,7 +1402,11 @@ def test_deployed_cors_is_exact_and_security_headers_preserve_sse(tmp_path) -> N
     )
     recovery = client.post(
         "/api/recoveries",
-        json={"scenarioId": "api-quota", "executionMode": "replay_fixture"},
+        json={
+            "scenarioId": "api-quota",
+            "executionMode": "replay_fixture",
+            "clientRequestId": uuid4().hex,
+        },
     ).json()
     stream = client.get(f"/api/recoveries/{recovery['recoveryId']}/events")
 

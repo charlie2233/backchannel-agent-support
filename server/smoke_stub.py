@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
@@ -36,7 +37,11 @@ def _run_smoke() -> None:
 
             created = client.post(
                 "/api/recoveries",
-                json={"scenarioId": "api-quota", "executionMode": "replay_fixture"},
+                json={
+                    "scenarioId": "api-quota",
+                    "executionMode": "replay_fixture",
+                    "clientRequestId": f"smoke-{uuid4().hex}",
+                },
             )
             created.raise_for_status()
             recovery_id = cast(str, created.json()["recoveryId"])
@@ -53,7 +58,11 @@ def _run_smoke() -> None:
 
             quota_sdk_created = client.post(
                 "/api/recoveries",
-                json={"scenarioId": "api-quota", "executionMode": "sdk_stub"},
+                json={
+                    "scenarioId": "api-quota",
+                    "executionMode": "sdk_stub",
+                    "clientRequestId": f"smoke-{uuid4().hex}",
+                },
             )
             quota_sdk_created.raise_for_status()
             quota_sdk_snapshot = cast(dict[str, object], quota_sdk_created.json())
@@ -74,7 +83,11 @@ def _run_smoke() -> None:
 
             approve_created = client.post(
                 "/api/recoveries",
-                json={"scenarioId": "hotel", "executionMode": "sdk_stub"},
+                json={
+                    "scenarioId": "hotel",
+                    "executionMode": "sdk_stub",
+                    "clientRequestId": f"smoke-{uuid4().hex}",
+                },
             )
             approve_created.raise_for_status()
             approve_snapshot = cast(dict[str, object], approve_created.json())
@@ -86,7 +99,11 @@ def _run_smoke() -> None:
 
             decline_created = client.post(
                 "/api/recoveries",
-                json={"scenarioId": "hotel", "executionMode": "sdk_stub"},
+                json={
+                    "scenarioId": "hotel",
+                    "executionMode": "sdk_stub",
+                    "clientRequestId": f"smoke-{uuid4().hex}",
+                },
             )
             decline_created.raise_for_status()
             decline_snapshot = cast(dict[str, object], decline_created.json())
@@ -222,6 +239,7 @@ def _run_smoke() -> None:
                     json={
                         "scenarioId": scenario_id,
                         "executionMode": "replay_fixture",
+                        "clientRequestId": f"smoke-{uuid4().hex}",
                     },
                 )
                 reset_replay.raise_for_status()

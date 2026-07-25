@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -92,7 +92,11 @@ def test_api_health_readiness_and_sse_routes_keep_precedence_over_spa(
 
     created = production_client.post(
         "/api/recoveries",
-        json={"scenarioId": "api-quota", "executionMode": "replay_fixture"},
+        json={
+            "scenarioId": "api-quota",
+            "executionMode": "replay_fixture",
+            "clientRequestId": uuid4().hex,
+        },
     )
     assert created.status_code == 201
     recovery_id = str(UUID(created.json()["recoveryId"]))

@@ -87,6 +87,13 @@
       "CreateRecoveryRequest": {
         "additionalProperties": false,
         "properties": {
+          "clientRequestId": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$",
+            "title": "Clientrequestid",
+            "type": "string"
+          },
           "executionMode": {
             "$ref": "#/components/schemas/ExecutionMode"
           },
@@ -96,7 +103,8 @@
         },
         "required": [
           "scenarioId",
-          "executionMode"
+          "executionMode",
+          "clientRequestId"
         ],
         "title": "CreateRecoveryRequest",
         "type": "object"
@@ -758,6 +766,40 @@
               }
             },
             "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "code": {
+                      "enum": [
+                        "reset_creation_pending"
+                      ],
+                      "type": "string"
+                    },
+                    "message": {
+                      "enum": [
+                        "Demo reset is unavailable while a recovery start is unresolved. Retry reset after the start resolves or the signed session expires."
+                      ],
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "pattern": "^[0-9a-f]{32}$",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "requestId"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Reset is refused without mutation while this session owns an unresolved recovery start."
           }
         },
         "summary": "Reset Demo"
@@ -786,6 +828,109 @@
               }
             },
             "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "enum": [
+                            "idempotency_conflict"
+                          ],
+                          "type": "string"
+                        },
+                        "message": {
+                          "enum": [
+                            "This recovery start no longer matches its original request. No additional run was started."
+                          ],
+                          "type": "string"
+                        },
+                        "requestId": {
+                          "pattern": "^[0-9a-f]{32}$",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message",
+                        "requestId"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "enum": [
+                            "creation_pending"
+                          ],
+                          "type": "string"
+                        },
+                        "message": {
+                          "enum": [
+                            "Recovery creation is still in progress. Retry the same start shortly."
+                          ],
+                          "type": "string"
+                        },
+                        "requestId": {
+                          "pattern": "^[0-9a-f]{32}$",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message",
+                        "requestId"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "enum": [
+                            "creation_outcome_unknown"
+                          ],
+                          "type": "string"
+                        },
+                        "message": {
+                          "enum": [
+                            "The recovery start outcome could not be confirmed. No replacement run was started."
+                          ],
+                          "type": "string"
+                        },
+                        "requestId": {
+                          "pattern": "^[0-9a-f]{32}$",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message",
+                        "requestId"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "The session-scoped recovery creation key is already in use, still being resolved, or has an outcome that cannot be confirmed. Retry-After is returned only for creation_pending.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds to wait before retrying the same clientRequestId. Present only when code is creation_pending.",
+                "schema": {
+                  "enum": [
+                    "2"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
           },
           "422": {
             "content": {

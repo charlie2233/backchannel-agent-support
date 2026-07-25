@@ -31,7 +31,11 @@ def _settings(*, reset: bool = False) -> RuntimeSettings:
 def _create_hotel(client: TestClient) -> dict[str, object]:
     response = client.post(
         "/api/recoveries",
-        json={"scenarioId": "hotel", "executionMode": "sdk_stub"},
+        json={
+            "scenarioId": "hotel",
+            "executionMode": "sdk_stub",
+            "clientRequestId": uuid4().hex,
+        },
     )
     assert response.status_code == 201
     snapshot = response.json()
@@ -337,11 +341,16 @@ def test_replay_can_be_shared_then_reset_detaches_only_calling_session(tmp_path)
     database_path = tmp_path / "shared-replay.sqlite3"
     store = SQLiteStore(database_path)
     app = create_app(_settings(reset=True), store=store)
-    payload = {"scenarioId": "api-quota", "executionMode": "replay_fixture"}
+    def replay_payload() -> dict[str, str]:
+        return {
+            "scenarioId": "api-quota",
+            "executionMode": "replay_fixture",
+            "clientRequestId": uuid4().hex,
+        }
 
     with TestClient(app) as first, TestClient(app) as second:
-        first_created = first.post("/api/recoveries", json=payload)
-        second_created = second.post("/api/recoveries", json=payload)
+        first_created = first.post("/api/recoveries", json=replay_payload())
+        second_created = second.post("/api/recoveries", json=replay_payload())
         assert first_created.status_code == second_created.status_code == 201
         recovery_id = str(first_created.json()["recoveryId"])
         assert second_created.json()["recoveryId"] == recovery_id
@@ -383,7 +392,7 @@ def test_replay_can_be_shared_then_reset_detaches_only_calling_session(tmp_path)
                 (recovery_id,),
             ).fetchone() == (1,)
 
-        reassociated = first.post("/api/recoveries", json=payload)
+        reassociated = first.post("/api/recoveries", json=replay_payload())
         assert reassociated.status_code == 201
         assert reassociated.json()["recoveryId"] == recovery_id
         assert first.get(f"/api/recoveries/{recovery_id}").status_code == 200
@@ -468,7 +477,11 @@ def test_legacy_private_recovery_is_fail_closed_and_cannot_be_first_touch_claime
         assert client.get(f"/api/recoveries/{recovery_id}/events").status_code == 404
         client.post(
             "/api/recoveries",
-            json={"scenarioId": "api-quota", "executionMode": "replay_fixture"},
+            json={
+                "scenarioId": "api-quota",
+                "executionMode": "replay_fixture",
+                "clientRequestId": uuid4().hex,
+            },
         )
         assert client.get(f"/api/recoveries/{recovery_id}").status_code == 404
 

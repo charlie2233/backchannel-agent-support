@@ -4,6 +4,7 @@ import sqlite3
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from typing import Any
+from uuid import uuid4
 
 import pytest
 from agents.agent_output import AgentOutputSchemaBase
@@ -312,7 +313,11 @@ def test_no_key_api_gate_uses_injected_live_provider_only_when_ready(
     ) as client:
         blocked = client.post(
             "/api/recoveries",
-            json={"scenarioId": "hotel", "executionMode": "openai_live"},
+            json={
+                "scenarioId": "hotel",
+                "executionMode": "openai_live",
+                "clientRequestId": uuid4().hex,
+            },
         )
     assert blocked.status_code == 422
     assert blocked_models.calls == []
@@ -328,7 +333,11 @@ def test_no_key_api_gate_uses_injected_live_provider_only_when_ready(
     ) as client:
         response = client.post(
             "/api/recoveries",
-            json={"scenarioId": "hotel", "executionMode": "openai_live"},
+            json={
+                "scenarioId": "hotel",
+                "executionMode": "openai_live",
+                "clientRequestId": uuid4().hex,
+            },
         )
     assert response.status_code == 201
     payload = response.json()
@@ -379,17 +388,24 @@ def test_mocked_live_policy_denial_is_generic_and_releases_exact_admission(
     ) as client:
         response = client.post(
             "/api/recoveries",
-            json={"scenarioId": "hotel", "executionMode": "openai_live"},
+            json={
+                "scenarioId": "hotel",
+                "executionMode": "openai_live",
+                "clientRequestId": uuid4().hex,
+            },
             headers={
                 "Authorization": "Bearer private-policy-request-token",
                 "Cookie": "backchannel_demo_session=private-policy-cookie",
             },
         )
 
-    assert response.status_code == 500
+    assert response.status_code == 409
     assert response.json() == {
-        "code": "internal_error",
-        "message": "The request could not be completed.",
+        "code": "creation_outcome_unknown",
+        "message": (
+            "The recovery start outcome could not be confirmed. "
+            "No replacement run was started."
+        ),
         "requestId": response.headers["x-request-id"],
     }
     assert "fallbackExecutionMode" not in response.json()
@@ -419,7 +435,6 @@ def test_mocked_live_policy_denial_is_generic_and_releases_exact_admission(
         assert admission is not None
         assert admission[1] == 1
         assert admission[2] is not None
-        assert f"recovery_id={admission[0]}" in caplog.text
         assert connection.execute(
             "SELECT recovery_id, category, amount FROM usage_ledger"
         ).fetchone() == (admission[0], "live_demo_budget_unit", 1)

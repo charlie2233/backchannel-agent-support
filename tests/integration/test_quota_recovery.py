@@ -1,6 +1,7 @@
 import asyncio
 import sqlite3
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -239,7 +240,36 @@ class _LiveHotelOnlyOrchestrator:
             definition_digest="a" * 64,
             session_key=session_key,
         )
-        return SimpleNamespace(recovery=recovery)
+        receipt = RecoveryReceipt(
+            recoveryId=recovery.recovery_id,
+            executionMode=execution_mode,
+            status="completed",
+            simulated=True,
+            providerExecution=True,
+            modelCall=True,
+            modelIds=["gpt-5.6-luna", "gpt-5.6-terra"],
+            rootTraceId="trace_0123456789abcdef0123456789abcdef",
+            sdkVersion="test-sdk",
+            protocolVersion="test-protocol",
+            agentGraphVersion="test-live-hotel",
+            definitionDigest="a" * 64,
+            boundary=OPENAI_LIVE_BOUNDARY,
+            providerResult="Injected live hotel result was durably verified.",
+            authorizationSource="Injected exact live approval evidence.",
+            verificationResults=["Injected live receipt was durably sealed."],
+            approvalCount=1,
+            approvedRemedyDigest=f"sha256:{'b' * 64}",
+        )
+        completed = self.store.record_transition(
+            recovery.recovery_id,
+            status=RecoveryStatus.COMPLETED,
+            current_step=5,
+            current_step_summary="Fake live hotel recovery completed.",
+            event_type="recovery.completed",
+            event_data={"summary": "Injected terminal live evidence persisted."},
+            receipt=receipt,
+        )
+        return SimpleNamespace(recovery=completed)
 
 
 def test_quota_live_is_rejected_before_capacity_cooldown_or_budget_admission(
@@ -260,7 +290,11 @@ def test_quota_live_is_rejected_before_capacity_cooldown_or_budget_admission(
     with TestClient(app) as client:
         rejected = client.post(
             "/api/recoveries",
-            json={"scenarioId": "api-quota", "executionMode": "openai_live"},
+            json={
+                "scenarioId": "api-quota",
+                "executionMode": "openai_live",
+                "clientRequestId": uuid4().hex,
+            },
         )
         assert rejected.status_code == 422
         assert rejected.json()["detail"] == {"code": "unsupported_scenario_mode"}
@@ -270,7 +304,11 @@ def test_quota_live_is_rejected_before_capacity_cooldown_or_budget_admission(
 
         admitted = client.post(
             "/api/recoveries",
-            json={"scenarioId": "hotel", "executionMode": "openai_live"},
+            json={
+                "scenarioId": "hotel",
+                "executionMode": "openai_live",
+                "clientRequestId": uuid4().hex,
+            },
         )
 
     assert admitted.status_code == 201
@@ -515,7 +553,11 @@ def test_api_routes_quota_sdk_stub_to_completed_receipt(tmp_path) -> None:
     with TestClient(create_app(RuntimeSettings(live_ready=False), store=store)) as client:
         created = client.post(
             "/api/recoveries",
-            json={"scenarioId": "api-quota", "executionMode": "sdk_stub"},
+            json={
+                "scenarioId": "api-quota",
+                "executionMode": "sdk_stub",
+                "clientRequestId": uuid4().hex,
+            },
         )
         assert created.status_code == 201
         snapshot = created.json()

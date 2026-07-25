@@ -33,6 +33,27 @@ def cleanup_terminal_recoveries(
     )
 
 
+def cleanup_expired_recovery_creations(
+    store: SQLiteStore,
+    *,
+    now: datetime | None = None,
+    batch_size: int = 100,
+) -> int:
+    """Delete a bounded batch after its signed-session scope expires."""
+
+    if not 1 <= batch_size <= MAX_CLEANUP_BATCH_SIZE:
+        raise ValueError(
+            f"batch_size must be between 1 and {MAX_CLEANUP_BATCH_SIZE}"
+        )
+    current = now or datetime.now(UTC)
+    if current.tzinfo is None or current.utcoffset() != timedelta(0):
+        raise ValueError("now must be timezone-aware UTC")
+    return store.delete_expired_recovery_creations(
+        expired_at=current,
+        batch_size=batch_size,
+    )
+
+
 def expire_pending_approvals(
     store: SQLiteStore,
     *,

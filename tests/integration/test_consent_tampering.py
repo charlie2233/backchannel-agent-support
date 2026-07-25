@@ -34,7 +34,11 @@ def _decision_payload(snapshot: dict[str, object], decision_id: str) -> dict[str
 def _create_api_recovery(client: TestClient) -> dict[str, object]:
     response = client.post(
         "/api/recoveries",
-        json={"scenarioId": "hotel", "executionMode": "sdk_stub"},
+        json={
+            "scenarioId": "hotel",
+            "executionMode": "sdk_stub",
+            "clientRequestId": uuid4().hex,
+        },
     )
     assert response.status_code == 201
     return response.json()

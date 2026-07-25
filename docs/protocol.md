@@ -27,6 +27,55 @@ missing, or tampered session produce the same generic 404, without disclosing wh
 state exists. A valid cookie and unchanged identity secret preserve access across process
 restart; rotating the secret intentionally fails closed.
 
+## Durable recovery creation
+
+`POST /api/recoveries` requires `clientRequestId`, an ASCII token matching
+`[A-Za-z0-9][A-Za-z0-9._~-]{0,127}`. A client creates a fresh token for each new start
+intent and reuses it only to retry the exact same scenario and execution mode. The same-tab UI
+keeps the pending raw UUID token with that scenario/mode tuple in `sessionStorage` until a
+matching snapshot is accepted or the user explicitly abandons a conflicting start. This is a
+client retry hint, not a durable or public server identifier: the server never persists, logs,
+or responds with the raw token and stores only a session-scoped HMAC plus a SHA-256 fingerprint
+of canonical scenario/mode JSON. The same surviving signed cookie and unchanged identity
+secret are part of that scope; a lost or expired cookie, or a rotated secret, produces a new
+scope that cannot recover the earlier binding.
+
+The additive `recovery_creations` ledger reserves the eventual recovery UUID before work
+starts. A short SQLite `BEGIN IMMEDIATE` transaction returns exactly one of owner, ready,
+pending, conflict, or unknown; no transaction remains open across replay, Agents SDK, live
+model, or provider work. SDK and live owners pass the reserved UUID into orchestration.
+Replay owners reserve the canonical fixture UUID, preserving one shared fixture while access
+remains separately bound to each signed session. Each claim also stores the opaque session
+correlation and exact signed-cookie expiry.
+
+An exact ready retry returns `201` with the current authoritative snapshot and consumes no
+additional orchestration, live admission, or budget unit. A changed scenario or mode returns
+`409 idempotency_conflict` before accounting. A concurrent active owner returns
+`409 creation_pending` with `Retry-After: 2`. Once started work has an unconfirmable outcome,
+the claim returns `409 creation_outcome_unknown` and is never rerun; a complete matching
+recovery already persisted for the same session is reconciled first. Stale reserved or started
+claims also become unknown. A known live admission denial deletes only its untouched
+reservation, so an explicit later retry can safely attempt admission again. Demo reset returns
+`409 reset_creation_pending` without mutation while the caller session has a reserved, started,
+or unknown claim; reset can be retried after the owner resolves it or the signed session
+expires. Ready claims remain resettable.
+
+Evidence, not status alone, controls ready and reconciliation responses. Exact replay retries
+call `ReplayEngine.start` and its canonical snapshot/event/receipt validator; partial or
+tampered fixtures become `creation_outcome_unknown`. SDK/live hotel creation requires either
+one valid pending/claimed consent binding or a terminal receipt whose mode, status, model/trace,
+and version provenance match the recovery. SDK quota requires completed canonical quota
+receipt and QA trace evidence. A bare row or manually flipped terminal status is never enough.
+
+This ledger prevents duplicate application starts only inside that surviving signed-session
+scope. It does not prove exactly-once execution at an external provider, and an unknown result
+is never replaced automatically. Claims remain until the signed cookie expires, then bounded
+startup, periodic, and per-create cleanup removes them. Explicit demo reset refuses without
+mutation while a caller-owned claim is reserved, started, or unknown. Once the owner resolves
+it to ready, successful reset removes the caller's creation claims and access only; claims and
+access belonging to another session, including another session sharing the canonical replay,
+remain.
+
 ## Bounded event-stream admission
 
 After the session-access check and cursor validation, the SSE route runs its targeted expiry
@@ -66,18 +115,22 @@ This is not a fleet-wide limit. Every worker or container would have independent
 production launcher uses one Uvicorn worker, so the configured defaults cap polling loops only
 in that one process; horizontal scaling requires a separate shared-admission design.
 
-The UI stores no cookie, session correlation, serialized run state, approval payload, or
-provenance claim in browser storage. It may retain one syntactically validated hotel recovery
-UUID in same-tab `sessionStorage` as a non-authoritative reload hint. The server-authorized GET
-must return a contract-valid hotel snapshot before that hint can restore the event stream,
-consent, or receipt. A generic authorized 404 or a valid correlated snapshot for another scenario
-clears the hint; these cover missing, foreign-session, expired-session, and retention-deleted state
-without distinguishing them. Network errors, non-404 responses, malformed JSON, and contract-invalid
-or miscorrelated success responses retain the UUID but authorize no snapshot or action. The browser
-shows fixed redacted copy and only **Retry saved recovery**; repeated activation coalesces to the same
-GET. It never surfaces response text or automatically creates a run, starts a replay, or resumes a
-decision. A retry 404 clears the hint, while a valid hotel snapshot restores the ordinary lifecycle.
-On a keyless runtime after a terminal lookup, the browser offers replay and SDK QA as explicit
+The UI stores no cookie, keyed session correlation, serialized run state, approval or decision
+payload, or provenance claim in browser storage. Same-tab `sessionStorage` may retain one
+syntactically validated hotel recovery UUID as a non-authoritative reload hint and a pending
+creation tuple containing the raw UUID `clientRequestId`, exact scenario, and exact execution
+mode. The pending tuple authorizes only a retry of that same start and remains until a matching
+snapshot is accepted or the user explicitly abandons a conflicting intent. The
+server-authorized GET must return a contract-valid hotel snapshot before the recovery UUID can
+restore the event stream, consent, or receipt. A generic authorized 404 or a valid correlated
+snapshot for another scenario clears that hint; these cover missing, foreign-session,
+expired-session, and retention-deleted state without distinguishing them. Network errors,
+non-404 responses, malformed JSON, and contract-invalid or miscorrelated success responses
+retain the UUID but authorize no snapshot or action. The browser shows fixed redacted copy and
+only **Retry saved recovery**; repeated activation coalesces to the same GET. It never surfaces
+response text or automatically creates a run, starts a replay, or resumes a decision. A retry
+404 clears the hint, while a valid hotel snapshot restores the ordinary lifecycle. On a
+keyless runtime after a terminal lookup, the browser offers replay and SDK QA as explicit
 actions; it does not reuse copy that claims an automatic fallback is underway.
 
 ## Provenance modes

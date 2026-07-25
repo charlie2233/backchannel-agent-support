@@ -26,6 +26,7 @@ REQUIRED_TABLES = {
     "pending_approvals",
     "readiness_probe",
     "receipts",
+    "recovery_creations",
     "recoveries",
     "remedies",
     "usage_ledger",

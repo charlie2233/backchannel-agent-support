@@ -3,11 +3,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   LIVE_ADMISSION_MESSAGES,
   LiveAdmissionError,
+  RecoveryCreationError,
   RecoveryLookupError,
   createRecovery,
   getReceipt,
   getRecovery,
 } from "./api/client";
+import type { RecoveryCreationCode } from "./api/client";
 import { AppHeader } from "./components/AppHeader";
 import { EventLedger } from "./components/EventLedger";
 import { EvidenceInspector } from "./components/EvidenceInspector";
@@ -23,6 +25,13 @@ import type {
   ScenarioId,
 } from "./domain/recovery";
 import { isTerminalRecoveryStatus } from "./domain/recovery";
+import {
+  acquirePendingRecoveryCreation,
+  clearMatchingPendingRecoveryCreation,
+  pendingRecoveryCreationsMatch,
+  readPendingRecoveryCreation,
+} from "./creationSession";
+import type { PendingRecoveryCreation } from "./creationSession";
 import { recoveryScenarios } from "./fixtures/recoveries";
 import { useRecoveryEvents } from "./hooks/useRecovery";
 import { useRuntimeHealth } from "./hooks/useRuntimeHealth";
@@ -195,13 +204,23 @@ export default function App() {
   const { health, phase: healthPhase, retry: retryRuntimeHealth } = useRuntimeHealth();
   const [hotelSnapshot, setHotelSnapshot] = useState<RecoverySnapshot | null>(null);
   const [hotelResumeState, setHotelResumeState] = useState<HotelResumeState>("checking");
+  const [hotelCreationIntent, setHotelCreationIntent] =
+    useState<PendingRecoveryCreation | null>(
+      () => readPendingRecoveryCreation("hotel"),
+    );
+  const [hotelCreationErrorCode, setHotelCreationErrorCode] =
+    useState<RecoveryCreationCode | null>(null);
+  const [hotelRequiresExplicitRestart, setHotelRequiresExplicitRestart] =
+    useState(false);
   const [hotelLiveLoading, setHotelLiveLoading] = useState(false);
   const [quotaSnapshot, setQuotaSnapshot] = useState<RecoverySnapshot | null>(null);
   const [quotaLoading, setQuotaLoading] = useState(false);
   const [quotaError, setQuotaError] = useState<string | null>(null);
   const quotaStartedRef = useRef(false);
+  const appMountedRef = useRef(false);
   const hotelStartGenerationRef = useRef(0);
   const hotelLiveStartInFlightRef = useRef(false);
+  const hotelDemoStartInFlightRef = useRef(false);
   const hotelLiveControllerRef = useRef<AbortController | null>(null);
   const hotelResumeRequestRef = useRef<HotelResumeRequest | null>(null);
   const hotelResumeRecoveryIdRef = useRef<string | null>(null);
@@ -237,6 +256,52 @@ export default function App() {
     if (snapshot.scenarioId !== "hotel") return;
     writeHotelRecoveryHint(snapshot.recoveryId);
     setHotelSnapshot(snapshot);
+  }, []);
+
+  const beginPendingCreation = useCallback((
+    scenarioId: ScenarioId,
+    executionMode: RecoverySnapshot["executionMode"],
+  ): PendingRecoveryCreation | null => {
+    const intent = acquirePendingRecoveryCreation(scenarioId, executionMode);
+    if (scenarioId === "hotel") {
+      setHotelCreationErrorCode(null);
+      if (intent === null) {
+        setHotelStartError(
+          "This browser could not preserve a safe recovery retry. No run was started.",
+        );
+      } else {
+        setHotelRequiresExplicitRestart(false);
+        setHotelCreationIntent(intent);
+      }
+    }
+    return intent;
+  }, []);
+
+  const promoteHotelCreation = useCallback((
+    intent: PendingRecoveryCreation,
+    snapshot: RecoverySnapshot,
+  ): boolean => {
+    const current = readPendingRecoveryCreation("hotel");
+    if (
+      snapshot.scenarioId !== "hotel" ||
+      snapshot.executionMode !== intent.executionMode ||
+      current === null ||
+      !pendingRecoveryCreationsMatch(current, intent) ||
+      !writeHotelRecoveryHint(snapshot.recoveryId)
+    ) {
+      return false;
+    }
+    return clearMatchingPendingRecoveryCreation(intent);
+  }, []);
+
+  const clearHotelCreationState = useCallback((
+    intent: PendingRecoveryCreation,
+  ) => {
+    setHotelCreationIntent((current) =>
+      current !== null && pendingRecoveryCreationsMatch(current, intent)
+        ? null
+        : current,
+    );
   }, []);
 
   const hotelResumeRequestIsCurrent = useCallback((request: HotelResumeRequest): boolean => (
@@ -297,6 +362,7 @@ export default function App() {
     setReplayError(null);
     setSdkError(null);
     setHotelStartError(null);
+    setHotelCreationErrorCode(null);
 
     request.deadlineId = setTimeout(() => {
       if (
@@ -320,6 +386,14 @@ export default function App() {
           return;
         }
         hotelResumeFocusGenerationRef.current = null;
+        const pendingCreation = readPendingRecoveryCreation("hotel");
+        if (
+          pendingCreation !== null &&
+          pendingCreation.executionMode === snapshot.executionMode &&
+          clearMatchingPendingRecoveryCreation(pendingCreation)
+        ) {
+          clearHotelCreationState(pendingCreation);
+        }
         acceptHotelSnapshot(snapshot);
         setHotelResumeState("restored");
       })
@@ -349,6 +423,7 @@ export default function App() {
     return request;
   }, [
     acceptHotelSnapshot,
+    clearHotelCreationState,
     hotelResumeRequestIsCurrent,
     makeHotelResumeRequestRetryable,
     retireHotelResumeRequest,
@@ -444,29 +519,50 @@ export default function App() {
 
   const startQuota = useCallback(async () => {
     if (quotaStartedRef.current) return;
+    const intent = beginPendingCreation("api-quota", "sdk_stub");
+    if (intent === null) {
+      setQuotaError(
+        "This browser could not preserve a safe quota retry. No run was started.",
+      );
+      return;
+    }
     quotaStartedRef.current = true;
     setQuotaLoading(true);
     setQuotaError(null);
     try {
-      setQuotaSnapshot(await createRecovery("api-quota", "sdk_stub"));
+      const snapshot = await createRecovery(
+        "api-quota",
+        "sdk_stub",
+        intent.clientRequestId,
+      );
+      if (!appMountedRef.current) return;
+      setQuotaSnapshot(snapshot);
+      clearMatchingPendingRecoveryCreation(intent);
     } catch {
+      if (!appMountedRef.current) return;
       quotaStartedRef.current = false;
       setQuotaError("The deterministic quota trace could not be loaded.");
     } finally {
-      setQuotaLoading(false);
+      if (appMountedRef.current) setQuotaLoading(false);
     }
-  }, []);
+  }, [beginPendingCreation]);
 
   const selectScenario = useCallback(
     (scenarioId: ScenarioId) => {
-      if (hotelRestorationUnresolved) return;
+      if (hotelRestorationUnresolved || hotelCreationIntent !== null) return;
       setActiveId(scenarioId);
       setEvidenceOpen(false);
       if (scenarioId === "api-quota" && quotaSnapshot === null && !quotaLoading) {
         void startQuota();
       }
     },
-    [hotelRestorationUnresolved, quotaLoading, quotaSnapshot, startQuota],
+    [
+      hotelCreationIntent,
+      hotelRestorationUnresolved,
+      quotaLoading,
+      quotaSnapshot,
+      startQuota,
+    ],
   );
 
   const startReplay = useCallback(async (
@@ -474,61 +570,128 @@ export default function App() {
     explicit = false,
     fromExplicitDemoChoice = false,
   ) => {
-    if (hotelRestorationUnresolved) return;
+    if (hotelRestorationUnresolved || hotelDemoStartInFlightRef.current) return;
+    const intent = beginPendingCreation("hotel", "replay_fixture");
+    if (intent === null) return;
+    hotelDemoStartInFlightRef.current = true;
     const generation = ++hotelStartGenerationRef.current;
     setSdkLoading(false);
     setSdkError(null);
     setReplayLoading(true);
     setReplayError(null);
+    setHotelStartError(null);
     if (fromExplicitDemoChoice) setReplayFallback(AWAITING_DEMO_NOTICE);
     try {
-      const snapshot = await createRecovery("hotel", "replay_fixture", signal);
+      const snapshot = await createRecovery(
+        "hotel",
+        "replay_fixture",
+        intent.clientRequestId,
+        signal,
+      );
+      const promoted = promoteHotelCreation(intent, snapshot);
       if (hotelStartGenerationRef.current !== generation) return;
+      if (promoted) clearHotelCreationState(intent);
       acceptHotelSnapshot(snapshot);
       if (explicit) setReplayFallback(EXPLICIT_REPLAY_NOTICE);
     } catch (error: unknown) {
       if (hotelStartGenerationRef.current !== generation) return;
       if (error instanceof DOMException && error.name === "AbortError") return;
       if (fromExplicitDemoChoice) setReplayFallback(EXPLICIT_DEMO_NOTICE);
-      setReplayError("The replay fixture could not be started. You can retry explicitly.");
+      const message =
+        error instanceof RecoveryCreationError
+          ? error.message
+          : "The replay fixture could not be started. You can retry explicitly.";
+      setHotelCreationErrorCode(
+        error instanceof RecoveryCreationError ? error.code : null,
+      );
+      setReplayError(message);
+      setHotelStartError(message);
     } finally {
-      if (hotelStartGenerationRef.current === generation) setReplayLoading(false);
+      if (hotelStartGenerationRef.current === generation) {
+        hotelDemoStartInFlightRef.current = false;
+        setReplayLoading(false);
+      }
     }
-  }, [acceptHotelSnapshot, hotelRestorationUnresolved]);
+  }, [
+    acceptHotelSnapshot,
+    beginPendingCreation,
+    clearHotelCreationState,
+    hotelRestorationUnresolved,
+    promoteHotelCreation,
+  ]);
 
   const startSdkQa = useCallback(async () => {
-    if (sdkLoading || hotelRestorationUnresolved) return;
+    if (
+      sdkLoading ||
+      hotelRestorationUnresolved ||
+      hotelDemoStartInFlightRef.current
+    ) {
+      return;
+    }
+    const intent = beginPendingCreation("hotel", "sdk_stub");
+    if (intent === null) return;
+    hotelDemoStartInFlightRef.current = true;
     const fromExplicitDemoChoice = replayFallback === EXPLICIT_DEMO_NOTICE;
     const generation = ++hotelStartGenerationRef.current;
     setReplayLoading(false);
     setReplayError(null);
     setSdkLoading(true);
     setSdkError(null);
+    setHotelStartError(null);
     if (fromExplicitDemoChoice) setReplayFallback(AWAITING_DEMO_NOTICE);
     try {
-      const snapshot = await createRecovery("hotel", "sdk_stub");
+      const snapshot = await createRecovery(
+        "hotel",
+        "sdk_stub",
+        intent.clientRequestId,
+      );
+      const promoted = promoteHotelCreation(intent, snapshot);
       if (hotelStartGenerationRef.current !== generation) return;
+      if (promoted) clearHotelCreationState(intent);
       acceptHotelSnapshot(snapshot);
       if (replayFallback !== null) setReplayFallback(SDK_QA_NOTICE);
       setEvidenceOpen(false);
-    } catch {
+    } catch (error: unknown) {
       if (hotelStartGenerationRef.current !== generation) return;
       if (fromExplicitDemoChoice) setReplayFallback(EXPLICIT_DEMO_NOTICE);
-      setSdkError("The deterministic SDK QA trace could not be started.");
+      const message =
+        error instanceof RecoveryCreationError
+          ? error.message
+          : "The deterministic SDK QA trace could not be started.";
+      setHotelCreationErrorCode(
+        error instanceof RecoveryCreationError ? error.code : null,
+      );
+      setSdkError(message);
+      setHotelStartError(message);
     } finally {
-      if (hotelStartGenerationRef.current === generation) setSdkLoading(false);
+      if (hotelStartGenerationRef.current === generation) {
+        hotelDemoStartInFlightRef.current = false;
+        setSdkLoading(false);
+      }
     }
-  }, [acceptHotelSnapshot, hotelRestorationUnresolved, replayFallback, sdkLoading]);
+  }, [
+    acceptHotelSnapshot,
+    beginPendingCreation,
+    clearHotelCreationState,
+    hotelRestorationUnresolved,
+    promoteHotelCreation,
+    replayFallback,
+    sdkLoading,
+  ]);
 
   const startLive = useCallback(() => {
+    const retryingPendingLive =
+      hotelCreationIntent?.executionMode === "openai_live";
     if (
       hotelLiveStartInFlightRef.current ||
-      health?.backend !== "openai" ||
-      !health.liveReady ||
-      hotelRestorationUnresolved
+      hotelRestorationUnresolved ||
+      (!retryingPendingLive &&
+        (health?.backend !== "openai" || !health.liveReady))
     ) {
       return;
     }
+    const intent = beginPendingCreation("hotel", "openai_live");
+    if (intent === null) return;
     hotelLiveStartInFlightRef.current = true;
     const generation = ++hotelStartGenerationRef.current;
     const controller = new AbortController();
@@ -538,9 +701,16 @@ export default function App() {
     setReplayError(null);
     setReplayFallback(null);
 
-    void createRecovery("hotel", "openai_live", controller.signal)
+    void createRecovery(
+      "hotel",
+      "openai_live",
+      intent.clientRequestId,
+      controller.signal,
+    )
       .then((snapshot) => {
+        const promoted = promoteHotelCreation(intent, snapshot);
         if (hotelStartGenerationRef.current !== generation) return;
+        if (promoted) clearHotelCreationState(intent);
         acceptHotelSnapshot(snapshot);
         setEvidenceOpen(false);
       })
@@ -548,6 +718,8 @@ export default function App() {
         if (hotelStartGenerationRef.current !== generation) return;
         if (error instanceof DOMException && error.name === "AbortError") return;
         if (error instanceof LiveAdmissionError) {
+          clearMatchingPendingRecoveryCreation(intent);
+          clearHotelCreationState(intent);
           setReplayFallback(error.message);
           hotelLiveStartInFlightRef.current = false;
           hotelLiveControllerRef.current = null;
@@ -555,7 +727,14 @@ export default function App() {
           void startReplay();
           return;
         }
-        setHotelStartError("The live recovery could not be started. No fallback run was created.");
+        setHotelStartError(
+          error instanceof RecoveryCreationError
+            ? error.message
+            : "The live recovery could not be started. No fallback run was created.",
+        );
+        setHotelCreationErrorCode(
+          error instanceof RecoveryCreationError ? error.code : null,
+        );
       })
       .finally(() => {
         if (hotelLiveControllerRef.current !== controller) return;
@@ -563,7 +742,56 @@ export default function App() {
         hotelLiveStartInFlightRef.current = false;
         if (hotelStartGenerationRef.current === generation) setHotelLiveLoading(false);
       });
-  }, [acceptHotelSnapshot, health, hotelRestorationUnresolved, startReplay]);
+  }, [
+    acceptHotelSnapshot,
+    beginPendingCreation,
+    clearHotelCreationState,
+    health,
+    hotelCreationIntent,
+    hotelRestorationUnresolved,
+    promoteHotelCreation,
+    startReplay,
+  ]);
+
+  const retryPendingHotelCreation = useCallback(() => {
+    if (hotelCreationIntent === null) return;
+    switch (hotelCreationIntent.executionMode) {
+      case "openai_live":
+        startLive();
+        return;
+      case "replay_fixture":
+        void startReplay(undefined, true);
+        return;
+      case "sdk_stub":
+        void startSdkQa();
+    }
+  }, [hotelCreationIntent, startLive, startReplay, startSdkQa]);
+
+  const abandonConflictingHotelCreation = useCallback(() => {
+    if (
+      hotelCreationErrorCode !== "idempotency_conflict" ||
+      hotelCreationIntent === null ||
+      !clearMatchingPendingRecoveryCreation(hotelCreationIntent)
+    ) {
+      return;
+    }
+    clearHotelCreationState(hotelCreationIntent);
+    setHotelCreationErrorCode(null);
+    setHotelRequiresExplicitRestart(true);
+    setHotelStartError(null);
+    setReplayError(null);
+    setSdkError(null);
+    setReplayFallback(
+      health?.backend === "openai" && health.liveReady
+        ? null
+        : EXPLICIT_DEMO_NOTICE,
+    );
+  }, [
+    clearHotelCreationState,
+    health,
+    hotelCreationErrorCode,
+    hotelCreationIntent,
+  ]);
 
   useEffect(() => {
     const { hadHint, recoveryId } = readHotelRecoveryHint();
@@ -589,13 +817,22 @@ export default function App() {
     if (
       health === null ||
       hotelRestorationUnresolved ||
-      hotelResumeState === "restored"
+      hotelCreationIntent !== null ||
+      hotelResumeState === "restored" ||
+      hotelSnapshot !== null
     ) {
       return;
     }
     const controller = new AbortController();
     const liveAvailable = health.backend === "openai" && health.liveReady;
     if (hotelResumeState === "invalid") {
+      setHotelSnapshot(null);
+      setReplayError(null);
+      setHotelStartError(null);
+      setReplayFallback(liveAvailable ? null : EXPLICIT_DEMO_NOTICE);
+      return () => controller.abort();
+    }
+    if (hotelRequiresExplicitRestart) {
       setHotelSnapshot(null);
       setReplayError(null);
       setHotelStartError(null);
@@ -613,21 +850,31 @@ export default function App() {
     setReplayError(null);
     setHotelStartError(null);
     return () => controller.abort();
-  }, [health, hotelRestorationUnresolved, hotelResumeState, startReplay]);
+  }, [
+    health,
+    hotelCreationIntent,
+    hotelRequiresExplicitRestart,
+    hotelSnapshot,
+    hotelRestorationUnresolved,
+    hotelResumeState,
+    startReplay,
+  ]);
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    appMountedRef.current = true;
+    return () => {
+      appMountedRef.current = false;
       hotelStartGenerationRef.current += 1;
       hotelLiveStartInFlightRef.current = false;
+      hotelDemoStartInFlightRef.current = false;
       hotelLiveControllerRef.current?.abort();
       hotelLiveControllerRef.current = null;
       hotelResumeFocusGenerationRef.current = null;
       receiptRetryFocusRecoveryIdRef.current = null;
       abortHotelResumeRequest();
       abortReceiptRequests();
-    },
-    [abortHotelResumeRequest, abortReceiptRequests],
-  );
+    };
+  }, [abortHotelResumeRequest, abortReceiptRequests]);
 
   useEffect(() => {
     const terminalSnapshots = [hotelSnapshot, quotaSnapshot];
@@ -643,6 +890,7 @@ export default function App() {
     activeId !== "hotel" || activeSnapshot !== null
       ? "active"
       : hotelRestorationUnresolved ||
+          hotelCreationIntent !== null ||
           hotelLiveLoading ||
           replayLoading ||
           sdkLoading
@@ -811,7 +1059,9 @@ export default function App() {
         <ScenarioRail
           scenarios={recoveryScenarios}
           activeId={activeId}
-          disabled={hotelRestorationUnresolved}
+          disabled={
+            hotelRestorationUnresolved || hotelCreationIntent !== null
+          }
           mobile={mobile}
           onSelect={selectScenario}
         />
@@ -830,8 +1080,42 @@ export default function App() {
             noRunStarted={activeId === "hotel" && hotelLifecyclePhase === "idle"}
           />
           {activeId === "hotel" &&
+          hotelCreationIntent !== null &&
+          !hotelRestorationUnresolved &&
+          activeSnapshot === null ? (
+            <section className="live-start" aria-live="polite">
+              <div>
+                <p className="eyebrow">Unresolved recovery start</p>
+                <p>
+                  {hotelCreationErrorCode === "idempotency_conflict"
+                    ? "This local recovery start cannot be reused. You can abandon it and return to the available start choices."
+                    : "No accepted server snapshot is available yet. Retry the same recovery start explicitly."}
+                </p>
+              </div>
+              {hotelCreationErrorCode === "idempotency_conflict" ? (
+                <button
+                  type="button"
+                  onClick={abandonConflictingHotelCreation}
+                >
+                  Start a new recovery
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  disabled={hotelLiveLoading || replayLoading || sdkLoading}
+                  onClick={retryPendingHotelCreation}
+                >
+                  {hotelLiveLoading || replayLoading || sdkLoading
+                    ? "Retrying recovery start…"
+                    : "Retry recovery start"}
+                </button>
+              )}
+            </section>
+          ) : null}
+          {activeId === "hotel" &&
           liveAvailable &&
           !hotelRestorationUnresolved &&
+          hotelCreationIntent === null &&
           activeSnapshot === null &&
           replayFallback === null ? (
             <section className="live-start" aria-live="polite">
@@ -878,7 +1162,9 @@ export default function App() {
               </button>
             </section>
           ) : null}
-          {activeId === "hotel" && replayFallback !== null ? (
+          {activeId === "hotel" &&
+          replayFallback !== null &&
+          hotelCreationIntent === null ? (
             <section className="replay-fallback" aria-live="polite">
               <div>
                 <p className="eyebrow">

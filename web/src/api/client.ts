@@ -26,7 +26,17 @@ export const LIVE_ADMISSION_MESSAGES = {
 export const DECISION_CAPACITY_MESSAGE =
   "Live decision processing is currently at capacity. Retry the same decision shortly.";
 
+export const RECOVERY_CREATION_MESSAGES = {
+  idempotency_conflict:
+    "This recovery start no longer matches its original request. No additional run was started.",
+  creation_pending:
+    "Recovery creation is still in progress. Retry the same start shortly.",
+  creation_outcome_unknown:
+    "The recovery start outcome could not be confirmed. No replacement run was started.",
+} as const;
+
 export type LiveAdmissionCode = keyof typeof LIVE_ADMISSION_MESSAGES;
+export type RecoveryCreationCode = keyof typeof RECOVERY_CREATION_MESSAGES;
 
 export class LiveAdmissionError extends Error {
   readonly name = "LiveAdmissionError";
@@ -46,6 +56,17 @@ export class DecisionCapacityError extends Error {
 
   constructor(readonly requestId: string) {
     super(DECISION_CAPACITY_MESSAGE);
+  }
+}
+
+export class RecoveryCreationError extends Error {
+  readonly name = "RecoveryCreationError";
+
+  constructor(
+    readonly code: RecoveryCreationCode,
+    readonly requestId: string,
+  ) {
+    super(RECOVERY_CREATION_MESSAGES[code]);
   }
 }
 
@@ -229,6 +250,30 @@ function readDecisionCapacityError(
     return null;
   }
   return new DecisionCapacityError(value.requestId);
+}
+
+function isRecoveryCreationCode(
+  value: unknown,
+): value is RecoveryCreationCode {
+  return typeof value === "string" && value in RECOVERY_CREATION_MESSAGES;
+}
+
+function readRecoveryCreationError(
+  value: unknown,
+  status: number,
+): RecoveryCreationError | null {
+  if (
+    status !== 409 ||
+    !isRecord(value) ||
+    !hasExactKeys(value, ["code", "message", "requestId"]) ||
+    !isRecoveryCreationCode(value.code) ||
+    value.message !== RECOVERY_CREATION_MESSAGES[value.code] ||
+    typeof value.requestId !== "string" ||
+    !/^[0-9a-f]{32}$/.test(value.requestId)
+  ) {
+    return null;
+  }
+  return new RecoveryCreationError(value.code, value.requestId);
 }
 
 export async function getHealth(signal?: AbortSignal): Promise<HealthStatus> {
@@ -540,6 +585,7 @@ export async function getReceipt(
 export async function createRecovery(
   scenarioId: ScenarioId,
   executionMode: ExecutionMode,
+  clientRequestId: string,
   signal?: AbortSignal,
 ): Promise<RecoverySnapshot> {
   const response = await fetch("/api/recoveries", {
@@ -548,7 +594,7 @@ export async function createRecovery(
       Accept: "application/json",
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ scenarioId, executionMode }),
+    body: JSON.stringify({ clientRequestId, scenarioId, executionMode }),
     signal,
   });
   if (!response.ok) {
@@ -561,6 +607,10 @@ export async function createRecovery(
     const admissionError = readLiveAdmissionError(body, response.status);
     if (admissionError !== null) {
       throw admissionError;
+    }
+    const creationError = readRecoveryCreationError(body, response.status);
+    if (creationError !== null) {
+      throw creationError;
     }
     throw new Error(`Recovery creation failed with status ${response.status}`);
   }

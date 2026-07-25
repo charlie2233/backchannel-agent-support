@@ -59,13 +59,19 @@ def test_scenarios_are_exactly_the_two_replay_definitions(client: TestClient) ->
 def test_create_recovery_validates_scenario_and_execution_mode(
     client: TestClient, payload: dict[str, str], expected_status: int
 ) -> None:
-    assert client.post("/api/recoveries", json=payload).status_code == expected_status
+    assert client.post(
+        "/api/recoveries", json={**payload, "clientRequestId": uuid4().hex}
+    ).status_code == expected_status
 
 
 def test_replay_recovery_snapshot_and_receipt_are_durable(client: TestClient) -> None:
     created = client.post(
         "/api/recoveries",
-        json={"scenarioId": "api-quota", "executionMode": "replay_fixture"},
+        json={
+            "scenarioId": "api-quota",
+            "executionMode": "replay_fixture",
+            "clientRequestId": uuid4().hex,
+        },
     )
 
     assert created.status_code == 201
@@ -104,7 +110,10 @@ def test_independent_apps_racing_replay_post_return_one_complete_recovery(
         with ThreadPoolExecutor(max_workers=2) as executor:
             responses = list(
                 executor.map(
-                    lambda api_client: api_client.post("/api/recoveries", json=payload),
+                    lambda api_client: api_client.post(
+                        "/api/recoveries",
+                        json={**payload, "clientRequestId": uuid4().hex},
+                    ),
                     (first_client, second_client),
                 )
             )
@@ -149,7 +158,11 @@ def test_sdk_stub_hotel_creates_a_pending_recovery_without_execution(tmp_path) -
     ) as client:
         response = client.post(
             "/api/recoveries",
-            json={"scenarioId": "hotel", "executionMode": "sdk_stub"},
+            json={
+                "scenarioId": "hotel",
+                "executionMode": "sdk_stub",
+                "clientRequestId": uuid4().hex,
+            },
         )
 
     assert response.status_code == 201
@@ -165,7 +178,11 @@ def test_demo_reset_is_forbidden_by_default_without_deleting_recovery(
 ) -> None:
     created = client.post(
         "/api/recoveries",
-        json={"scenarioId": "api-quota", "executionMode": "replay_fixture"},
+        json={
+            "scenarioId": "api-quota",
+            "executionMode": "replay_fixture",
+            "clientRequestId": uuid4().hex,
+        },
     )
     recovery_id = created.json()["recoveryId"]
 
@@ -182,7 +199,11 @@ def test_demo_reset_deletes_recovery_only_when_explicitly_enabled(tmp_path) -> N
     with TestClient(create_app(settings, store=store)) as client:
         created = client.post(
             "/api/recoveries",
-            json={"scenarioId": "api-quota", "executionMode": "replay_fixture"},
+            json={
+                "scenarioId": "api-quota",
+                "executionMode": "replay_fixture",
+                "clientRequestId": uuid4().hex,
+            },
         )
         recovery_id = created.json()["recoveryId"]
 
@@ -202,7 +223,11 @@ def test_demo_reset_deletes_recovery_only_when_explicitly_enabled(tmp_path) -> N
 def test_last_event_id_replays_only_newer_persisted_events(client: TestClient) -> None:
     created = client.post(
         "/api/recoveries",
-        json={"scenarioId": "api-quota", "executionMode": "replay_fixture"},
+        json={
+            "scenarioId": "api-quota",
+            "executionMode": "replay_fixture",
+            "clientRequestId": uuid4().hex,
+        },
     )
     recovery_id = created.json()["recoveryId"]
 
@@ -228,7 +253,11 @@ def test_last_event_id_replays_only_newer_persisted_events(client: TestClient) -
 def test_last_event_id_must_be_a_non_negative_integer(client: TestClient) -> None:
     created = client.post(
         "/api/recoveries",
-        json={"scenarioId": "api-quota", "executionMode": "replay_fixture"},
+        json={
+            "scenarioId": "api-quota",
+            "executionMode": "replay_fixture",
+            "clientRequestId": uuid4().hex,
+        },
     )
     recovery_id = created.json()["recoveryId"]
 

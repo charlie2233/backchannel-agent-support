@@ -329,7 +329,11 @@ def _sse_ids_and_payloads(body: bytes) -> tuple[list[int], list[dict[str, Any]]]
 def _pending_hotel(client: SmokeClient) -> dict[str, Any]:
     created = client.post(
         "/api/recoveries",
-        {"scenarioId": "hotel", "executionMode": "sdk_stub"},
+        {
+            "scenarioId": "hotel",
+            "executionMode": "sdk_stub",
+            "clientRequestId": f"smoke-{secrets.token_hex(16)}",
+        },
     ).json()
     approval = created.get("pendingApproval")
     _require(created.get("status") == "pending_approval", "SDK hotel was not pending")
@@ -516,7 +520,11 @@ def run_http_smoke(base_url: str, canary: str) -> dict[str, object]:
 
     replay = client.post(
         "/api/recoveries",
-        {"scenarioId": "api-quota", "executionMode": "replay_fixture"},
+        {
+            "scenarioId": "api-quota",
+            "executionMode": "replay_fixture",
+            "clientRequestId": f"smoke-{secrets.token_hex(16)}",
+        },
     ).json()
     replay_id = str(replay["recoveryId"])
     foreign_client = SmokeClient(base_url, canary)

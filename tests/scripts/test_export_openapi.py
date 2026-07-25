@@ -46,6 +46,138 @@ def test_pending_approval_schema_exposes_only_policy_eligible_consent() -> None:
         }
 
 
+def test_recovery_creation_requires_a_strict_client_request_id() -> None:
+    schema = json.loads(_exporter().render_openapi())
+
+    request_body = schema["paths"]["/api/recoveries"]["post"]["requestBody"]
+    assert request_body == {
+        "required": True,
+        "content": {
+            "application/json": {
+                "schema": {
+                    "$ref": "#/components/schemas/CreateRecoveryRequest",
+                }
+            }
+        },
+    }
+
+    request_schema = schema["components"]["schemas"]["CreateRecoveryRequest"]
+
+    assert request_schema["required"] == [
+        "scenarioId",
+        "executionMode",
+        "clientRequestId",
+    ]
+    assert request_schema["additionalProperties"] is False
+    assert request_schema["properties"]["clientRequestId"] == {
+        "maxLength": 128,
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$",
+        "title": "Clientrequestid",
+        "type": "string",
+    }
+
+
+def test_recovery_creation_documents_exact_idempotency_conflict_envelopes() -> None:
+    schema = json.loads(_exporter().render_openapi())
+
+    response = schema["paths"]["/api/recoveries"]["post"]["responses"]["409"]
+
+    assert response == {
+        "description": (
+            "The session-scoped recovery creation key is already in use, still "
+            "being resolved, or has an outcome that cannot be confirmed. "
+            "Retry-After is returned only for creation_pending."
+        ),
+        "headers": {
+            "Retry-After": {
+                "description": (
+                    "Seconds to wait before retrying the same clientRequestId. "
+                    "Present only when code is creation_pending."
+                ),
+                "schema": {
+                    "enum": ["2"],
+                    "type": "string",
+                },
+            }
+        },
+        "content": {
+            "application/json": {
+                "schema": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["code", "message", "requestId"],
+                            "properties": {
+                                "code": {
+                                    "type": "string",
+                                    "enum": ["idempotency_conflict"],
+                                },
+                                "message": {
+                                    "type": "string",
+                                    "enum": [
+                                        "This recovery start no longer matches its "
+                                        "original request. No additional run was started."
+                                    ],
+                                },
+                                "requestId": {
+                                    "type": "string",
+                                    "pattern": "^[0-9a-f]{32}$",
+                                },
+                            },
+                        },
+                        {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["code", "message", "requestId"],
+                            "properties": {
+                                "code": {
+                                    "type": "string",
+                                    "enum": ["creation_pending"],
+                                },
+                                "message": {
+                                    "type": "string",
+                                    "enum": [
+                                        "Recovery creation is still in progress. Retry "
+                                        "the same start shortly."
+                                    ],
+                                },
+                                "requestId": {
+                                    "type": "string",
+                                    "pattern": "^[0-9a-f]{32}$",
+                                },
+                            },
+                        },
+                        {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["code", "message", "requestId"],
+                            "properties": {
+                                "code": {
+                                    "type": "string",
+                                    "enum": ["creation_outcome_unknown"],
+                                },
+                                "message": {
+                                    "type": "string",
+                                    "enum": [
+                                        "The recovery start outcome could not be "
+                                        "confirmed. No replacement run was started."
+                                    ],
+                                },
+                                "requestId": {
+                                    "type": "string",
+                                    "pattern": "^[0-9a-f]{32}$",
+                                },
+                            },
+                        },
+                    ]
+                }
+            }
+        },
+    }
+
+
 def test_private_recovery_operations_document_one_generic_not_found_boundary() -> None:
     schema = json.loads(_exporter().render_openapi())
     operations = (
@@ -171,6 +303,46 @@ def test_decision_422_documents_both_stable_public_error_shapes() -> None:
                             },
                         },
                     ]
+                }
+            }
+        },
+    }
+
+
+def test_demo_reset_documents_unresolved_creation_conflict() -> None:
+    schema = json.loads(_exporter().render_openapi())
+
+    response = schema["paths"]["/api/demo/reset"]["post"]["responses"]["409"]
+
+    assert response == {
+        "description": (
+            "Reset is refused without mutation while this session owns an unresolved "
+            "recovery start."
+        ),
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["code", "message", "requestId"],
+                    "properties": {
+                        "code": {
+                            "type": "string",
+                            "enum": ["reset_creation_pending"],
+                        },
+                        "message": {
+                            "type": "string",
+                            "enum": [
+                                "Demo reset is unavailable while a recovery start is "
+                                "unresolved. Retry reset after the start resolves or "
+                                "the signed session expires."
+                            ],
+                        },
+                        "requestId": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{32}$",
+                        },
+                    },
                 }
             }
         },
