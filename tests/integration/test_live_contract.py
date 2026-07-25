@@ -555,7 +555,7 @@ def test_live_decline_timeout_releases_lease_for_exact_retry(tmp_path) -> None:
             live_model_provider_factory=model_provider.bind,
             live_trace_factory=_TraceRecorder().root,
             live_operation_timeout=timedelta(seconds=1),
-            decision_lease_duration=timedelta(milliseconds=300),
+            decision_lease_duration=timedelta(seconds=10),
         )
         pending = await orchestrator.start(
             "hotel", execution_mode=ExecutionMode.OPENAI_LIVE
@@ -566,9 +566,12 @@ def test_live_decline_timeout_releases_lease_for_exact_retry(tmp_path) -> None:
             await orchestrator.decline_decision(pending.recovery.recovery_id, request)
 
         model_provider.delays.clear()
-        response = await orchestrator.decline_decision(
-            pending.recovery.recovery_id,
-            request,
+        response = await asyncio.wait_for(
+            orchestrator.decline_decision(
+                pending.recovery.recovery_id,
+                request,
+            ),
+            timeout=2,
         )
         return model_provider.call_count, hotel.dispatch_count, response.status
 
