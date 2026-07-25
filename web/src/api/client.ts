@@ -505,6 +505,7 @@ export async function getRecovery(
     headers: { Accept: "application/json" },
     credentials: "same-origin",
     signal,
+    cache: "no-store",
   });
   if (!response.ok) {
     throw await failedRequest(response, { expectedRecoveryId: recoveryId });
@@ -912,6 +913,7 @@ export async function getReceipt(
       headers: { Accept: "application/json" },
       credentials: "same-origin",
       signal,
+      cache: "no-store",
     },
   );
   if (!response.ok) {

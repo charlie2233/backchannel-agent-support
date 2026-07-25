@@ -268,6 +268,51 @@ describe("health transport", () => {
   });
 });
 
+describe("authoritative recovery reads", () => {
+  it("bypasses the browser cache while preserving the recovery request contract", async () => {
+    const signal = new AbortController().signal;
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(replayRecoverySnapshot()));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await getRecovery(recoveryId, signal);
+
+    expect(fetchMock).toHaveBeenCalledWith(`/api/recoveries/${recoveryId}`, {
+      headers: { Accept: "application/json" },
+      credentials: "same-origin",
+      signal,
+      cache: "no-store",
+    });
+  });
+
+  it("bypasses the browser cache while preserving the receipt request contract", async () => {
+    const signal = new AbortController().signal;
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(cancellationReceipt()));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await getReceipt(recoveryId, signal);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      `/api/recoveries/${recoveryId}/receipt`,
+      {
+        headers: { Accept: "application/json" },
+        credentials: "same-origin",
+        signal,
+        cache: "no-store",
+      },
+    );
+  });
+
+  it("leaves cache mode unspecified for recovery creation", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(replayRecoverySnapshot()));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createRecovery("hotel", "replay_fixture");
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(init.cache).toBeUndefined();
+  });
+});
+
 describe("decision and receipt contracts", () => {
   it("preserves a non-success recovery HTTP status as typed client evidence", async () => {
     vi.stubGlobal(
@@ -981,6 +1026,7 @@ describe("decision and receipt contracts", () => {
     });
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(JSON.parse(String(init.body))).toEqual(request);
+    expect(init.cache).toBeUndefined();
   });
 
   it("rejects a response whose discriminator and status belong to different union arms", async () => {

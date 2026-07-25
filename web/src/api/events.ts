@@ -434,6 +434,7 @@ export async function openRecoveryEventStream(
           headers,
           credentials: "same-origin",
           signal: requestController.signal,
+          cache: "no-store",
         },
       ),
       signal,

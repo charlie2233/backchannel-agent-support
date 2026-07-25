@@ -174,6 +174,7 @@ describe("one-attempt fetch recovery event transport", () => {
     expect(new Headers(init.headers).get("Accept")).toBe("text/event-stream");
     expect(new Headers(init.headers).has("Last-Event-ID")).toBe(false);
     expect(init.signal).toBeInstanceOf(AbortSignal);
+    expect(init.cache).toBe("no-store");
     expect(onOpen).toHaveBeenCalledOnce();
     expect(onEvent).toHaveBeenCalledOnce();
     expect(onEvent).toHaveBeenCalledWith(terminal);
@@ -234,11 +235,9 @@ describe("one-attempt fetch recovery event transport", () => {
       lastSeq: 2,
       lastEvent: terminal,
     });
-    expect(
-      new Headers((fetchImpl.mock.calls[0]?.[1] as RequestInit).headers).get(
-        "Last-Event-ID",
-      ),
-    ).toBe("1");
+    const init = fetchImpl.mock.calls[0]?.[1] as RequestInit;
+    expect(new Headers(init.headers).get("Last-Event-ID")).toBe("1");
+    expect(init.cache).toBe("no-store");
     expect(onEvent.mock.calls.map(([event]) => event)).toEqual([terminal]);
   });
 
