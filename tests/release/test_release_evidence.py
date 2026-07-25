@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import binascii
 import json
 import re
 import struct
+import subprocess
+import zlib
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 FINAL_ASSETS = ROOT / "docs" / "assets" / "final"
@@ -22,9 +27,58 @@ def _read(path: str) -> str:
 
 
 def _png_size(path: Path) -> tuple[int, int]:
-    payload = path.read_bytes()[:24]
+    payload = path.read_bytes()
     assert payload[:8] == b"\x89PNG\r\n\x1a\n"
-    return struct.unpack(">II", payload[16:24])
+    offset = 8
+    dimensions: tuple[int, int] | None = None
+    chunk_types: list[bytes] = []
+    idat_payload = bytearray()
+    saw_iend = False
+
+    while offset < len(payload):
+        assert len(payload) - offset >= 12
+        chunk_length = struct.unpack(">I", payload[offset : offset + 4])[0]
+        chunk_type = payload[offset + 4 : offset + 8]
+        data_start = offset + 8
+        data_end = data_start + chunk_length
+        chunk_end = data_end + 4
+        assert chunk_end <= len(payload)
+        chunk_data = payload[data_start:data_end]
+        expected_crc = struct.unpack(">I", payload[data_end:chunk_end])[0]
+        actual_crc = binascii.crc32(chunk_type + chunk_data) & 0xFFFFFFFF
+        assert actual_crc == expected_crc
+
+        if chunk_type == b"IHDR":
+            assert not chunk_types
+            assert dimensions is None
+            assert chunk_length == 13
+            dimensions = struct.unpack(">II", chunk_data[:8])
+        elif chunk_type == b"IDAT":
+            assert dimensions is not None
+            idat_payload.extend(chunk_data)
+        elif chunk_type == b"IEND":
+            assert chunk_length == 0
+            assert not saw_iend
+            saw_iend = True
+
+        chunk_types.append(chunk_type)
+        offset = chunk_end
+        if saw_iend:
+            assert offset == len(payload)
+            break
+
+    assert saw_iend
+    assert chunk_types.count(b"IEND") == 1
+    assert chunk_types[-1] == b"IEND"
+    assert dimensions is not None
+    assert b"IDAT" in chunk_types
+    inflater = zlib.decompressobj()
+    decompressed = inflater.decompress(bytes(idat_payload)) + inflater.flush()
+    assert inflater.eof
+    assert inflater.unused_data == b""
+    assert inflater.unconsumed_tail == b""
+    assert decompressed
+    return dimensions
 
 
 def test_release_documentation_covers_the_judge_contract() -> None:
@@ -133,6 +187,201 @@ def test_release_commands_use_cli_first_browser_capture() -> None:
     assert 'page.on("pageerror"' in capture
 
 
+def test_release_capture_bootstraps_without_starting_the_spa() -> None:
+    orchestration = _read("scripts/capture_release.sh")
+    assert re.search(
+        r'open \\\n\s+"http://127\.0\.0\.1:\$release_port/health" \\\n',
+        orchestration,
+    )
+
+    capture = _read("e2e/capture-release.mjs")
+    reset = capture.split("  const reset = async () => {", 1)[1].split("  };", 1)[0]
+    health_navigation = reset.index('page.goto(`${baseUrl}/health`')
+    storage_clear = reset.index("window.sessionStorage.clear()")
+    storage_assertion = reset.index("window.sessionStorage.length")
+    demo_reset = reset.index("/api/demo/reset")
+    explicit_demo_choice = reset.index(
+        '"backchannel.hotelRecoveryId", "capture-explicit-demo-choice"'
+    )
+    assert (
+        health_navigation
+        < storage_clear
+        < storage_assertion
+        < demo_reset
+        < explicit_demo_choice
+    )
+    assert 'page.goto("about:blank")' not in reset
+
+    expected_post_count = capture.index("let expectedRecoveryPostCount = 0")
+    root_navigation = capture.index(
+        'await page.goto(baseUrl, { waitUntil: "domcontentloaded" })'
+    )
+    sdk_button_visible = capture.index(
+        'await runButton.waitFor({ state: "visible" })'
+    )
+    no_automatic_post = capture.index(
+        "recoveryPostCount === expectedRecoveryPostCount"
+    )
+    sdk_button_click = capture.index("await runButton.click()")
+    increment_expected_count = capture.index(
+        "expectedRecoveryPostCount += 1"
+    )
+    duplicate_settle = capture.index(
+        "await page.waitForTimeout(250)",
+        increment_expected_count,
+    )
+    exactly_one_sdk_post = capture.index(
+        "recoveryPostCount === expectedRecoveryPostCount",
+        no_automatic_post + 1,
+    )
+    assert (
+        expected_post_count
+        < root_navigation
+        < sdk_button_visible
+        < no_automatic_post
+        < sdk_button_click
+        < increment_expected_count
+        < duplicate_settle
+        < exactly_one_sdk_post
+    )
+    final_stable_count = capture.index("recoveryPostCount === 6")
+    final_expected_count = capture.index("expectedRecoveryPostCount === 6")
+    completion_return = capture.index('return ["backchannel"')
+    assert (
+        exactly_one_sdk_post
+        < final_stable_count
+        < final_expected_count
+        < completion_return
+    )
+    assert "const recoveryPostBaseline" not in capture
+
+
+def test_release_capture_lock_precedes_and_protects_shared_evidence(
+    tmp_path: Path,
+) -> None:
+    orchestration = _read("scripts/capture_release.sh")
+    lock_helpers = orchestration.split("# capture-lock:start", 1)[1].split(
+        "# capture-lock:end", 1
+    )[0]
+    lock_path = tmp_path / "capture.lock"
+    lock_path.mkdir()
+    audit_log = tmp_path / "run-code.stdout.log"
+    audit_log.write_text("first capture still owns this log\n", encoding="utf-8")
+    command = (
+        "set -euo pipefail\n"
+        f"{lock_helpers}\n"
+        'acquire_release_capture_lock "$1"\n'
+        ': > "$2"'
+    )
+    contender = subprocess.run(
+        ["bash", "-c", command, "lock-test", str(lock_path), str(audit_log)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert contender.returncode != 0
+    assert "already running" in contender.stderr.lower()
+    assert audit_log.read_text(encoding="utf-8") == (
+        "first capture still owns this log\n"
+    )
+
+    acquire = orchestration.index(
+        'acquire_release_capture_lock "$release_lock"'
+    )
+    output_setup = orchestration.index(
+        'mkdir -p "$release_output" "$release_captures"',
+        acquire,
+    )
+    run_log_truncate = orchestration.index(': > "$release_run_log"', output_setup)
+    server_stdout_truncate = orchestration.index(
+        ': > "$release_server_stdout_log"',
+        output_setup,
+    )
+    server_stderr_truncate = orchestration.index(
+        ': > "$release_server_stderr_log"',
+        output_setup,
+    )
+    prerequisite_check = orchestration.index(
+        "if ! command -v npx",
+        output_setup,
+    )
+    build = orchestration.index("npm run build", prerequisite_check)
+    browser_open = orchestration.index(
+        'run_release_cli --session "$release_session" open',
+        build,
+    )
+    assert (
+        acquire
+        < output_setup
+        < run_log_truncate
+        < server_stdout_truncate
+        < server_stderr_truncate
+        < prerequisite_check
+        < build
+        < browser_open
+    )
+    assert 'release_release_capture_lock "$release_lock"' in orchestration
+    assert "trap cleanup_release_capture EXIT" in orchestration
+    assert "trap 'exit 130' INT" in orchestration
+    assert "trap 'exit 143' TERM" in orchestration
+
+
+def test_release_capture_requires_the_exact_success_result_marker(
+    tmp_path: Path,
+) -> None:
+    orchestration = _read("scripts/capture_release.sh")
+    validator = orchestration.split("# marker-validation:start", 1)[1].split(
+        "# marker-validation:end", 1
+    )[0]
+    command = (
+        "set -euo pipefail\n"
+        f"{validator}\n"
+        'require_release_completion_marker "$1" "$2"'
+    )
+    marker = "backchannel:release:capture:complete"
+
+    successful_output = tmp_path / "successful.log"
+    successful_output.write_text(
+        f"### Result\n{json.dumps(marker)}\n### Ran Playwright code\n",
+        encoding="utf-8",
+    )
+    subprocess.run(
+        ["bash", "-c", command, "marker-test", str(successful_output), marker],
+        check=True,
+    )
+
+    echoed_source_only = tmp_path / "echoed-source-only.log"
+    echoed_source_only.write_text(
+        f"### Ran Playwright code\n{json.dumps(marker)}\n",
+        encoding="utf-8",
+    )
+    failed = subprocess.run(
+        ["bash", "-c", command, "marker-test", str(echoed_source_only), marker],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert failed.returncode != 0
+    assert "completion marker" in failed.stderr.lower()
+
+    truncate = orchestration.index(': > "$release_run_log"')
+    run_code = orchestration.index("run-code --filename")
+    marker_check = orchestration.index(
+        'require_release_completion_marker "$release_run_log"'
+    )
+    dimension_check = orchestration.index(
+        "tests/release/test_release_evidence.py::"
+        "test_final_build_captures_exist_at_exact_viewports"
+    )
+    assert truncate < run_code < marker_check < dimension_check
+
+    capture = _read("e2e/capture-release.mjs")
+    browser_assertion = capture.index("browserErrors.length === 0")
+    completion_return = capture.index('return ["backchannel"')
+    assert browser_assertion < completion_return
+    assert marker not in capture
+
+
 def test_generated_openapi_is_current_and_public() -> None:
     schema = json.loads(_read("docs/openapi.json"))
     assert schema["info"]["title"] == "Backchannel API"
@@ -156,6 +405,34 @@ def test_final_build_captures_exist_at_exact_viewports() -> None:
     assert sorted(path.name for path in FINAL_ASSETS.glob("*.png")) == sorted(CAPTURES)
     for filename, expected_size in CAPTURES.items():
         assert _png_size(FINAL_ASSETS / filename) == expected_size
+
+
+def test_final_build_capture_validation_rejects_truncation_and_corruption(
+    tmp_path: Path,
+) -> None:
+    source = FINAL_ASSETS / "pending-mobile.png"
+    payload = source.read_bytes()
+
+    truncated = tmp_path / "truncated.png"
+    truncated.write_bytes(payload[:-8])
+    with pytest.raises(AssertionError):
+        _png_size(truncated)
+
+    corrupted_payload = bytearray(payload)
+    offset = 8
+    while offset < len(corrupted_payload):
+        chunk_length = struct.unpack(">I", corrupted_payload[offset : offset + 4])[0]
+        chunk_type = bytes(corrupted_payload[offset + 4 : offset + 8])
+        if chunk_type == b"IDAT" and chunk_length > 0:
+            corrupted_payload[offset + 8] ^= 0x01
+            break
+        offset += 12 + chunk_length
+    else:
+        raise AssertionError("Fixture PNG contained no IDAT data to corrupt.")
+    corrupted = tmp_path / "corrupted.png"
+    corrupted.write_bytes(corrupted_payload)
+    with pytest.raises(AssertionError):
+        _png_size(corrupted)
 
 
 def test_ci_is_keyless_lockfile_based_and_declares_external_gates() -> None:

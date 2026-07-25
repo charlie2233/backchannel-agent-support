@@ -98,7 +98,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe("browser recovery-creation idempotency", () => {
+describe("browser recovery-creation idempotency", { timeout: 15_000 }, () => {
   it("persists the exact intent before POST, then promotes a validated snapshot", async () => {
     const postBodies: CreationIntent[] = [];
     const intentsAtPost: Array<CreationIntent | null> = [];

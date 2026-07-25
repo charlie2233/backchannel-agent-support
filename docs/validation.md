@@ -182,6 +182,21 @@ declined states at 1440×1024 and 390×844 while failing on browser console or p
 PNGs under `docs/assets/final` are runtime captures; files under `docs/design` are concepts and
 never count as runtime evidence.
 
+The locked Playwright CLI can report a `run-code` error while exiting zero. The capture therefore
+starts on the same-origin `/health` route, clears and verifies empty session storage before each
+demo reset, then uses a consumed invalid recovery hint to enter the explicit demo chooser without
+an automatic replay. It freshly captures the CLI output and accepts only its exact result marker.
+The browser script returns that marker only after writing all six PNGs and asserting that no
+browser error was observed; the shell checks it before validating image dimensions, so an echoed
+source fragment or missing result fails closed.
+
+One capture invocation holds an atomic per-worktree lock before clearing shared audit logs or
+building, keeps it through marker and image validation on successful runs, and releases it during
+exit cleanup on success or failure; a concurrent or stale lock blocks without touching the current
+run. Image validation reads every PNG chunk, verifies complete
+boundaries and CRCs, requires IHDR and IDAT data plus one terminal IEND with no trailing bytes,
+successfully decompresses the full IDAT stream, and then enforces the exact viewport dimensions.
+
 `openapi:check` fails if `docs/openapi.json` differs from the current FastAPI schema.
 `secret:scan` applies its configured rules to current release inputs and HEAD-ancestry file blobs,
 including deleted historical paths. Shallow or otherwise incomplete Git history makes the

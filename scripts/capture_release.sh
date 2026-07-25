@@ -5,16 +5,22 @@ release_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 release_output="$release_root/output/playwright/release"
 release_captures="$release_root/docs/assets/final"
 release_config="$release_root/e2e/playwright-cli.config.json"
+release_run_log="$release_output/run-code.stdout.log"
+release_server_stdout_log="$release_output/server.stdout.log"
+release_server_stderr_log="$release_output/server.stderr.log"
 release_tmp_parent="${TMPDIR:-/tmp}"
 release_tmp="$(mktemp -d "${release_tmp_parent%/}/backchannel-release.XXXXXX")"
 release_uv_cache="${UV_CACHE_DIR:-${release_tmp_parent%/}/backchannel-uv-cache}"
 release_no_global_config="$release_tmp/global-config-disabled"
+release_git_dir="$(git -C "$release_root" rev-parse --absolute-git-dir)"
+release_lock="$release_git_dir/backchannel-release-capture.lock"
 release_path="${PATH:?PATH is required}"
 release_home="${HOME:?HOME is required}"
 release_port=""
 release_pid=""
 release_session="backchannel-release-$$"
 release_browser_opened="false"
+release_lock_acquired="false"
 
 run_release_cli() {
   env -i \
@@ -26,6 +32,40 @@ run_release_cli() {
     PWTEST_CLI_GLOBAL_CONFIG="$release_no_global_config" \
     npx --no-install --prefix "$release_root" playwright-cli "$@"
 }
+
+# marker-validation:start
+require_release_completion_marker() {
+  local log_path="$1"
+  local expected_marker="$2"
+  if ! awk -v expected="\"$expected_marker\"" '
+    previous == "### Result" && $0 == expected { matches += 1 }
+    { previous = $0 }
+    END { exit matches == 1 ? 0 : 1 }
+  ' "$log_path"; then
+    echo "Playwright CLI output omitted the exact release completion marker." >&2
+    return 1
+  fi
+}
+# marker-validation:end
+
+# capture-lock:start
+acquire_release_capture_lock() {
+  local lock_path="$1"
+  if mkdir "$lock_path" 2>/dev/null; then
+    return 0
+  fi
+  echo "A release capture is already running or left a stale lock." >&2
+  return 1
+}
+
+release_release_capture_lock() {
+  local lock_path="$1"
+  if ! rmdir "$lock_path" 2>/dev/null; then
+    echo "Release capture lock could not be removed; future captures will fail closed." >&2
+    return 1
+  fi
+}
+# capture-lock:end
 
 cleanup_release_capture() {
   if [[ "$release_browser_opened" == "true" ]]; then
@@ -41,8 +81,23 @@ cleanup_release_capture() {
   case "$release_tmp" in
     */backchannel-release.*) rm -rf -- "$release_tmp" ;;
   esac
+  if [[ "$release_lock_acquired" == "true" ]]; then
+    release_lock_acquired="false"
+    release_release_capture_lock "$release_lock" || true
+  fi
 }
-trap cleanup_release_capture EXIT INT TERM
+trap cleanup_release_capture EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if ! acquire_release_capture_lock "$release_lock"; then
+  exit 1
+fi
+release_lock_acquired="true"
+mkdir -p "$release_output" "$release_captures"
+: > "$release_run_log"
+: > "$release_server_stdout_log"
+: > "$release_server_stderr_log"
 
 if ! command -v npx >/dev/null 2>&1; then
   echo "npx is required for Playwright CLI capture." >&2
@@ -79,7 +134,6 @@ esac
 
 cd "$release_root"
 npm run build
-mkdir -p "$release_output" "$release_captures"
 release_port="$(env -i \
   PATH="$release_path" \
   HOME="$release_home" \
@@ -98,8 +152,8 @@ env -i \
   BACKCHANNEL_DEPLOYED_MODE=false \
   PORT="$release_port" \
   uv run python scripts/start.py \
-  >"$release_output/server.stdout.log" \
-  2>"$release_output/server.stderr.log" &
+  >"$release_server_stdout_log" \
+  2>"$release_server_stderr_log" &
 # sanitized-server-env:end
 release_pid="$!"
 
@@ -125,12 +179,14 @@ PY
 
 cd "$release_output"
 run_release_cli --session "$release_session" open \
-  "http://127.0.0.1:$release_port" \
+  "http://127.0.0.1:$release_port/health" \
   --browser chrome \
   --config "$release_config"
 release_browser_opened="true"
 run_release_cli --session "$release_session" run-code --filename \
-  "$release_root/e2e/capture-release.mjs"
+  "$release_root/e2e/capture-release.mjs" 2>&1 | tee "$release_run_log"
+release_completion_marker="backchannel:release:capture:complete"
+require_release_completion_marker "$release_run_log" "$release_completion_marker"
 
 cd "$release_root"
 UV_CACHE_DIR="$release_uv_cache" \

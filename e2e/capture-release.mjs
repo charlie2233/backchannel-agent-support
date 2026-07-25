@@ -11,6 +11,16 @@ async (page) => {
     if (message.type() === "error") browserErrors.push("console error");
   });
   page.on("pageerror", () => browserErrors.push("page error"));
+  let recoveryPostCount = 0;
+  let expectedRecoveryPostCount = 0;
+  page.on("request", (request) => {
+    if (
+      request.method() === "POST" &&
+      request.url() === `${baseUrl}/api/recoveries`
+    ) {
+      recoveryPostCount += 1;
+    }
+  });
 
   const requireValue = (condition, message) => {
     if (!condition) throw new Error(message);
@@ -33,9 +43,22 @@ async (page) => {
   };
 
   const reset = async () => {
-    await page.goto("about:blank");
+    await page.goto(`${baseUrl}/health`, { waitUntil: "domcontentloaded" });
+    await page.evaluate(() => window.sessionStorage.clear());
+    const sessionStorageEntries = await page.evaluate(
+      () => window.sessionStorage.length,
+    );
+    requireValue(
+      sessionStorageEntries === 0,
+      "Capture session storage was not cleared before demo reset.",
+    );
     const response = await page.request.post(`${baseUrl}/api/demo/reset`);
     requireValue(response.ok(), "Demo reset was not enabled for the capture run.");
+    await page.evaluate(() => {
+      window.sessionStorage.setItem(
+        "backchannel.hotelRecoveryId", "capture-explicit-demo-choice",
+      );
+    });
   };
 
   const startSdkRun = async () => {
@@ -50,6 +73,14 @@ async (page) => {
 
     const runButton = page.getByRole("button", { name: "Run SDK QA trace" });
     await runButton.waitFor({ state: "visible" });
+    requireValue(
+      (await page.evaluate(() => window.sessionStorage.length)) === 0,
+      "The explicit demo chooser did not consume its capture-only recovery hint.",
+    );
+    requireValue(
+      recoveryPostCount === expectedRecoveryPostCount,
+      "An automatic recovery started before the explicit SDK choice.",
+    );
     const responsePromise = page.waitForResponse((response) => {
       if (
         response.request().method() !== "POST" ||
@@ -59,6 +90,12 @@ async (page) => {
     });
     await runButton.click();
     const response = await responsePromise;
+    expectedRecoveryPostCount += 1;
+    await page.waitForTimeout(250);
+    requireValue(
+      recoveryPostCount === expectedRecoveryPostCount,
+      "The explicit SDK choice was not the first and only recovery start.",
+    );
     requireValue(response.status() === 201, "SDK QA recovery did not start successfully.");
     const created = await response.json();
     requireValue(created.executionMode === "sdk_stub", "API provenance was not sdk_stub.");
@@ -110,6 +147,7 @@ async (page) => {
     await page.getByRole("dialog").waitFor({ state: "visible" });
   };
 
+  let captureCount = 0;
   const capture = async (filename, expectedSize) => {
     const viewport = page.viewportSize();
     requireValue(
@@ -132,6 +170,7 @@ async (page) => {
       animations: "disabled",
       fullPage: false,
     });
+    captureCount += 1;
   };
 
   const verifyPending = async () => {
@@ -205,5 +244,10 @@ async (page) => {
     await capture(`declined-${viewport.label}.png`, viewport);
   }
 
+  await page.waitForTimeout(250);
+  requireValue(recoveryPostCount === 6, "Release capture observed a delayed recovery POST.");
+  requireValue(expectedRecoveryPostCount === 6, "Release capture expected six recovery starts.");
+  requireValue(captureCount === 6, "Release capture did not write all six screenshots.");
   requireValue(browserErrors.length === 0, "Browser console or page errors were observed.");
+  return ["backchannel", "release", "capture", "complete"].join(":");
 }
