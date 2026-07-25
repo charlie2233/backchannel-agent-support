@@ -4,6 +4,8 @@ import json
 import re
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 
 FINAL_CAPTURE_NAMES = (
@@ -65,16 +67,55 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
 
     historical_activation = "b57868005a3fe0869136f54472ee0098035a9099"
     historical_run = "30140554792"
-    assert historical_activation not in current_evidence
-    assert historical_run not in current_evidence
-    assert historical_activation in historical_evidence
-    assert historical_run in historical_evidence
+    historical_jobs = ("89632837699", "89633002245")
+    for historical_identifier in (
+        "85e1e8ec9147242adca311c4ba10ea8c1c3008dc",
+        "85e1e8e…",
+        historical_activation,
+        "b578680…",
+        historical_run,
+        *historical_jobs,
+    ):
+        assert historical_identifier not in current_evidence
+    for intended_historical_identifier in (
+        historical_activation,
+        historical_run,
+        *historical_jobs,
+    ):
+        assert intended_historical_identifier in historical_evidence
     for obsolete in (
         "85e1e8ec9147242adca311c4ba10ea8c1c3008dc",
         "eeb6b87ce35ad04cb4c53d048c39fcbc8caf33bb62e142526e0f9aba544afb30",
         "81 runtime paths",
     ):
         assert obsolete not in validation
+
+
+@pytest.mark.parametrize(
+    "superseded_identifier",
+    (
+        "85e1e8ec9147242adca311c4ba10ea8c1c3008dc",
+        "85e1e8e…",
+        "b57868005a3fe0869136f54472ee0098035a9099",
+        "b578680…",
+        "30140554792",
+        "89632837699",
+        "89633002245",
+    ),
+)
+def test_validation_rejects_superseded_provenance_in_current_evidence(
+    superseded_identifier: str,
+) -> None:
+    validation = _read("docs/validation.md")
+    historical_heading = "## Superseded historical hosted baseline"
+    polluted_validation = validation.replace(
+        historical_heading,
+        f"Injected stale provenance: {superseded_identifier}\n\n{historical_heading}",
+        1,
+    )
+
+    with pytest.raises(AssertionError):
+        _assert_validation_matches_current_capture(polluted_validation)
 
 
 def test_package_wires_capture_contract_and_manifest_verifier_into_check() -> None:
