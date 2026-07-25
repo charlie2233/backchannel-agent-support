@@ -421,17 +421,17 @@ export function terminalHeadingAnchorTop(viewport) {
 
 export function assertTerminalViewportVisibility({
   viewport,
-  headingRect,
+  headingBlockRect,
   verdictRect,
-  headingUnobscuredSamples,
+  headingBlockUnobscuredSamples,
   verdictUnobscuredSamples,
   headingAnchorTop = null,
 }) {
   const unionRect = {
-    left: Math.min(headingRect?.left, verdictRect?.left),
-    top: Math.min(headingRect?.top, verdictRect?.top),
-    right: Math.max(headingRect?.right, verdictRect?.right),
-    bottom: Math.max(headingRect?.bottom, verdictRect?.bottom),
+    left: Math.min(headingBlockRect?.left, verdictRect?.left),
+    top: Math.min(headingBlockRect?.top, verdictRect?.top),
+    right: Math.max(headingBlockRect?.right, verdictRect?.right),
+    bottom: Math.max(headingBlockRect?.bottom, verdictRect?.bottom),
   };
   unionRect.width = unionRect.right - unionRect.left;
   unionRect.height = unionRect.bottom - unionRect.top;
@@ -439,16 +439,16 @@ export function assertTerminalViewportVisibility({
     headingAnchorTop === null ||
     (typeof headingAnchorTop === "number" &&
       Number.isFinite(headingAnchorTop) &&
-      Math.abs(headingRect?.top - headingAnchorTop) <= 1.5);
+      Math.abs(headingBlockRect?.top - headingAnchorTop) <= 1.5);
   const samplesAreUnobscured = (samples) =>
     Array.isArray(samples) &&
     samples.length === 5 &&
     samples.every((sample) => sample === true);
   requireContract(
-    rectFullyWithinViewport(headingRect, viewport) &&
+    rectFullyWithinViewport(headingBlockRect, viewport) &&
       rectFullyWithinViewport(verdictRect, viewport) &&
       rectFullyWithinViewport(unionRect, viewport) &&
-      samplesAreUnobscured(headingUnobscuredSamples) &&
+      samplesAreUnobscured(headingBlockUnobscuredSamples) &&
       samplesAreUnobscured(verdictUnobscuredSamples) &&
       anchored,
     "capture_terminal_viewport",
@@ -704,11 +704,13 @@ async function positionTerminalEvidence(
   viewport,
 ) {
   const heading = inspector.getByRole("heading", { name: headingName });
+  const headingBlock = inspector.locator(".inspector-heading");
   const verdict =
     headingName === "Completed receipt"
       ? inspector.locator(".inspector-heading > p").last()
       : inspector.locator(".receipt-verdict").first();
   await heading.waitFor({ state: "visible", timeout: UI_TIMEOUT_MS });
+  await headingBlock.waitFor({ state: "visible", timeout: UI_TIMEOUT_MS });
   await verdict.waitFor({ state: "visible", timeout: UI_TIMEOUT_MS });
   const headingAnchorTop = terminalHeadingAnchorTop(viewport);
   if (headingAnchorTop === null) {
@@ -716,7 +718,7 @@ async function positionTerminalEvidence(
       element.scrollIntoView({ block: "center", inline: "nearest" }),
     );
   } else {
-    await heading.evaluate((element, anchorTop) => {
+    await headingBlock.evaluate((element, anchorTop) => {
       const rect = element.getBoundingClientRect();
       window.scrollTo({
         top: Math.max(0, window.scrollY + rect.top - anchorTop),
@@ -738,15 +740,15 @@ async function positionTerminalEvidence(
     }),
     "capture_terminal_viewport",
   );
-  const [headingGeometry, verdictGeometry] = await Promise.all([
-    viewportGeometry(heading),
+  const [headingBlockGeometry, verdictGeometry] = await Promise.all([
+    viewportGeometry(headingBlock),
     viewportGeometry(verdict),
   ]);
   assertTerminalViewportVisibility({
     viewport,
-    headingRect: headingGeometry.rect,
+    headingBlockRect: headingBlockGeometry.rect,
     verdictRect: verdictGeometry.rect,
-    headingUnobscuredSamples: headingGeometry.unobscuredSamples,
+    headingBlockUnobscuredSamples: headingBlockGeometry.unobscuredSamples,
     verdictUnobscuredSamples: verdictGeometry.unobscuredSamples,
     headingAnchorTop,
   });

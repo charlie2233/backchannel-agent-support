@@ -557,7 +557,7 @@ test("accepts visible unobscured terminal heading and verdict rectangles", () =>
   assert.doesNotThrow(() =>
     assertTerminalViewportVisibility({
       viewport: { width: 390, height: 844 },
-      headingRect: {
+      headingBlockRect: {
         left: 18,
         top: 74,
         right: 260,
@@ -573,17 +573,54 @@ test("accepts visible unobscured terminal heading and verdict rectangles", () =>
         width: 354,
         height: 80,
       },
-      headingUnobscuredSamples: [true, true, true, true, true],
+      headingBlockUnobscuredSamples: [true, true, true, true, true],
       verdictUnobscuredSamples: [true, true, true, true, true],
       headingAnchorTop: 74,
     }),
   );
 });
 
+test("rejects a mobile terminal heading when its eyebrow begins under the sticky bar", () => {
+  assert.throws(
+    () =>
+      assertTerminalViewportVisibility({
+        viewport: { width: 390, height: 844 },
+        headingRect: {
+          left: 18,
+          top: 74,
+          right: 260,
+          bottom: 106,
+          width: 242,
+          height: 32,
+        },
+        headingBlockRect: {
+          left: 18,
+          top: 42,
+          right: 372,
+          bottom: 132,
+          width: 354,
+          height: 90,
+        },
+        verdictRect: {
+          left: 18,
+          top: 144,
+          right: 372,
+          bottom: 224,
+          width: 354,
+          height: 80,
+        },
+        headingBlockUnobscuredSamples: [true, true, true, true, true],
+        verdictUnobscuredSamples: [true, true, true, true, true],
+        headingAnchorTop: 74,
+      }),
+    /capture_terminal_viewport/,
+  );
+});
+
 test("rejects offscreen, zero-size, and obscured terminal evidence", () => {
   const base = {
     viewport: { width: 1440, height: 1024 },
-    headingRect: {
+    headingBlockRect: {
       left: 1040,
       top: 120,
       right: 1300,
@@ -599,14 +636,18 @@ test("rejects offscreen, zero-size, and obscured terminal evidence", () => {
       width: 360,
       height: 80,
     },
-    headingUnobscuredSamples: [true, true, true, true, true],
+    headingBlockUnobscuredSamples: [true, true, true, true, true],
     verdictUnobscuredSamples: [true, true, true, true, true],
     headingAnchorTop: null,
   };
   const invalidCases = [
     {
       ...base,
-      headingRect: { ...base.headingRect, top: 1100, bottom: 1136 },
+      headingBlockRect: {
+        ...base.headingBlockRect,
+        top: 1100,
+        bottom: 1136,
+      },
     },
     {
       ...base,
@@ -614,7 +655,11 @@ test("rejects offscreen, zero-size, and obscured terminal evidence", () => {
     },
     {
       ...base,
-      headingRect: { ...base.headingRect, left: -12, right: 248 },
+      headingBlockRect: {
+        ...base.headingBlockRect,
+        left: -12,
+        right: 248,
+      },
     },
     {
       ...base,
@@ -622,7 +667,7 @@ test("rejects offscreen, zero-size, and obscured terminal evidence", () => {
     },
     {
       ...base,
-      headingUnobscuredSamples: [true, true, true, false, true],
+      headingBlockUnobscuredSamples: [true, true, true, false, true],
     },
     {
       ...base,
@@ -663,7 +708,7 @@ test("rejects a terminal element when one sampled corner is obscured", () => {
     () =>
       assertTerminalViewportVisibility({
         viewport: { width: 390, height: 844 },
-        headingRect: geometry.rect,
+        headingBlockRect: geometry.rect,
         verdictRect: {
           left: 18,
           top: 144,
@@ -672,7 +717,7 @@ test("rejects a terminal element when one sampled corner is obscured", () => {
           width: 354,
           height: 80,
         },
-        headingUnobscuredSamples: geometry.unobscuredSamples,
+        headingBlockUnobscuredSamples: geometry.unobscuredSamples,
         verdictUnobscuredSamples: [true, true, true, true, true],
         headingAnchorTop: 74,
       }),
