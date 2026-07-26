@@ -139,8 +139,8 @@ def test_recovery_creation_documents_exact_idempotency_conflict_envelopes() -> N
                                 "message": {
                                     "type": "string",
                                     "enum": [
-                                        "Recovery creation is still in progress. Retry "
-                                        "the same start shortly."
+                                        "Recovery creation is unresolved. Retry the "
+                                        "same start shortly."
                                     ],
                                 },
                                 "requestId": {
@@ -318,10 +318,7 @@ def test_recovery_creation_documents_only_exact_reachable_429_envelopes() -> Non
     }
     assert "headers" not in response
     alternatives = response["content"]["application/json"]["schema"]["oneOf"]
-    assert [
-        alternative["properties"]["code"]["enum"]
-        for alternative in alternatives
-    ] == [
+    assert [alternative["properties"]["code"]["enum"] for alternative in alternatives] == [
         ["creation_capacity"],
         ["live_capacity"],
         ["cooldown"],
@@ -340,9 +337,7 @@ def test_private_recovery_operations_document_one_generic_not_found_boundary() -
     )
     for path, method in operations:
         operation = schema["paths"][path][method]
-        assert operation["responses"]["404"] == {
-            "description": "Recovery not found."
-        }
+        assert operation["responses"]["404"] == {"description": "Recovery not found."}
         description = operation["description"].lower()
         assert "signed opaque demo session" in description
         assert "generic not-found" in description
@@ -351,9 +346,7 @@ def test_private_recovery_operations_document_one_generic_not_found_boundary() -
 def test_decision_resume_documents_only_an_exact_empty_json_request() -> None:
     schema = json.loads(_exporter().render_openapi())
 
-    operation = schema["paths"][
-        "/api/recoveries/{recovery_id}/decisions/resume"
-    ]["post"]
+    operation = schema["paths"]["/api/recoveries/{recovery_id}/decisions/resume"]["post"]
     request_body = operation["requestBody"]
 
     assert request_body["required"] is True
@@ -389,9 +382,9 @@ def test_decision_documents_the_exact_strict_pydantic_request_schema() -> None:
 def test_decision_422_documents_both_stable_public_error_shapes() -> None:
     schema = json.loads(_exporter().render_openapi())
 
-    response = schema["paths"]["/api/recoveries/{recovery_id}/decisions"]["post"][
-        "responses"
-    ]["422"]
+    response = schema["paths"]["/api/recoveries/{recovery_id}/decisions"]["post"]["responses"][
+        "422"
+    ]
 
     assert response == {
         "description": (
@@ -443,9 +436,7 @@ def test_decision_422_documents_both_stable_public_error_shapes() -> None:
                                 },
                                 "message": {
                                     "type": "string",
-                                    "enum": [
-                                        "The request did not match the public API contract."
-                                    ],
+                                    "enum": ["The request did not match the public API contract."],
                                 },
                                 "requestId": {
                                     "type": "string",
@@ -463,9 +454,9 @@ def test_decision_422_documents_both_stable_public_error_shapes() -> None:
 def test_decision_resume_422_documents_body_and_expiry_errors() -> None:
     schema = json.loads(_exporter().render_openapi())
 
-    response = schema["paths"][
-        "/api/recoveries/{recovery_id}/decisions/resume"
-    ]["post"]["responses"]["422"]
+    response = schema["paths"]["/api/recoveries/{recovery_id}/decisions/resume"]["post"][
+        "responses"
+    ]["422"]
     variants = response["content"]["application/json"]["schema"]["oneOf"]
 
     assert response["description"] == (
@@ -522,9 +513,9 @@ def test_demo_reset_documents_unresolved_creation_conflict() -> None:
 def test_event_stream_success_response_is_documented_as_sse() -> None:
     schema = json.loads(_exporter().render_openapi())
 
-    content = schema["paths"]["/api/recoveries/{recovery_id}/events"]["get"][
-        "responses"
-    ]["200"]["content"]
+    content = schema["paths"]["/api/recoveries/{recovery_id}/events"]["get"]["responses"]["200"][
+        "content"
+    ]
 
     assert "text/event-stream" in content
     assert "application/json" not in content

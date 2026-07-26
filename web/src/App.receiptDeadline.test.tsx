@@ -1,4 +1,12 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { StrictMode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -89,7 +97,7 @@ function pendingSnapshot(): Record<string, unknown> {
 
 function quotaSnapshot(
   executionMode: "replay_fixture" | "sdk_stub",
-  status: "completed" | "in_progress" = "completed",
+  status: "completed" | "in_progress" | "outcome_unknown" = "completed",
 ): Record<string, unknown> {
   return {
     recoveryId: QUOTA_RECOVERY_ID,
@@ -101,11 +109,13 @@ function quotaSnapshot(
         ? "qa_trace_0123456789abcdef0123456789abcdef"
         : null,
     status,
-    currentStep: status === "completed" ? 5 : 1,
+    currentStep: status === "in_progress" ? 1 : 5,
     currentStepSummary:
       status === "completed"
         ? "Authoritative quota recovery completed."
-        : "Authoritative quota recovery is in progress.",
+        : status === "outcome_unknown"
+          ? "Quota recovery interrupted; provider outcome remains unknown."
+          : "Authoritative quota recovery is in progress.",
     createdAt: "2026-07-19T12:00:00Z",
     updatedAt: "2026-07-19T12:00:01Z",
     pendingApproval: null,
@@ -167,6 +177,26 @@ function quotaSdkReceipt(): Record<string, unknown> {
     ],
     approvalCount: 0,
     approvedRemedyDigest: null,
+  };
+}
+
+function quotaSdkUnknownReceipt(): Record<string, unknown> {
+  return {
+    ...quotaSdkReceipt(),
+    status: "outcome_unknown",
+    providerExecution: null,
+    providerResult:
+      "Demo quota dispatch may have begun; its outcome could not be confirmed.",
+    authorizationSource:
+      "Predelegated quota authority existed, but restart evidence cannot confirm execution.",
+    verificationResults: [
+      "Recovery creation was durably marked started.",
+      "No human approval was recorded.",
+      "No complete quota receipt was committed before restart.",
+      "Provider execution, verification, and permission revocation are not asserted.",
+      "Startup reconciliation did not redispatch the quota operation.",
+      "Uncertain quota outcome receipt sealed.",
+    ],
   };
 }
 
@@ -783,6 +813,75 @@ describe("quota receipt truthfulness by execution mode", () => {
         "Execution was verified and temporary permission quota-burst-demo-us-east-1 was revoked.",
       ),
     ).not.toHaveLength(0);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("renders SDK quota uncertainty without inventing execution or revocation", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/health") return Promise.resolve(liveHealth());
+        if (url === "/api/recoveries" && init?.method === "POST") {
+          return Promise.resolve(
+            jsonResponse(
+              quotaSnapshot("sdk_stub", "outcome_unknown"),
+              201,
+            ),
+          );
+        }
+        if (url === `/api/recoveries/${QUOTA_RECOVERY_ID}/receipt`) {
+          return Promise.resolve(jsonResponse(quotaSdkUnknownReceipt()));
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+
+    render(<App />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: /API quota recovery/i }),
+    );
+
+    const receipt = await screen.findByRole("region", {
+      name: "Outcome unknown",
+    });
+    expect(
+      within(receipt).getByText(
+        "Demo quota dispatch may have begun; its outcome could not be confirmed.",
+      ),
+    ).toBeVisible();
+    expect(
+      within(receipt).getByText(
+        "Predelegated quota authority existed, but restart evidence cannot confirm execution.",
+      ),
+    ).toBeVisible();
+    expect(
+      within(receipt).getByText("Temporary permission").parentElement,
+    ).toHaveTextContent("Temporary permissionNot reported");
+    const lifecycle = screen.getByRole("list", {
+      name: "Recovery lifecycle",
+    });
+    expect(
+      within(lifecycle).getByText(
+        "Provider dispatch may have begun; its outcome remains unknown.",
+      ),
+    ).toBeVisible();
+    expect(
+      within(lifecycle).getByText(
+        "Delegated authority existed; no human approval was recorded, and an unrecorded request remains possible.",
+      ),
+    ).toBeVisible();
+    expect(within(lifecycle).getAllByText("Not asserted")).toHaveLength(3);
+    expect(
+      screen.queryAllByText(
+        "The demo quota adapter verified execution at the temporary 1250-unit ceiling.",
+      ),
+    ).toHaveLength(0);
+    expect(
+      screen.queryAllByText(
+        "Execution was verified and temporary permission quota-burst-demo-us-east-1 was revoked.",
+      ),
+    ).toHaveLength(0);
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });

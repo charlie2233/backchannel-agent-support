@@ -50,8 +50,7 @@ QUOTA_SDK_PROVIDER_RESULT = (
     "1250-unit US-region ceiling; no real quota was changed."
 )
 QUOTA_SDK_AUTHORIZATION_SOURCE = (
-    "Predelegated API quota policy: US-only, at most 500 USD minor "
-    "units, for at most 900 seconds."
+    "Predelegated API quota policy: US-only, at most 500 USD minor units, for at most 900 seconds."
 )
 QUOTA_SDK_VERIFICATION_RESULTS = (
     "Provider proved the baseline quota ceiling at 1000 units.",
@@ -61,6 +60,22 @@ QUOTA_SDK_VERIFICATION_RESULTS = (
     "Approval count is zero; no human interruption was created.",
     "Execution verified at an effective ceiling of 1250 units.",
     "Temporary quota permission revoked; baseline ceiling restored to 1000 units.",
+)
+QUOTA_SDK_INITIAL_SUMMARY = "Deterministic API quota SDK recovery started."
+QUOTA_SDK_UNKNOWN_SUMMARY = "Quota recovery interrupted; provider outcome remains unknown."
+QUOTA_SDK_UNKNOWN_PROVIDER_RESULT = (
+    "Demo quota dispatch may have begun; its outcome could not be confirmed."
+)
+QUOTA_SDK_UNKNOWN_AUTHORIZATION_SOURCE = (
+    "Predelegated quota authority existed, but restart evidence cannot confirm execution."
+)
+QUOTA_SDK_UNKNOWN_VERIFICATION_RESULTS = (
+    "Recovery creation was durably marked started.",
+    "No human approval was recorded.",
+    "No complete quota receipt was committed before restart.",
+    "Provider execution, verification, and permission revocation are not asserted.",
+    "Startup reconciliation did not redispatch the quota operation.",
+    "Uncertain quota outcome receipt sealed.",
 )
 OPENAI_LIVE_BOUNDARY = (
     "OpenAI agent model calls and demo hotel adapter only; no real booking or payment change."
@@ -373,13 +388,10 @@ class RecoverySnapshot(ApiModel):
         if self.claimed_decision is not None and (
             self.status is not RecoveryStatus.PENDING_APPROVAL
             or self.scenario_id is not ScenarioId.HOTEL
-            or self.execution_mode
-            not in {ExecutionMode.SDK_STUB, ExecutionMode.OPENAI_LIVE}
+            or self.execution_mode not in {ExecutionMode.SDK_STUB, ExecutionMode.OPENAI_LIVE}
             or self.pending_approval is not None
         ):
-            raise ValueError(
-                "Claimed decisions require one resumable pending hotel recovery"
-            )
+            raise ValueError("Claimed decisions require one resumable pending hotel recovery")
         if self.execution_mode is ExecutionMode.REPLAY_FIXTURE:
             if self.model_ids or self.root_trace_id is not None:
                 raise ValueError("Replay snapshots require no model IDs or root trace ID")
@@ -453,6 +465,16 @@ class RecoveryReceipt(ApiModel):
             and tuple(self.verification_results) == QUOTA_SDK_VERIFICATION_RESULTS
         )
 
+    @property
+    def has_canonical_quota_unknown_evidence(self) -> bool:
+        """Return whether restart uncertainty is described without invented facts."""
+
+        return (
+            self.provider_result == QUOTA_SDK_UNKNOWN_PROVIDER_RESULT
+            and self.authorization_source == QUOTA_SDK_UNKNOWN_AUTHORIZATION_SOURCE
+            and tuple(self.verification_results) == QUOTA_SDK_UNKNOWN_VERIFICATION_RESULTS
+        )
+
     @model_validator(mode="before")
     @classmethod
     def infer_legacy_approval_count(cls, value: object) -> object:
@@ -467,7 +489,8 @@ class RecoveryReceipt(ApiModel):
         status = migrated.get("status")
         migrated["approvalCount"] = int(
             status == "completed"
-            and execution_mode in {
+            and execution_mode
+            in {
                 ExecutionMode.SDK_STUB,
                 ExecutionMode.SDK_STUB.value,
                 ExecutionMode.OPENAI_LIVE,
@@ -508,6 +531,11 @@ class RecoveryReceipt(ApiModel):
         )
         if self.execution_mode is ExecutionMode.SDK_STUB:
             quota_completion = self.status == "completed" and self.approval_count == 0
+            quota_unknown = (
+                self.status == RecoveryStatus.OUTCOME_UNKNOWN.value
+                and self.approval_count == 0
+                and self.boundary == QUOTA_SDK_STUB_BOUNDARY
+            )
             if (
                 not self.simulated
                 or self.model_call
@@ -516,7 +544,11 @@ class RecoveryReceipt(ApiModel):
                 or not is_valid_qa_trace_id(self.root_trace_id)
                 or any(marker is None for marker in version_markers)
                 or self.boundary
-                != (QUOTA_SDK_STUB_BOUNDARY if quota_completion else SDK_STUB_BOUNDARY)
+                != (
+                    QUOTA_SDK_STUB_BOUNDARY
+                    if quota_completion or quota_unknown
+                    else SDK_STUB_BOUNDARY
+                )
             ):
                 raise ValueError(
                     "SDK stub receipts require versioned QA provenance and no model call"
@@ -528,6 +560,8 @@ class RecoveryReceipt(ApiModel):
                     "Delegated quota completion requires canonical provider, authorization, "
                     "and verification evidence"
                 )
+            if quota_unknown and not self.has_canonical_quota_unknown_evidence:
+                raise ValueError("Unknown quota outcomes require canonical uncertainty evidence")
         if self.execution_mode is ExecutionMode.OPENAI_LIVE:
             if (
                 not self.simulated
@@ -558,10 +592,10 @@ class RecoveryReceipt(ApiModel):
             and self.approval_count not in {0, 1}
         ):
             raise ValueError("SDK completion approval count must be zero or one")
-        if (
-            self.status == RecoveryStatus.OUTCOME_UNKNOWN.value
-            and self.approval_count not in {0, 1}
-        ):
+        if self.status == RecoveryStatus.OUTCOME_UNKNOWN.value and self.approval_count not in {
+            0,
+            1,
+        }:
             raise ValueError("Unknown-outcome receipts allow zero or one approval")
         if (
             self.status

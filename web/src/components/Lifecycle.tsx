@@ -29,6 +29,18 @@ function stepState(
     return { className: "closed", label: "Closed", current: false };
   }
   if (scenario.status === "outcome_unknown") {
+    if (scenario.id === "api-quota") {
+      if (index === 0) {
+        return { className: "complete", label: "Recovery created", current: false };
+      }
+      if (index < 4) {
+        return { className: "unknown", label: "Not asserted", current: false };
+      }
+      if (index === 4) {
+        return { className: "unknown", label: "Unknown", current: false };
+      }
+      return { className: "unknown", label: "Outcome unknown", current: false };
+    }
     if (index < 3) return { className: "complete", label: "Recorded", current: false };
     if (index === 3) return { className: "unknown", label: "Claimed", current: false };
     if (index === 4) return { className: "unknown", label: "Unknown", current: false };

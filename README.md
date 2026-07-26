@@ -130,6 +130,25 @@ model call nor a provider dispatch.
   boundary. It is not an original-tab capability or an at-most-one live-model-run claim.
 - API quota recovery is the complementary zero-approval case: deterministic delegated
   authority, simulated execution verification, permission revocation, and a sealed receipt.
+  Before its SDK tool can run, the server commits an exact dispatch claim. After the adapter
+  returns, the verified result is first stored as `result_recorded` at the tool boundary. Only
+  an SDK return containing an exact empty interruption list promotes that row to the durable
+  `completed` marker; the six-event trace and receipt then commit atomically in a later
+  transaction. Startup seals a validated `completed` result without redispatch. A surviving
+  `result_recorded` row is quarantined for operator review because SDK completion was never
+  durably validated. If only the pending dispatch claim survives, startup records
+  `outcome_unknown` without claiming execution, verification, revocation, or the absence of an
+  unrecorded human request. A handled failure before that atomic insert marks the outer
+  creation claim `creation_outcome_unknown`. A hard loss leaves the started claim
+  `creation_pending` until its five-minute stale bound, then permanently returns
+  `creation_outcome_unknown`; neither path invents a recovery resource or provider outcome.
+  A human interruption, malformed interruption field, missing SDK result shape, or exception
+  after the result was stored retains but quarantines that evidence, exposes no terminal quota
+  bundle, and refuses restart pending operator review.
+  Pre-contract completed quota rows remain readable only when the schema upgrade transaction
+  recorded their exact recovery fingerprint. Flipping a current contract marker or deleting its
+  execution cannot recreate that migration provenance. Startup and `/readyz` preflight every
+  durable SDK quota terminal bundle, not only unfinished work.
 
 ## Validation and release evidence
 

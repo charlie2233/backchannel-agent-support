@@ -100,10 +100,12 @@ _READY_SCHEMA_COLUMNS = {
             "protocol_version",
             "agent_graph_version",
             "definition_digest",
+            "quota_execution_contract",
             "created_at",
             "updated_at",
         }
     ),
+    "quota_legacy_completions": frozenset({"recovery_id", "recovery_fingerprint", "recorded_at"}),
     "remedies": frozenset(
         {
             "id",
@@ -175,9 +177,7 @@ _READY_SCHEMA_COLUMNS = {
         {"id", "recovery_id", "seq", "type", "terminal", "data_json", "created_at"}
     ),
     "receipts": frozenset({"recovery_id", "receipt_json", "created_at"}),
-    "usage_ledger": frozenset(
-        {"id", "recovery_id", "category", "amount", "recorded_at"}
-    ),
+    "usage_ledger": frozenset({"id", "recovery_id", "category", "amount", "recorded_at"}),
     "demo_sessions": frozenset({"id", "created_at", "expires_at"}),
     "recovery_access": frozenset({"recovery_id", "session_key"}),
     "live_admissions": frozenset(
@@ -217,15 +217,11 @@ _READY_DB_CACHE_SECONDS = 5.0
 _CREATION_PENDING_RETRY_SECONDS = 2
 _CREATION_ERROR_MESSAGES = {
     "idempotency_conflict": (
-        "This recovery start no longer matches its original request. "
-        "No additional run was started."
+        "This recovery start no longer matches its original request. No additional run was started."
     ),
-    "creation_pending": (
-        "Recovery creation is still in progress. Retry the same start shortly."
-    ),
+    "creation_pending": ("Recovery creation is unresolved. Retry the same start shortly."),
     "creation_outcome_unknown": (
-        "The recovery start outcome could not be confirmed. "
-        "No replacement run was started."
+        "The recovery start outcome could not be confirmed. No replacement run was started."
     ),
     "creation_capacity": (
         "Recovery creation is temporarily at capacity. Existing starts can still "
@@ -300,11 +296,7 @@ _RECOVERY_CREATION_CAPACITY_RESPONSE: dict[str, Any] = {
                             },
                             "message": {
                                 "type": "string",
-                                "enum": [
-                                    _CREATION_ERROR_MESSAGES[
-                                        "creation_capacity"
-                                    ]
-                                ],
+                                "enum": [_CREATION_ERROR_MESSAGES["creation_capacity"]],
                             },
                             "requestId": {
                                 "type": "string",
@@ -329,11 +321,7 @@ _RECOVERY_CREATION_CAPACITY_RESPONSE: dict[str, Any] = {
                                 },
                                 "message": {
                                     "type": "string",
-                                    "enum": [
-                                        LiveAdmissionError(
-                                            live_code
-                                        ).public_message
-                                    ],
+                                    "enum": [LiveAdmissionError(live_code).public_message],
                                 },
                                 "requestId": {
                                     "type": "string",
@@ -341,9 +329,7 @@ _RECOVERY_CREATION_CAPACITY_RESPONSE: dict[str, Any] = {
                                 },
                                 "fallbackExecutionMode": {
                                     "type": "string",
-                                    "enum": [
-                                        ExecutionMode.REPLAY_FIXTURE.value
-                                    ],
+                                    "enum": [ExecutionMode.REPLAY_FIXTURE.value],
                                 },
                             },
                         }
@@ -364,8 +350,7 @@ _RESET_CREATION_PENDING_MESSAGE = (
 )
 _DEMO_RESET_CONFLICT_RESPONSE: dict[str, Any] = {
     "description": (
-        "Reset is refused without mutation while this session owns an unresolved "
-        "recovery start."
+        "Reset is refused without mutation while this session owns an unresolved recovery start."
     ),
     "content": {
         "application/json": {
@@ -562,8 +547,7 @@ _MAX_EVENT_CURSOR = 2**63 - 1
 _MAX_EVENT_CURSOR_TEXT = str(_MAX_EVENT_CURSOR)
 _EVENT_CURSOR_PATTERN = re.compile(r"^[0-9]+$")
 _INVALID_EVENT_CURSOR_DETAIL = (
-    "Last-Event-ID must contain only ASCII digits and be between "
-    f"0 and {_MAX_EVENT_CURSOR_TEXT}"
+    f"Last-Event-ID must contain only ASCII digits and be between 0 and {_MAX_EVENT_CURSOR_TEXT}"
 )
 _EVENT_CURSOR_HEADER_DESCRIPTION = (
     "Optional durable event cursor. When present, use ASCII decimal digits only "
@@ -644,11 +628,7 @@ def _inline_local_schema_definitions(schema: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(definition, Mapping):
                 raise ValueError("Local schema reference target is missing")
             return expand(definition)
-        return {
-            key: expand(item)
-            for key, item in value.items()
-            if key != "$defs"
-        }
+        return {key: expand(item) for key, item in value.items() if key != "$defs"}
 
     expanded = expand(schema)
     if not isinstance(expanded, dict):
@@ -708,10 +688,9 @@ def _store_schema_is_ready(
         connection = (
             connection_factory()
             if connection_factory is not None
-            else store._connect_readiness(
-                timeout_seconds=_READY_DB_BUSY_TIMEOUT_MS / 1_000
-            )
+            else store._connect_readiness(timeout_seconds=_READY_DB_BUSY_TIMEOUT_MS / 1_000)
         )
+        connection.row_factory = sqlite3.Row
         connection.execute(f"PRAGMA busy_timeout = {_READY_DB_BUSY_TIMEOUT_MS}")
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("BEGIN IMMEDIATE")
@@ -724,18 +703,101 @@ def _store_schema_is_ready(
         for table_name, required_columns in _READY_SCHEMA_COLUMNS.items():
             actual_columns = {
                 str(row[1])
-                for row in connection.execute(
-                    f'PRAGMA table_info("{table_name}")'
-                ).fetchall()
+                for row in connection.execute(f'PRAGMA table_info("{table_name}")').fetchall()
             }
             if not required_columns.issubset(actual_columns):
                 return False
+        quota_contract_column = next(
+            (
+                row
+                for row in connection.execute('PRAGMA table_xinfo("recoveries")').fetchall()
+                if str(row[1]) == "quota_execution_contract"
+            ),
+            None,
+        )
+        recoveries_schema_row = connection.execute(
+            """
+            SELECT sql
+            FROM main.sqlite_master
+            WHERE type = 'table' AND name = 'recoveries'
+            """
+        ).fetchone()
+        normalized_recoveries_schema = (
+            "".join(str(recoveries_schema_row[0]).lower().split())
+            if recoveries_schema_row is not None and recoveries_schema_row[0] is not None
+            else ""
+        )
+        if (
+            quota_contract_column is None
+            or str(quota_contract_column[2]).upper() != "INTEGER"
+            or int(quota_contract_column[3]) != 1
+            or str(quota_contract_column[4]) != "0"
+            or int(quota_contract_column[6]) != 0
+            or (
+                "quota_execution_contractintegernotnulldefault0check("
+                "quota_execution_contractin(0,1))" not in normalized_recoveries_schema
+            )
+            or connection.execute(
+                """
+                SELECT 1
+                FROM recoveries
+                WHERE typeof(quota_execution_contract) != 'integer'
+                   OR quota_execution_contract NOT IN (0, 1)
+                LIMIT 1
+                """
+            ).fetchone()
+            is not None
+        ):
+            return False
+        legacy_quota_columns = [
+            (
+                str(row[1]),
+                str(row[2]).upper(),
+                int(row[3]),
+                int(row[5]),
+            )
+            for row in connection.execute(
+                'PRAGMA table_info("quota_legacy_completions")'
+            ).fetchall()
+        ]
+        if legacy_quota_columns != [
+            ("recovery_id", "TEXT", 1, 1),
+            ("recovery_fingerprint", "TEXT", 1, 0),
+            ("recorded_at", "TEXT", 1, 0),
+        ]:
+            return False
+        legacy_quota_foreign_keys = connection.execute(
+            'PRAGMA foreign_key_list("quota_legacy_completions")'
+        ).fetchall()
+        if len(legacy_quota_foreign_keys) != 1:
+            return False
+        legacy_quota_foreign_key = legacy_quota_foreign_keys[0]
+        if (
+            str(legacy_quota_foreign_key[2]),
+            str(legacy_quota_foreign_key[3]),
+            str(legacy_quota_foreign_key[4]),
+            str(legacy_quota_foreign_key[6]).upper(),
+        ) != ("recoveries", "recovery_id", "id", "CASCADE"):
+            return False
+        if (
+            connection.execute(
+                """
+                SELECT 1
+                FROM quota_legacy_completions
+                WHERE typeof(recovery_fingerprint) != 'text'
+                   OR length(recovery_fingerprint) != 64
+                   OR recovery_fingerprint GLOB '*[^0-9a-f]*'
+                   OR typeof(recorded_at) != 'text'
+                LIMIT 1
+                """
+            ).fetchone()
+            is not None
+        ):
+            return False
         creation_ip_column = next(
             (
                 row
-                for row in connection.execute(
-                    'PRAGMA table_xinfo("recovery_creations")'
-                ).fetchall()
+                for row in connection.execute('PRAGMA table_xinfo("recovery_creations")').fetchall()
                 if str(row[1]) == "ip_key"
             ),
             None,
@@ -749,8 +811,7 @@ def _store_schema_is_ready(
         ).fetchone()
         normalized_creation_schema = (
             "".join(str(creation_schema_row[0]).lower().split())
-            if creation_schema_row is not None
-            and creation_schema_row[0] is not None
+            if creation_schema_row is not None and creation_schema_row[0] is not None
             else ""
         )
         if (
@@ -758,10 +819,7 @@ def _store_schema_is_ready(
             or str(creation_ip_column[2]).upper() != "TEXT"
             or int(creation_ip_column[3]) != 1
             or int(creation_ip_column[6]) != 0
-            or (
-                "ip_keytextnotnullcheck(length(ip_key)=64)"
-                not in normalized_creation_schema
-            )
+            or ("ip_keytextnotnullcheck(length(ip_key)=64)" not in normalized_creation_schema)
         ):
             return False
         if (
@@ -780,9 +838,7 @@ def _store_schema_is_ready(
             return False
         access_columns = [
             (str(row[1]), int(row[5]))
-            for row in connection.execute(
-                'PRAGMA table_info("recovery_access")'
-            ).fetchall()
+            for row in connection.execute('PRAGMA table_info("recovery_access")').fetchall()
         ]
         if access_columns != [("recovery_id", 1), ("session_key", 2)]:
             return False
@@ -798,6 +854,8 @@ def _store_schema_is_ready(
             str(access_foreign_key[4]),
             str(access_foreign_key[6]).upper(),
         ) != ("recoveries", "recovery_id", "id", "CASCADE"):
+            return False
+        if not store.quota_evidence_is_ready(connection):
             return False
 
         probe_objects = connection.execute(
@@ -833,9 +891,7 @@ def _store_schema_is_ready(
                 int(row[5]),
                 int(row[6]),
             )
-            for row in connection.execute(
-                'PRAGMA main.table_xinfo("readiness_probe")'
-            ).fetchall()
+            for row in connection.execute('PRAGMA main.table_xinfo("readiness_probe")').fetchall()
         ]
         if probe_columns != _READY_PROBE_COLUMNS:
             return False
@@ -1033,9 +1089,7 @@ def create_app(
     runtime_settings = settings or RuntimeSettings.from_environment()
     recovery_store = store or SQLiteStore(runtime_settings.database_path)
     scenario_loader = ScenarioLoader()
-    public_replay_scenarios = {
-        scenario.id: scenario for scenario in scenario_loader.list()
-    }
+    public_replay_scenarios = {scenario.id: scenario for scenario in scenario_loader.list()}
     replay_engine = ReplayEngine(recovery_store, scenario_loader)
     recovery_orchestrator = orchestrator
     if recovery_orchestrator is None:
@@ -1055,13 +1109,9 @@ def create_app(
     )
     configured_static_dir = static_dir.resolve() if static_dir is not None else None
     static_index = (
-        configured_static_dir / "index.html"
-        if configured_static_dir is not None
-        else None
+        configured_static_dir / "index.html" if configured_static_dir is not None else None
     )
-    terminal_ttl = timedelta(
-        seconds=runtime_settings.terminal_recovery_ttl_seconds
-    )
+    terminal_ttl = timedelta(seconds=runtime_settings.terminal_recovery_ttl_seconds)
     database_readiness = _CachedReadinessProbe(
         lambda: _store_schema_is_ready(
             recovery_store,
@@ -1157,10 +1207,7 @@ def create_app(
         request: Request,
         error: _RecoveryCreationPublicError,
     ) -> JSONResponse:
-        if (
-            error.code == "creation_outcome_unknown"
-            and error.__cause__ is not None
-        ):
+        if error.code == "creation_outcome_unknown" and error.__cause__ is not None:
             log_safe_exception(
                 logger,
                 request_id=_request_id(request),
@@ -1299,9 +1346,7 @@ def create_app(
         status_code=status.HTTP_201_CREATED,
         responses={
             status.HTTP_409_CONFLICT: _RECOVERY_CREATION_CONFLICT_RESPONSE,
-            status.HTTP_429_TOO_MANY_REQUESTS: (
-                _RECOVERY_CREATION_CAPACITY_RESPONSE
-            ),
+            status.HTTP_429_TOO_MANY_REQUESTS: (_RECOVERY_CREATION_CAPACITY_RESPONSE),
         },
     )
     async def create_recovery(
@@ -1319,9 +1364,7 @@ def create_app(
         )
         cleanup_terminal_recoveries(
             recovery_store,
-            terminal_ttl=timedelta(
-                seconds=runtime_settings.terminal_recovery_ttl_seconds
-            ),
+            terminal_ttl=timedelta(seconds=runtime_settings.terminal_recovery_ttl_seconds),
             batch_size=25,
         )
         try:
@@ -1368,9 +1411,7 @@ def create_app(
             session_key=identity.session_key,
             ip_key=identity.ip_key,
             expires_at=identity.session_expires_at,
-            max_per_session=(
-                runtime_settings.max_recovery_creations_per_session
-            ),
+            max_per_session=(runtime_settings.max_recovery_creations_per_session),
             max_per_ip=runtime_settings.max_recovery_creations_per_ip,
             max_global=runtime_settings.max_recovery_creations_global,
         )
@@ -1402,9 +1443,7 @@ def create_app(
                         recovery_id=ready_claim.recovery_id,
                     )
                 except Exception as error:
-                    raise _RecoveryCreationPublicError(
-                        "creation_outcome_unknown"
-                    ) from error
+                    raise _RecoveryCreationPublicError("creation_outcome_unknown") from error
             try:
                 if payload.execution_mode is ExecutionMode.REPLAY_FIXTURE:
                     snapshot = replay_engine.start(
@@ -1434,12 +1473,10 @@ def create_app(
                             request_fingerprint=request_fingerprint,
                         )
                     else:
-                        resolution = (
-                            recovery_store.mark_recovery_creation_unknown_or_reconcile(
-                                request_key=request_key,
-                                request_fingerprint=request_fingerprint,
-                                session_key=identity.session_key,
-                            )
+                        resolution = recovery_store.mark_recovery_creation_unknown_or_reconcile(
+                            request_key=request_key,
+                            request_fingerprint=request_fingerprint,
+                            session_key=identity.session_key,
                         )
                         if resolution.disposition == "ready":
                             return recovery_store.get_authoritative_recovery_creation(
@@ -1450,9 +1487,7 @@ def create_app(
                             )
                 except Exception:
                     pass
-                raise _RecoveryCreationPublicError(
-                    "creation_outcome_unknown"
-                ) from error
+                raise _RecoveryCreationPublicError("creation_outcome_unknown") from error
 
         if claim.disposition == "ready":
             return authoritative_snapshot(claim)
@@ -1558,9 +1593,7 @@ def create_app(
                 resolution = None
             if resolution is not None and resolution.disposition == "ready":
                 return authoritative_snapshot(resolution)
-            raise _RecoveryCreationPublicError(
-                "creation_outcome_unknown"
-            ) from error
+            raise _RecoveryCreationPublicError("creation_outcome_unknown") from error
 
     @application.post(
         "/api/recoveries/{recovery_id}/decisions",
@@ -1642,10 +1675,7 @@ def create_app(
                     payload,
                 )
             recovery = recovery_store.get_recovery(recovery_key)
-            if (
-                recovery.execution_mode is ExecutionMode.OPENAI_LIVE
-                and recovery.status.terminal
-            ):
+            if recovery.execution_mode is ExecutionMode.OPENAI_LIVE and recovery.status.terminal:
                 public_controls.release_live(recovery_key)
             return response
         except ApprovalDecisionError as error:
@@ -1674,9 +1704,7 @@ def create_app(
         ),
         responses={
             **_PRIVATE_NOT_FOUND_RESPONSE,
-            status.HTTP_422_UNPROCESSABLE_CONTENT: (
-                _DECISION_RESUME_UNPROCESSABLE_RESPONSE
-            ),
+            status.HTTP_422_UNPROCESSABLE_CONTENT: (_DECISION_RESUME_UNPROCESSABLE_RESPONSE),
         },
         openapi_extra={
             "requestBody": {
@@ -1745,10 +1773,7 @@ def create_app(
                 else:
                     response = await recovery_orchestrator.resume_decision(claim)
             recovery = recovery_store.get_recovery(recovery_key)
-            if (
-                recovery.execution_mode is ExecutionMode.OPENAI_LIVE
-                and recovery.status.terminal
-            ):
+            if recovery.execution_mode is ExecutionMode.OPENAI_LIVE and recovery.status.terminal:
                 public_controls.release_live(recovery_key)
             return DecisionResumeResponse.from_decision(
                 response,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from threading import RLock
 from typing import Literal
@@ -135,6 +135,43 @@ DETERMINISTIC_QUOTA_AUTHORITY = QuotaDelegatedAuthority(
     currency="USD",
 )
 
+DETERMINISTIC_QUOTA_RESULT = QuotaRecoveryResult(
+    ceiling_proof=QuotaCeilingProof(
+        baseline_ceiling_units=1000,
+        required_units=1200,
+        shortfall_units=200,
+        provider_evidence_id="quota-ceiling-proof-demo",
+    ),
+    grant=QuotaBurstGrant(
+        permission_id="quota-burst-demo-us-east-1",
+        region="us-east-1",
+        burst_units=250,
+        effective_ceiling_units=1250,
+        duration_seconds=900,
+        extra_cost_minor=300,
+        currency="USD",
+    ),
+    authority=DETERMINISTIC_QUOTA_AUTHORITY,
+    hard_constraints_satisfied=True,
+    delegated_authority_satisfied=True,
+    approval_count=0,
+    execution_verified=True,
+    permission_revoked=True,
+    restored_ceiling_units=1000,
+    simulated=True,
+)
+
+
+def quota_request_digest(request: QuotaRecoveryRequest) -> str:
+    """Return the canonical durable identity for one exact quota request."""
+
+    serialized = json.dumps(
+        request.model_dump(mode="json"),
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(serialized).hexdigest()
+
 
 class QuotaVerificationError(RuntimeError):
     """Raised after a temporary grant when deterministic verification is injected to fail."""
@@ -156,12 +193,7 @@ class QuotaSimulator:
 
     @staticmethod
     def _fingerprint(request: QuotaRecoveryRequest) -> str:
-        serialized = json.dumps(
-            request.model_dump(mode="json"),
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-        return hashlib.sha256(serialized).hexdigest()
+        return quota_request_digest(request)
 
     @property
     def execution_count(self) -> int:
@@ -208,38 +240,13 @@ class QuotaSimulator:
             if request.extra_cost_minor > DETERMINISTIC_QUOTA_AUTHORITY.maximum_extra_cost_minor:
                 raise ValueError("Quota request exceeds delegated cost authority")
 
-            proof = QuotaCeilingProof(
-                baseline_ceiling_units=request.baseline_ceiling_units,
-                required_units=request.required_units,
-                shortfall_units=200,
-                provider_evidence_id="quota-ceiling-proof-demo",
-            )
-            grant = QuotaBurstGrant(
-                permission_id="quota-burst-demo-us-east-1",
-                region=request.region,
-                burst_units=request.burst_units,
-                effective_ceiling_units=1250,
-                duration_seconds=request.duration_seconds,
-                extra_cost_minor=request.extra_cost_minor,
-                currency=request.currency,
-            )
+            grant = DETERMINISTIC_QUOTA_RESULT.grant
             self._execution_count += 1
             self._active_permissions.add(grant.permission_id)
             try:
                 if self._fail_verification:
                     raise QuotaVerificationError("Injected quota verification failure")
-                result = QuotaRecoveryResult(
-                    ceiling_proof=proof,
-                    grant=grant,
-                    authority=DETERMINISTIC_QUOTA_AUTHORITY,
-                    hard_constraints_satisfied=True,
-                    delegated_authority_satisfied=True,
-                    approval_count=0,
-                    execution_verified=True,
-                    permission_revoked=True,
-                    restored_ceiling_units=request.baseline_ceiling_units,
-                    simulated=True,
-                )
+                result = DETERMINISTIC_QUOTA_RESULT
             finally:
                 self._active_permissions.discard(grant.permission_id)
 
@@ -251,6 +258,7 @@ class QuotaSimulator:
 class QuotaAgentContext:
     recovery_id: str
     provider: QuotaSimulator
+    persist_result: Callable[[QuotaRecoveryResult], None]
     request: QuotaRecoveryRequest = DETERMINISTIC_QUOTA_REQUEST
 
     @property
@@ -379,6 +387,7 @@ def build_quota_agent(*, context: QuotaAgentContext) -> Agent[QuotaAgentContext]
             tool_context.context.request,
             idempotency_key=tool_context.context.idempotency_key,
         )
+        tool_context.context.persist_result(result)
         return result.model_dump_json()
 
     return Agent[QuotaAgentContext](

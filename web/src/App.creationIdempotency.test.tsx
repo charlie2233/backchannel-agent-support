@@ -498,8 +498,7 @@ describe("browser recovery-creation idempotency", { timeout: 15_000 }, () => {
     },
     {
       code: "creation_pending",
-      message:
-        "Recovery creation is still in progress. Retry the same start shortly.",
+      message: "Recovery creation is unresolved. Retry the same start shortly.",
       status: 409,
     },
     {

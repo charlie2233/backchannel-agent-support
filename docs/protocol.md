@@ -55,10 +55,11 @@ remain outside that SQLite claim.
 An exact ready retry returns `201` with the current authoritative snapshot and consumes no
 additional orchestration, live admission, or budget unit. A changed scenario or mode returns
 `409 idempotency_conflict` before accounting. A concurrent active owner returns
-`409 creation_pending` with `Retry-After: 2`. Once started work has an unconfirmable outcome,
-the claim returns `409 creation_outcome_unknown` and is never rerun; a complete matching
-recovery already persisted for the same session is reconciled first. Stale reserved or started
-claims also become unknown. A known live admission denial deletes only its untouched
+`409 creation_pending` with `Retry-After: 2`. A handled error after work starts marks the claim
+`creation_outcome_unknown`. A hard-loss start remains `creation_pending` until the five-minute
+stale bound, then becomes `creation_outcome_unknown`; unknown claims are never rerun. A complete
+matching recovery already persisted for the same session is reconciled first. A known live
+admission denial deletes only its untouched
 reservation, so an explicit later retry can safely attempt admission again. Demo reset returns
 `409 reset_creation_pending` without mutation while the caller session has a reserved, started,
 or unknown claim; reset can be retried after the owner resolves it or the signed session
@@ -113,8 +114,10 @@ Evidence, not status alone, controls ready and reconciliation responses. Exact r
 call `ReplayEngine.start` and its canonical snapshot/event/receipt validator; partial or
 tampered fixtures become `creation_outcome_unknown`. SDK/live hotel creation requires either
 one valid pending/claimed consent binding or a terminal receipt whose mode, status, model/trace,
-and version provenance match the recovery. SDK quota requires completed canonical quota
-receipt and QA trace evidence. A bare row or manually flipped terminal status is never enough.
+and version provenance match the recovery. SDK quota requires a complete canonical terminal
+bundle and QA trace evidence. That bundle may be the verified completion or a restart-sealed
+unknown outcome backed by the exact durable dispatch claim. A bare row or manually flipped
+terminal status is never enough.
 
 This ledger prevents duplicate application starts only inside that surviving signed-session
 scope. It does not prove exactly-once execution at an external provider, and an unknown result
@@ -356,3 +359,38 @@ of 900 seconds and 500 minor units. It therefore records `approvalCount=0`, veri
 effective 1250-unit ceiling, revokes the temporary permission, restores the baseline, and seals
 a simulated receipt. The replay fixture presents recorded evidence without executing the quota
 demo adapter.
+
+The SDK stub commits an exact `pending` execution row in the same transaction as the recovery
+and creation event, before its no-approval tool can dispatch. The recovery's internal
+`quota_execution_contract=1` marker therefore requires exactly one canonical execution row.
+Immediately after the demo adapter returns, the tool boundary changes that row to
+`result_recorded` with the exact verified-and-revoked result. The orchestrator accepts only an
+SDK result with a concrete empty interruption list and then durably changes the row to
+`completed`. The recovery's five intermediate quota events, terminal event, receipt, final
+snapshot, and creation claim then commit atomically. A process restart after that validated
+`completed` marker reconstructs the unchanged seven-event outcome without calling the adapter.
+A restart with only the dispatch claim atomically seals `quota.outcome_unknown`,
+`providerExecution=null`, and `redispatched=false`; it does not assert whether execution,
+verification, revocation, or an unrecorded human request occurred and never retries the adapter.
+Same-owner creation retries return that authoritative terminal resource, while foreign sessions
+retain the generic 404.
+If the SDK returns a human interruption, a malformed or missing interruption field, or raises
+after storing a result, the execution is retained as `sdk_invariant_failed`; no zero-approval
+terminal bundle is authoritative, the outer claim becomes unknown, and restart fails closed for
+operator review. A restart or concurrent runtime that first sees `result_recorded` also
+attempts to quarantine it because SDK completion was not yet durably validated. That quarantine
+uses the exact observed state as a compare-and-swap: if the live runner commits `completed`
+first, the restart accepts and finalizes that validated marker instead of retracting it. If the
+quarantine commits first, the runner cannot validate or publish the row. Only `completed` is
+restart-finalizable.
+Migration defaults pre-contract rows to marker zero, but accepts a completed row without an
+execution only when the first upgrade transaction also recorded its exact recovery fingerprint.
+The provenance table, fingerprints, and marker column commit in one savepoint; interruption
+rolls all three back for a clean retry. A current marker-one completion cannot be laundered by
+deleting its execution and flipping the marker. A canonical sealed legacy completion remains
+readable, and its exact same-owner retry promotes a lagging started or unknown outer claim to
+ready. Every marker-zero in-progress row and every marker-one row with a missing, ambiguous, or
+non-reconcilable execution fails startup without mutation or provider dispatch. The same full
+terminal preflight gates `/readyz`. A handled failure before the atomic recovery/claim insert
+marks the outer creation ledger unknown; a hard loss remains pending until its stale bound and
+then becomes unknown. Neither is represented as a quota resource.

@@ -19,6 +19,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from server import main as server_main
 from server.config import RuntimeSettings
+from server.controls import PublicDemoControls
 from server.main import create_app
 from server.models import (
     OPENAI_LIVE_BOUNDARY,
@@ -44,15 +45,11 @@ _RESET_CREATION_PENDING_MESSAGE = (
 )
 _CREATION_MESSAGES = {
     "idempotency_conflict": (
-        "This recovery start no longer matches its original request. "
-        "No additional run was started."
+        "This recovery start no longer matches its original request. No additional run was started."
     ),
-    "creation_pending": (
-        "Recovery creation is still in progress. Retry the same start shortly."
-    ),
+    "creation_pending": ("Recovery creation is unresolved. Retry the same start shortly."),
     "creation_outcome_unknown": (
-        "The recovery start outcome could not be confirmed. "
-        "No replacement run was started."
+        "The recovery start outcome could not be confirmed. No replacement run was started."
     ),
     "creation_capacity": (
         "Recovery creation is temporarily at capacity. Existing starts can still "
@@ -507,9 +504,7 @@ def test_create_request_schema_requires_a_strict_bounded_client_request_id() -> 
     assert property_schema["maxLength"] == 128
     assert property_schema["pattern"] == _CLIENT_REQUEST_ID_PATTERN
 
-    parsed = CreateRecoveryRequest.model_validate(
-        _payload("creation-request-001")
-    )
+    parsed = CreateRecoveryRequest.model_validate(_payload("creation-request-001"))
     assert parsed.client_request_id == "creation-request-001"
 
 
@@ -521,15 +516,11 @@ def test_creation_ledger_binds_claims_to_opaque_session_expiry(
     with sqlite3.connect(database_path) as connection:
         columns = {
             str(row[1]): (str(row[2]), bool(row[3]))
-            for row in connection.execute(
-                "PRAGMA table_info(recovery_creations)"
-            ).fetchall()
+            for row in connection.execute("PRAGMA table_info(recovery_creations)").fetchall()
         }
         indexes = {
             str(row[1])
-            for row in connection.execute(
-                "PRAGMA index_list(recovery_creations)"
-            ).fetchall()
+            for row in connection.execute("PRAGMA index_list(recovery_creations)").fetchall()
         }
 
     assert columns["session_key"] == ("TEXT", True)
@@ -567,9 +558,7 @@ def test_creation_ledger_database_rejects_noncanonical_ip_key_lengths(
             )
 
     with sqlite3.connect(database_path) as connection:
-        stored_ip_key = connection.execute(
-            "SELECT ip_key FROM recovery_creations"
-        ).fetchone()
+        stored_ip_key = connection.execute("SELECT ip_key FROM recovery_creations").fetchone()
     assert stored_ip_key == ("c" * 64,)
     store.close()
 
@@ -723,9 +712,7 @@ def test_interrupted_ip_migration_rebuilds_canonical_schema_and_preserves_claims
     with sqlite3.connect(database_path) as connection:
         ip_column = next(
             row
-            for row in connection.execute(
-                "PRAGMA table_info(recovery_creations)"
-            ).fetchall()
+            for row in connection.execute("PRAGMA table_info(recovery_creations)").fetchall()
             if row[1] == "ip_key"
         )
         table_sql = str(
@@ -747,16 +734,11 @@ def test_interrupted_ip_migration_rebuilds_canonical_schema_and_preserves_claims
         ).fetchall()
         indexes = {
             str(row[1])
-            for row in connection.execute(
-                "PRAGMA index_list(recovery_creations)"
-            ).fetchall()
+            for row in connection.execute("PRAGMA index_list(recovery_creations)").fetchall()
         }
 
     assert (ip_column[2], ip_column[3]) == ("TEXT", 1)
-    assert (
-        "ip_keytextnotnullcheck(length(ip_key)=64)"
-        in "".join(table_sql.lower().split())
-    )
+    assert "ip_keytextnotnullcheck(length(ip_key)=64)" in "".join(table_sql.lower().split())
     assert [row[3] for row in stored_rows] == [
         "4" * 64,
         "2" * 64,
@@ -850,9 +832,7 @@ def test_creation_claim_expiry_matches_signed_cookie_scope(
         claim_session, claim_expiry = connection.execute(
             "SELECT session_key, expires_at FROM recovery_creations"
         ).fetchone()
-        access_session = connection.execute(
-            "SELECT session_key FROM recovery_access"
-        ).fetchone()[0]
+        access_session = connection.execute("SELECT session_key FROM recovery_access").fetchone()[0]
     assert claim_session == access_session
     assert len(str(claim_session)) == 64
     assert raw_cookie not in {claim_session, claim_expiry}
@@ -1270,6 +1250,70 @@ def test_concurrent_same_key_has_one_owner_and_fixed_pending_contenders(
     assert _scalar(database_path, "SELECT COUNT(*) FROM recoveries") == 1
 
 
+def test_hard_loss_started_claim_returns_neutral_pending_http_contract(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "hard-loss-neutral-pending.sqlite3"
+    store = SQLiteStore(database_path)
+    settings = _settings()
+    attempts = _Attempts()
+    controls = PublicDemoControls(store, settings)
+    payload = _payload("hard-loss-neutral-pending-001")
+    app = _create_test_app(
+        settings,
+        store=store,
+        orchestrator=_RecordingOrchestrator(store, attempts),
+    )
+
+    with TestClient(app) as client:
+        raw_cookie = _bootstrap_session(client)
+        _version, expiry_text, nonce, _signature = raw_cookie.split(".")
+        session_key = controls._correlation_key("session", nonce)
+        session_expires_at = datetime.fromtimestamp(int(expiry_text), tz=UTC)
+        request_key = controls.recovery_creation_request_key(
+            session_key=session_key,
+            client_request_id=payload["clientRequestId"],
+        )
+        request_fingerprint = server_main._recovery_creation_fingerprint(
+            CreateRecoveryRequest.model_validate(payload)
+        )
+        now = datetime.now(UTC)
+        owner = store.claim_recovery_creation(
+            request_key=request_key,
+            request_fingerprint=request_fingerprint,
+            scenario_id=ScenarioId.HOTEL,
+            execution_mode=ExecutionMode.SDK_STUB,
+            reserved_recovery_id=str(uuid4()),
+            session_key=session_key,
+            ip_key="a" * 64,
+            expires_at=session_expires_at,
+            now=now,
+        )
+        assert owner.disposition == "owner"
+        store.mark_recovery_creation_started(
+            request_key=request_key,
+            request_fingerprint=request_fingerprint,
+            now=now,
+        )
+
+        response = client.post("/api/recoveries", json=payload)
+
+    message = _assert_creation_error(response, code="creation_pending")
+    assert message == "Recovery creation is unresolved. Retry the same start shortly."
+    assert response.headers["retry-after"] == "2"
+    assert attempts.orchestrations == 0
+    assert _scalar(database_path, "SELECT COUNT(*) FROM recoveries") == 0
+    assert _scalar(database_path, "SELECT COUNT(*) FROM executions") == 0
+    assert (
+        _scalar(
+            database_path,
+            "SELECT COUNT(*) FROM recovery_creations WHERE status = 'started'",
+        )
+        == 1
+    )
+    store.close()
+
+
 @pytest.mark.parametrize("stale_owner", [False, True])
 def test_reset_refuses_unresolved_start_before_explicit_post_reset_restart(
     tmp_path: Path,
@@ -1326,25 +1370,17 @@ def test_reset_refuses_unresolved_start_before_explicit_post_reset_restart(
                                 UPDATE recovery_creations
                                 SET updated_at = ?
                                 """,
-                                (
-                                    (
-                                        datetime.now(UTC) - timedelta(minutes=10)
-                                    ).isoformat(),
-                                ),
+                                ((datetime.now(UTC) - timedelta(minutes=10)).isoformat(),),
                             )
                         same_key_contender = contender_client.post(
                             "/api/recoveries",
                             json=payload,
                         )
                         before_reset = _database_dump(database_path)
-                        reset_while_pending = contender_client.post(
-                            "/api/demo/reset"
-                        )
+                        reset_while_pending = contender_client.post("/api/demo/reset")
                     else:
                         before_reset = _database_dump(database_path)
-                        reset_while_pending = contender_client.post(
-                            "/api/demo/reset"
-                        )
+                        reset_while_pending = contender_client.post("/api/demo/reset")
                         same_key_contender = contender_client.post(
                             "/api/recoveries",
                             json=payload,
@@ -1627,9 +1663,7 @@ def test_expired_creation_claim_cleanup_is_bounded_and_session_scoped(
 
     assert first_deleted == second_deleted == 1
     with sqlite3.connect(database_path) as connection:
-        remaining = connection.execute(
-            "SELECT session_key FROM recovery_creations"
-        ).fetchall()
+        remaining = connection.execute("SELECT session_key FROM recovery_creations").fetchall()
     assert remaining == [(sessions[2],)]
     store.close()
 
@@ -1678,10 +1712,13 @@ def test_store_enforces_session_and_global_creation_capacity(
 
     assert first.disposition == second.disposition == "owner"
     assert session_full.disposition == globally_full.disposition == "capacity"
-    assert _scalar(
-        tmp_path / "creation-capacity.sqlite3",
-        "SELECT COUNT(*) FROM recovery_creations",
-    ) == 2
+    assert (
+        _scalar(
+            tmp_path / "creation-capacity.sqlite3",
+            "SELECT COUNT(*) FROM recovery_creations",
+        )
+        == 2
+    )
     store.close()
 
 
@@ -1813,9 +1850,7 @@ def test_exact_creation_retry_bypasses_new_ip_capacity_after_ip_mobility(
             "SELECT ip_key FROM recovery_creations WHERE request_key = ?",
             (original_request_key,),
         ).fetchone()
-        row_count = connection.execute(
-            "SELECT COUNT(*) FROM recovery_creations"
-        ).fetchone()
+        row_count = connection.execute("SELECT COUNT(*) FROM recovery_creations").fetchone()
     assert stored_ip_key == (original_ip_key,)
     assert row_count == (2,)
     store.close()
@@ -2184,9 +2219,7 @@ def test_public_creation_capacity_is_exact_and_has_no_start_side_effects(
     assert denied_reserved_id not in _database_dump(database_path)
     assert denied_reserved_id not in denied.text
     assert denied_reserved_id not in repr(dict(denied.headers))
-    assert "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" not in _database_dump(
-        database_path
-    )
+    assert "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" not in _database_dump(database_path)
     store.close()
 
 
@@ -2472,9 +2505,7 @@ def test_reset_deletes_only_calling_session_creation_claims(
 
         assert first.post("/api/demo/reset").status_code == 200
         with sqlite3.connect(database_path) as connection:
-            after = connection.execute(
-                "SELECT session_key FROM recovery_creations"
-            ).fetchall()
+            after = connection.execute("SELECT session_key FROM recovery_creations").fetchall()
             remaining_access = connection.execute(
                 "SELECT session_key FROM recovery_access WHERE recovery_id = ?",
                 (recovery_id,),

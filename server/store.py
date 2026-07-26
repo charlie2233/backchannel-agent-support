@@ -29,7 +29,15 @@ from server.config import (
 from server.digest import remedy_consent_digest
 from server.models import (
     OPENAI_LIVE_BOUNDARY,
+    QUOTA_SDK_AUTHORIZATION_SOURCE,
+    QUOTA_SDK_INITIAL_SUMMARY,
+    QUOTA_SDK_PROVIDER_RESULT,
     QUOTA_SDK_STUB_BOUNDARY,
+    QUOTA_SDK_UNKNOWN_AUTHORIZATION_SOURCE,
+    QUOTA_SDK_UNKNOWN_PROVIDER_RESULT,
+    QUOTA_SDK_UNKNOWN_SUMMARY,
+    QUOTA_SDK_UNKNOWN_VERIFICATION_RESULTS,
+    QUOTA_SDK_VERIFICATION_RESULTS,
     SDK_STUB_BOUNDARY,
     ApprovalDecisionRequest,
     ApprovalDecisionResponse,
@@ -50,13 +58,18 @@ from server.policy import (
     evaluate_hotel_policy,
     exact_hotel_terms,
 )
+from server.providers.quota_simulator import (
+    DETERMINISTIC_QUOTA_REQUEST,
+    DETERMINISTIC_QUOTA_RESULT,
+    QUOTA_TOOL_CALL_ID,
+    QuotaRecoveryResult,
+    quota_request_digest,
+)
 from server.trace_ids import is_valid_live_trace_id, is_valid_qa_trace_id
 
 MAX_STORE_EXPIRY_BATCH_SIZE = 1_000
 RECOVERY_CREATION_STALE_AFTER = timedelta(minutes=5)
-EXPIRATION_SUMMARY = (
-    "Consent expired without a decision; no provider dispatch was authorized."
-)
+EXPIRATION_SUMMARY = "Consent expired without a decision; no provider dispatch was authorized."
 EXPIRATION_VERIFICATION_RESULTS = (
     "Human consent requested.",
     "Consent window expired without an approval decision.",
@@ -66,12 +79,8 @@ EXPIRATION_VERIFICATION_RESULTS = (
     "Temporary permission revoked.",
     "Expiration receipt sealed.",
 )
-CLAIM_EXPIRY_CLOSED_SUMMARY = (
-    "Claimed decline expired before provider dispatch."
-)
-CLAIM_EXPIRY_UNKNOWN_SUMMARY = (
-    "Claimed decision expired; provider outcome remains unknown."
-)
+CLAIM_EXPIRY_CLOSED_SUMMARY = "Claimed decline expired before provider dispatch."
+CLAIM_EXPIRY_UNKNOWN_SUMMARY = "Claimed decision expired; provider outcome remains unknown."
 CLAIM_EXPIRY_CLOSED_VERIFICATION_RESULTS = (
     "Human consent requested.",
     "Exact decline decision claimed before consent expiry.",
@@ -90,13 +99,13 @@ CLAIM_EXPIRY_UNKNOWN_VERIFICATION_RESULTS = (
 )
 CLAIM_EXPIRY_CLOSED_PROVIDER_RESULT = "Provider dispatch did not begin."
 CLAIM_EXPIRY_UNKNOWN_PROVIDER_RESULT = CLAIM_EXPIRY_UNKNOWN_SUMMARY
-CLAIM_EXPIRY_CLOSED_AUTHORIZATION_SOURCE = (
-    "Exact decline claim expired before provider dispatch."
-)
+CLAIM_EXPIRY_CLOSED_AUTHORIZATION_SOURCE = "Exact decline claim expired before provider dispatch."
 CLAIM_EXPIRY_UNKNOWN_AUTHORIZATION_SOURCE = (
-    "A durable exact decision was claimed before consent expiry; "
-    "no provider outcome is asserted."
+    "A durable exact decision was claimed before consent expiry; no provider outcome is asserted."
 )
+QUOTA_EXECUTION_RESULT_RECORDED = "result_recorded"
+QUOTA_EXECUTION_INVARIANT_FAILED = "sdk_invariant_failed"
+LEGACY_QUOTA_COMPLETION_DOMAIN = "backchannel:legacy-quota-completion:v1"
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -122,6 +131,9 @@ CREATE TABLE IF NOT EXISTS recoveries (
     protocol_version TEXT,
     agent_graph_version TEXT,
     definition_digest TEXT,
+    quota_execution_contract INTEGER NOT NULL DEFAULT 0 CHECK (
+        quota_execution_contract IN (0, 1)
+    ),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -464,10 +476,8 @@ class RemedyConsentRecord:
             self.evidence.remedy.remedy_id != self.remedy_id
             or exact_hotel_terms(self.evidence) != self.terms
             or self.evidence.remedy.cost_delta_minor != self.cost_delta_minor
-            or tuple(sorted(self.evidence.remedy.changed_fields))
-            != self.changed_fields
-            or tuple(sorted(self.evidence.remedy.provider_commitments))
-            != self.provider_commitments
+            or tuple(sorted(self.evidence.remedy.changed_fields)) != self.changed_fields
+            or tuple(sorted(self.evidence.remedy.provider_commitments)) != self.provider_commitments
             or recomputed_digest != self.consent_digest
             or self.hard_constraint_satisfied is not True
             or self.delegated_authority_satisfied is not True
@@ -492,6 +502,7 @@ class SQLiteStore:
             self._migrate_task4_remedies(connection)
             self._migrate_task3_pending_approvals(connection)
             self._migrate_task7_recovery_provenance(connection)
+            self._migrate_quota_execution_contract(connection)
             self._migrate_task7_receipts(connection)
             self._migrate_task3_executions(connection)
             self._migrate_task6_approval_decisions(connection)
@@ -540,15 +551,11 @@ class SQLiteStore:
         try:
             columns = {
                 cast(str, row["name"])
-                for row in connection.execute(
-                    "PRAGMA table_info(recovery_creations)"
-                ).fetchall()
+                for row in connection.execute("PRAGMA table_info(recovery_creations)").fetchall()
             }
             legacy_expiry = (datetime.now(UTC) + timedelta(days=7)).isoformat()
             if "session_key" not in columns:
-                connection.execute(
-                    "ALTER TABLE recovery_creations ADD COLUMN session_key TEXT"
-                )
+                connection.execute("ALTER TABLE recovery_creations ADD COLUMN session_key TEXT")
                 connection.execute(
                     """
                     UPDATE recovery_creations
@@ -557,9 +564,7 @@ class SQLiteStore:
                     """
                 )
             if "expires_at" not in columns:
-                connection.execute(
-                    "ALTER TABLE recovery_creations ADD COLUMN expires_at TEXT"
-                )
+                connection.execute("ALTER TABLE recovery_creations ADD COLUMN expires_at TEXT")
                 connection.execute(
                     """
                     UPDATE recovery_creations
@@ -596,10 +601,7 @@ class SQLiteStore:
                 and cast(str, ip_column["type"]).upper() == "TEXT"
                 and cast(int, ip_column["notnull"]) == 1
                 and cast(int, ip_column["hidden"]) == 0
-                and (
-                    "ip_keytextnotnullcheck(length(ip_key)=64)"
-                    in normalized_schema
-                )
+                and ("ip_keytextnotnullcheck(length(ip_key)=64)" in normalized_schema)
             )
             if not canonical_ip_schema:
                 invalid_session = connection.execute(
@@ -613,12 +615,8 @@ class SQLiteStore:
                     """
                 ).fetchone()
                 if invalid_session is not None:
-                    raise RuntimeError(
-                        "Unsupported recovery creation session correlation"
-                    )
-                connection.execute(
-                    "DROP TABLE IF EXISTS recovery_creations_ip_migration"
-                )
+                    raise RuntimeError("Unsupported recovery creation session correlation")
+                connection.execute("DROP TABLE IF EXISTS recovery_creations_ip_migration")
                 connection.execute(
                     """
                     CREATE TABLE recovery_creations_ip_migration (
@@ -674,8 +672,7 @@ class SQLiteStore:
                 )
                 connection.execute("DROP TABLE recovery_creations")
                 connection.execute(
-                    "ALTER TABLE recovery_creations_ip_migration "
-                    "RENAME TO recovery_creations"
+                    "ALTER TABLE recovery_creations_ip_migration RENAME TO recovery_creations"
                 )
 
             connection.execute(
@@ -713,12 +710,9 @@ class SQLiteStore:
         if actual != expected:
             raise RuntimeError("Unsupported recovery access schema")
         connection.execute(
-            "CREATE INDEX IF NOT EXISTS recovery_access_session_idx "
-            "ON recovery_access(session_key)"
+            "CREATE INDEX IF NOT EXISTS recovery_access_session_idx ON recovery_access(session_key)"
         )
-        foreign_keys = connection.execute(
-            "PRAGMA foreign_key_list(recovery_access)"
-        ).fetchall()
+        foreign_keys = connection.execute("PRAGMA foreign_key_list(recovery_access)").fetchall()
         if len(foreign_keys) != 1:
             raise RuntimeError("Unsupported recovery access foreign key")
         foreign_key = foreign_keys[0]
@@ -741,9 +735,7 @@ class SQLiteStore:
     def _migrate_task8_usage_ledger(connection: sqlite3.Connection) -> None:
         """Detach aggregate demo usage from recovery-detail retention."""
 
-        foreign_keys = connection.execute(
-            "PRAGMA foreign_key_list(usage_ledger)"
-        ).fetchall()
+        foreign_keys = connection.execute("PRAGMA foreign_key_list(usage_ledger)").fetchall()
         if not foreign_keys:
             return
 
@@ -861,6 +853,125 @@ class SQLiteStore:
         )
 
     @staticmethod
+    def _legacy_quota_recovery_fingerprint(row: sqlite3.Row) -> str:
+        """Bind legacy acceptance to the exact row observed during schema migration."""
+
+        fields = (
+            "id",
+            "scenario_id",
+            "execution_mode",
+            "status",
+            "current_step",
+            "current_step_summary",
+            "model_ids_json",
+            "root_trace_id",
+            "model_call",
+            "sdk_version",
+            "protocol_version",
+            "agent_graph_version",
+            "definition_digest",
+            "created_at",
+            "updated_at",
+        )
+        payload = {
+            "domain": LEGACY_QUOTA_COMPLETION_DOMAIN,
+            "recovery": {field: row[field] for field in fields},
+        }
+        return hashlib.sha256(
+            json.dumps(
+                payload,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("ascii")
+        ).hexdigest()
+
+    @classmethod
+    def _migrate_quota_execution_contract(
+        cls,
+        connection: sqlite3.Connection,
+    ) -> None:
+        """Mark rows created under the restart-durable quota contract."""
+
+        columns = {
+            cast(str, row["name"])
+            for row in connection.execute("PRAGMA table_info(recoveries)").fetchall()
+        }
+        provenance_exists = (
+            connection.execute(
+                """
+                SELECT 1
+                FROM sqlite_master
+                WHERE type = 'table' AND name = 'quota_legacy_completions'
+                """
+            ).fetchone()
+            is not None
+        )
+        register_legacy_completions = (
+            "quota_execution_contract" not in columns and not provenance_exists
+        )
+        savepoint = "quota_execution_contract_migration"
+        connection.execute(f"SAVEPOINT {savepoint}")
+        try:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS quota_legacy_completions (
+                    recovery_id TEXT NOT NULL PRIMARY KEY
+                        REFERENCES recoveries(id) ON DELETE CASCADE,
+                    recovery_fingerprint TEXT NOT NULL CHECK (
+                        length(recovery_fingerprint) = 64
+                        AND recovery_fingerprint NOT GLOB '*[^0-9a-f]*'
+                    ),
+                    recorded_at TEXT NOT NULL
+                )
+                """
+            )
+            if register_legacy_completions:
+                legacy_rows = connection.execute(
+                    """
+                    SELECT recoveries.*
+                    FROM recoveries
+                    WHERE scenario_id = 'api-quota'
+                      AND execution_mode = 'sdk_stub'
+                      AND status = 'completed'
+                      AND NOT EXISTS (
+                        SELECT 1
+                        FROM executions
+                        WHERE executions.recovery_id = recoveries.id
+                      )
+                    ORDER BY id ASC
+                    """
+                ).fetchall()
+                recorded_at = datetime.now(UTC).isoformat()
+                for row in legacy_rows:
+                    connection.execute(
+                        """
+                        INSERT INTO quota_legacy_completions (
+                            recovery_id, recovery_fingerprint, recorded_at
+                        ) VALUES (?, ?, ?)
+                        """,
+                        (
+                            cast(str, row["id"]),
+                            cls._legacy_quota_recovery_fingerprint(row),
+                            recorded_at,
+                        ),
+                    )
+            if "quota_execution_contract" not in columns:
+                connection.execute(
+                    """
+                    ALTER TABLE recoveries
+                    ADD COLUMN quota_execution_contract INTEGER NOT NULL
+                        DEFAULT 0 CHECK (quota_execution_contract IN (0, 1))
+                    """,
+                )
+        except BaseException:
+            connection.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+            connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+            raise
+        else:
+            connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+
+    @staticmethod
     def _migrate_task7_receipts(connection: sqlite3.Connection) -> None:
         """Enrich legacy receipts only from durable, mode-compatible provenance."""
 
@@ -869,6 +980,7 @@ class SQLiteStore:
             SELECT
                 receipts.recovery_id AS recovery_id,
                 receipts.receipt_json AS receipt_json,
+                recoveries.scenario_id AS scenario_id,
                 recoveries.execution_mode AS execution_mode,
                 recoveries.model_ids_json AS model_ids_json,
                 recoveries.root_trace_id AS root_trace_id,
@@ -888,6 +1000,21 @@ class SQLiteStore:
             except (TypeError, ValueError):
                 continue
             if not isinstance(payload, dict) or payload.get("executionMode") != mode.value:
+                continue
+            task7_fields = {
+                "modelCall",
+                "rootTraceId",
+                "sdkVersion",
+                "protocolVersion",
+                "agentGraphVersion",
+                "definitionDigest",
+            }
+            present_task7_fields = task7_fields.intersection(payload)
+            if present_task7_fields == task7_fields:
+                # Current receipts are immutable evidence, not migration input.
+                continue
+            if present_task7_fields:
+                # A partial provenance shape is ambiguous and must fail closed.
                 continue
 
             if mode is ExecutionMode.REPLAY_FIXTURE:
@@ -930,7 +1057,11 @@ class SQLiteStore:
                         )
                     ):
                         continue
-                    boundary = SDK_STUB_BOUNDARY
+                    boundary = (
+                        QUOTA_SDK_STUB_BOUNDARY
+                        if cast(str, row["scenario_id"]) == ScenarioId.API_QUOTA.value
+                        else SDK_STUB_BOUNDARY
+                    )
                 else:
                     if (
                         not model_call
@@ -1547,9 +1678,7 @@ class SQLiteStore:
             expiry=datetime.fromisoformat(cast(str, row["expiry"])),
             consent_digest=cast(str, row["digest"]),
             hard_constraint_satisfied=stored_policy_flag("hard_constraint_satisfied"),
-            delegated_authority_satisfied=stored_policy_flag(
-                "delegated_authority_satisfied"
-            ),
+            delegated_authority_satisfied=stored_policy_flag("delegated_authority_satisfied"),
             evidence=CommitRemedyArguments.model_validate_json(cast(str, row["evidence_json"])),
         )
 
@@ -1620,9 +1749,7 @@ class SQLiteStore:
             claimed_at = datetime.fromisoformat(cast(str, row["claimed_at"]))
             status_value = cast(str, row["status"])
             if status_value == "completed":
-                completed_at = datetime.fromisoformat(
-                    cast(str, row["completed_at"])
-                )
+                completed_at = datetime.fromisoformat(cast(str, row["completed_at"]))
             else:
                 completed_at = None
         except (TypeError, ValueError):
@@ -1825,10 +1952,8 @@ class SQLiteStore:
                 or exact_hotel_terms(consent.evidence) != consent.terms
                 or not policy.hard_constraint_satisfied
                 or not policy.delegated_authority_satisfied
-                or consent.hard_constraint_satisfied
-                != policy.hard_constraint_satisfied
-                or consent.delegated_authority_satisfied
-                != policy.delegated_authority_satisfied
+                or consent.hard_constraint_satisfied != policy.hard_constraint_satisfied
+                or consent.delegated_authority_satisfied != policy.delegated_authority_satisfied
                 or consent.expiry.tzinfo is None
                 or consent.expiry.utcoffset() != timedelta(0)
                 or pending.execution_mode is not provenance.execution_mode
@@ -1984,9 +2109,7 @@ class SQLiteStore:
 
     @staticmethod
     def _require_creation_digest(value: str, *, name: str) -> None:
-        if len(value) != 64 or any(
-            character not in "0123456789abcdef" for character in value
-        ):
+        if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
             raise ValueError(f"{name} must be a lowercase SHA-256 digest")
 
     @staticmethod
@@ -2025,12 +2148,9 @@ class SQLiteStore:
             or receipt.root_trace_id != cast(str | None, row["root_trace_id"])
             or receipt.model_call != bool(cast(int, row["model_call"]))
             or receipt.sdk_version != cast(str | None, row["sdk_version"])
-            or receipt.protocol_version
-            != cast(str | None, row["protocol_version"])
-            or receipt.agent_graph_version
-            != cast(str | None, row["agent_graph_version"])
-            or receipt.definition_digest
-            != cast(str | None, row["definition_digest"])
+            or receipt.protocol_version != cast(str | None, row["protocol_version"])
+            or receipt.agent_graph_version != cast(str | None, row["agent_graph_version"])
+            or receipt.definition_digest != cast(str | None, row["definition_digest"])
         ):
             return False
         if scenario_id is ScenarioId.API_QUOTA:
@@ -2042,9 +2162,106 @@ class SQLiteStore:
             )
         if scenario_id is not ScenarioId.HOTEL:
             return False
-        return (
-            stored_status is not RecoveryStatus.COMPLETED
-            or receipt.approval_count == 1
+        return stored_status is not RecoveryStatus.COMPLETED or receipt.approval_count == 1
+
+    @classmethod
+    def _quota_public_terminal_bundle_matches(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        row: sqlite3.Row,
+        receipt: RecoveryReceipt,
+    ) -> bool:
+        """Validate completed legacy or durable restart-aware quota evidence."""
+
+        recovery_id = cast(str, row["id"])
+        quota_execution_contract = row["quota_execution_contract"]
+        if type(quota_execution_contract) is not int or quota_execution_contract not in {0, 1}:
+            return False
+        execution_rows = connection.execute(
+            "SELECT * FROM executions WHERE recovery_id = ?",
+            (recovery_id,),
+        ).fetchall()
+        legacy_rows = connection.execute(
+            """
+            SELECT recovery_fingerprint, recorded_at
+            FROM quota_legacy_completions
+            WHERE recovery_id = ?
+            """,
+            (recovery_id,),
+        ).fetchall()
+        try:
+            recovery_status = RecoveryStatus(cast(str, row["status"]))
+            if not execution_rows:
+                if (
+                    quota_execution_contract != 0
+                    or recovery_status is not RecoveryStatus.COMPLETED
+                    or len(legacy_rows) != 1
+                    or cast(str, legacy_rows[0]["recovery_fingerprint"])
+                    != cls._legacy_quota_recovery_fingerprint(row)
+                ):
+                    return False
+                legacy_recorded_at = datetime.fromisoformat(
+                    cast(str, legacy_rows[0]["recorded_at"])
+                )
+                if legacy_recorded_at.tzinfo is None or legacy_recorded_at.utcoffset() != timedelta(
+                    0
+                ):
+                    return False
+                execution = DurableExecution(
+                    execution_id=cls._quota_execution_id(recovery_id),
+                    recovery_id=recovery_id,
+                    idempotency_key=cls._quota_idempotency_key(recovery_id),
+                    status="completed",
+                    provider_execution=True,
+                    request_digest=quota_request_digest(DETERMINISTIC_QUOTA_REQUEST),
+                    tool_call_id=QUOTA_TOOL_CALL_ID,
+                    remedy_digest=None,
+                    result_json=DETERMINISTIC_QUOTA_RESULT.model_dump(mode="json"),
+                )
+            elif len(execution_rows) == 1:
+                if quota_execution_contract != 1 or legacy_rows:
+                    return False
+                execution = cls._require_exact_quota_execution_row(
+                    execution_rows[0],
+                    recovery_id=recovery_id,
+                )
+                if (
+                    recovery_status is RecoveryStatus.COMPLETED and execution.status != "completed"
+                ) or (
+                    recovery_status is RecoveryStatus.OUTCOME_UNKNOWN
+                    and execution.status != RecoveryStatus.OUTCOME_UNKNOWN.value
+                ):
+                    return False
+                cls._require_quota_execution_chronology(
+                    recovery=row,
+                    execution=execution_rows[0],
+                    terminal=True,
+                )
+            else:
+                return False
+            expected_receipt = cls._quota_receipt_for_execution_row(
+                recovery=row,
+                execution=execution,
+            )
+            specs = (
+                cls._quota_completed_transition_specs(DETERMINISTIC_QUOTA_RESULT)
+                if execution.status == "completed"
+                else [cls._quota_unknown_transition_spec(recovery_id)]
+            )
+        except (
+            ExecutionConflictError,
+            ReceiptTransitionError,
+            TypeError,
+            ValueError,
+        ):
+            return False
+        return receipt == expected_receipt and cls._quota_terminal_bundle_matches(
+            connection,
+            recovery=row,
+            execution=execution,
+            receipt=expected_receipt,
+            specs=specs,
         )
 
     def _creation_pending_matches_recovery(
@@ -2070,17 +2287,13 @@ class SQLiteStore:
         except (TypeError, ValueError):
             return False
         return (
-            pending.execution_mode
-            is ExecutionMode(cast(str, row["execution_mode"]))
+            pending.execution_mode is ExecutionMode(cast(str, row["execution_mode"]))
             and list(pending.model_ids) == stored_model_ids
             and pending.root_trace_id == cast(str | None, row["root_trace_id"])
             and pending.sdk_version == cast(str | None, row["sdk_version"])
-            and pending.protocol_version
-            == cast(str | None, row["protocol_version"])
-            and pending.agent_graph_version
-            == cast(str | None, row["agent_graph_version"])
-            and pending.definition_digest
-            == cast(str | None, row["definition_digest"])
+            and pending.protocol_version == cast(str | None, row["protocol_version"])
+            and pending.agent_graph_version == cast(str | None, row["agent_graph_version"])
+            and pending.definition_digest == cast(str | None, row["definition_digest"])
         )
 
     def _creation_authoritative_snapshot(
@@ -2149,15 +2362,21 @@ class SQLiteStore:
             ).fetchone()
             if receipt_row is None:
                 return None
-            receipt = RecoveryReceipt.model_validate_json(
-                cast(str, receipt_row["receipt_json"])
-            )
-            if not self._creation_receipt_matches(
-                row,
-                receipt,
-                scenario_id=scenario_id,
-                execution_mode=execution_mode,
-            ):
+            receipt = RecoveryReceipt.model_validate_json(cast(str, receipt_row["receipt_json"]))
+            if scenario_id is ScenarioId.API_QUOTA and execution_mode is ExecutionMode.SDK_STUB:
+                valid_terminal = self._quota_public_terminal_bundle_matches(
+                    connection,
+                    row=row,
+                    receipt=receipt,
+                )
+            else:
+                valid_terminal = self._creation_receipt_matches(
+                    row,
+                    receipt,
+                    scenario_id=scenario_id,
+                    execution_mode=execution_mode,
+                )
+            if not valid_terminal:
                 return None
             return self._recovery_from_row(row)
         except (TypeError, ValueError):
@@ -2185,9 +2404,7 @@ class SQLiteStore:
                 session_key=session_key,
             )
         if snapshot is None:
-            raise RecoveryNotFoundError(
-                "Recovery creation has no authoritative outcome evidence"
-            )
+            raise RecoveryNotFoundError("Recovery creation has no authoritative outcome evidence")
         return snapshot
 
     @staticmethod
@@ -2237,25 +2454,20 @@ class SQLiteStore:
             or not 1 <= max_per_session <= MAX_RECOVERY_CREATIONS_PER_SESSION
         ):
             raise ValueError(
-                "max_per_session must be between "
-                f"1 and {MAX_RECOVERY_CREATIONS_PER_SESSION}"
+                f"max_per_session must be between 1 and {MAX_RECOVERY_CREATIONS_PER_SESSION}"
             )
         if (
             not isinstance(max_per_ip, int)
             or isinstance(max_per_ip, bool)
             or not 1 <= max_per_ip <= MAX_RECOVERY_CREATIONS_PER_IP
         ):
-            raise ValueError(
-                f"max_per_ip must be between 1 and {MAX_RECOVERY_CREATIONS_PER_IP}"
-            )
+            raise ValueError(f"max_per_ip must be between 1 and {MAX_RECOVERY_CREATIONS_PER_IP}")
         if (
             not isinstance(max_global, int)
             or isinstance(max_global, bool)
             or not 1 <= max_global <= MAX_RECOVERY_CREATIONS_GLOBAL
         ):
-            raise ValueError(
-                f"max_global must be between 1 and {MAX_RECOVERY_CREATIONS_GLOBAL}"
-            )
+            raise ValueError(f"max_global must be between 1 and {MAX_RECOVERY_CREATIONS_GLOBAL}")
         if max_per_session > max_global:
             raise ValueError("max_per_session cannot exceed max_global")
         if stale_after <= timedelta(0):
@@ -2366,13 +2578,16 @@ class SQLiteStore:
             stored_recovery_id = cast(str, row["recovery_id"])
             stored_status = cast(str, row["status"])
             if stored_status == "ready":
-                if self._creation_authoritative_snapshot(
-                    connection,
-                    recovery_id=stored_recovery_id,
-                    scenario_id=scenario_id,
-                    execution_mode=execution_mode,
-                    session_key=session_key,
-                ) is not None:
+                if (
+                    self._creation_authoritative_snapshot(
+                        connection,
+                        recovery_id=stored_recovery_id,
+                        scenario_id=scenario_id,
+                        execution_mode=execution_mode,
+                        session_key=session_key,
+                    )
+                    is not None
+                ):
                     return self._creation_claim_from_row(
                         row,
                         disposition="ready",
@@ -2390,13 +2605,16 @@ class SQLiteStore:
                     disposition="unknown",
                 )
 
-            if self._creation_authoritative_snapshot(
-                connection,
-                recovery_id=stored_recovery_id,
-                scenario_id=scenario_id,
-                execution_mode=execution_mode,
-                session_key=session_key,
-            ) is not None:
+            if (
+                self._creation_authoritative_snapshot(
+                    connection,
+                    recovery_id=stored_recovery_id,
+                    scenario_id=scenario_id,
+                    execution_mode=execution_mode,
+                    session_key=session_key,
+                )
+                is not None
+            ):
                 connection.execute(
                     """
                     UPDATE recovery_creations
@@ -2554,14 +2772,22 @@ class SQLiteStore:
                 and execution_mode is not ExecutionMode.REPLAY_FIXTURE
             ):
                 raise RuntimeError("Recovery creation changed its reserved ID")
-            if self._creation_authoritative_snapshot(
+            authoritative = self._creation_authoritative_snapshot(
                 connection,
                 recovery_id=recovery_id,
                 scenario_id=scenario_id,
                 execution_mode=execution_mode,
                 session_key=session_key,
-            ) is None:
+            )
+            if authoritative is None:
                 raise RuntimeError("Recovery creation result is not authoritative")
+            if cast(str, row["status"]) == "ready" and reserved_recovery_id == recovery_id:
+                return RecoveryCreationClaim(
+                    disposition="ready",
+                    recovery_id=recovery_id,
+                    scenario_id=scenario_id,
+                    execution_mode=execution_mode,
+                )
             connection.execute(
                 """
                 UPDATE recovery_creations
@@ -2628,6 +2854,11 @@ class SQLiteStore:
                 disposition: RecoveryCreationDisposition = "ready"
             else:
                 disposition = "unknown"
+            if cast(str, row["status"]) == disposition:
+                return self._creation_claim_from_row(
+                    row,
+                    disposition=disposition,
+                )
             connection.execute(
                 """
                 UPDATE recovery_creations
@@ -2670,10 +2901,7 @@ class SQLiteStore:
                 "SELECT * FROM recovery_creations WHERE request_key = ?",
                 (request_key,),
             ).fetchone()
-            if (
-                row is None
-                or cast(str, row["request_fingerprint"]) != request_fingerprint
-            ):
+            if row is None or cast(str, row["request_fingerprint"]) != request_fingerprint:
                 raise RuntimeError("Recovery creation claim no longer matches")
             connection.execute(
                 """
@@ -2704,8 +2932,13 @@ class SQLiteStore:
         agent_graph_version: str | None = None,
         definition_digest: str | None = None,
         session_key: str | None = None,
+        quota_execution_claim: bool = False,
     ) -> RecoverySnapshot:
         selected_model_ids = list(model_ids or [])
+        if quota_execution_claim and (
+            scenario_id is not ScenarioId.API_QUOTA or execution_mode is not ExecutionMode.SDK_STUB
+        ):
+            raise ValueError("Durable quota claims require an API quota SDK recovery")
         if execution_mode is ExecutionMode.REPLAY_FIXTURE:
             if (
                 selected_model_ids
@@ -2763,8 +2996,8 @@ class SQLiteStore:
                     current_step_summary, model_ids_json, root_trace_id,
                     model_call, sdk_version, protocol_version,
                     agent_graph_version, definition_digest,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    quota_execution_contract, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     recovery_id,
@@ -2780,6 +3013,7 @@ class SQLiteStore:
                     protocol_version,
                     agent_graph_version,
                     definition_digest,
+                    int(quota_execution_claim),
                     now.isoformat(),
                     now.isoformat(),
                 ),
@@ -2797,6 +3031,12 @@ class SQLiteStore:
                 recovery_id=recovery_id,
                 session_key=session_key,
             )
+            if quota_execution_claim:
+                self._insert_quota_execution_claim_in_connection(
+                    connection,
+                    recovery_id=recovery_id,
+                    now=now,
+                )
         return self.get_recovery(recovery_id)
 
     def get_or_create_replay(
@@ -2962,9 +3202,7 @@ class SQLiteStore:
                 cast(str, row["updated_at"]).replace("Z", "+00:00")
             )
         except (TypeError, ValueError):
-            raise ReplayIntegrityError(
-                "Canonical replay timestamps are malformed"
-            ) from None
+            raise ReplayIntegrityError("Canonical replay timestamps are malformed") from None
         provenance_values = (
             json.loads(cast(str, row["model_ids_json"])),
             row["root_trace_id"],
@@ -3021,23 +3259,16 @@ class SQLiteStore:
         ]
         try:
             event_created_at = [
-                datetime.fromisoformat(
-                    cast(str, event["created_at"]).replace("Z", "+00:00")
-                )
+                datetime.fromisoformat(cast(str, event["created_at"]).replace("Z", "+00:00"))
                 for event in stored_events
             ]
         except (TypeError, ValueError):
-            raise ReplayIntegrityError(
-                "Canonical replay event timestamps are malformed"
-            ) from None
-        if (
-            actual_events != expected_events
-            or any(
-                created_at.tzinfo is None
-                or created_at.utcoffset() != timedelta(0)
-                or created_at != replay_updated_at
-                for created_at in event_created_at
-            )
+            raise ReplayIntegrityError("Canonical replay event timestamps are malformed") from None
+        if actual_events != expected_events or any(
+            created_at.tzinfo is None
+            or created_at.utcoffset() != timedelta(0)
+            or created_at != replay_updated_at
+            for created_at in event_created_at
         ):
             raise ReplayIntegrityError("Canonical replay event set is incomplete or changed")
 
@@ -3062,16 +3293,12 @@ class SQLiteStore:
                     else None
                 )
                 stored_receipt = (
-                    RecoveryReceipt.model_validate_json(
-                        cast(str, receipt_row["receipt_json"])
-                    )
+                    RecoveryReceipt.model_validate_json(cast(str, receipt_row["receipt_json"]))
                     if receipt_row is not None
                     else None
                 )
             except (TypeError, ValueError):
-                raise ReplayIntegrityError(
-                    "Canonical replay receipt is malformed"
-                ) from None
+                raise ReplayIntegrityError("Canonical replay receipt is malformed") from None
             if (
                 stored_receipt != receipt
                 or receipt_created_at is None
@@ -3079,9 +3306,7 @@ class SQLiteStore:
                 or receipt_created_at.utcoffset() != timedelta(0)
                 or receipt_created_at != replay_updated_at
             ):
-                raise ReplayIntegrityError(
-                    "Canonical replay receipt is incomplete or changed"
-                )
+                raise ReplayIntegrityError("Canonical replay receipt is incomplete or changed")
 
     def record_transition(
         self,
@@ -3141,22 +3366,41 @@ class SQLiteStore:
                 existing_scenario = ScenarioId(cast(str, existing["scenario_id"]))
                 is_quota_sdk_receipt = (
                     receipt.execution_mode is ExecutionMode.SDK_STUB
-                    and receipt.status == "completed"
                     and receipt.approval_count == 0
                     and receipt.boundary == QUOTA_SDK_STUB_BOUNDARY
+                    and receipt.status
+                    in {
+                        "completed",
+                        RecoveryStatus.OUTCOME_UNKNOWN.value,
+                    }
                 )
                 if (
                     receipt.execution_mode is ExecutionMode.SDK_STUB
-                    and receipt.status == "completed"
-                    and is_quota_sdk_receipt
-                    != (existing_scenario is ScenarioId.API_QUOTA)
+                    and receipt.status
+                    in {
+                        "completed",
+                        RecoveryStatus.OUTCOME_UNKNOWN.value,
+                    }
+                    and is_quota_sdk_receipt != (existing_scenario is ScenarioId.API_QUOTA)
                 ):
                     raise ReceiptTransitionError(
                         "Delegated quota receipt does not match the recovery scenario"
                     )
-                if is_quota_sdk_receipt and not receipt.has_canonical_quota_evidence:
+                if (
+                    is_quota_sdk_receipt
+                    and receipt.status == "completed"
+                    and not receipt.has_canonical_quota_evidence
+                ):
                     raise ReceiptTransitionError(
                         "Delegated quota receipt evidence does not match canonical facts"
+                    )
+                if (
+                    is_quota_sdk_receipt
+                    and receipt.status == RecoveryStatus.OUTCOME_UNKNOWN.value
+                    and not receipt.has_canonical_quota_unknown_evidence
+                ):
+                    raise ReceiptTransitionError(
+                        "Unknown quota receipt evidence does not match canonical facts"
                     )
             if pending_approval is not None:
                 if pending_approval.recovery_id != recovery_id:
@@ -3337,9 +3581,7 @@ class SQLiteStore:
         try:
             events = [self._event_from_row(event_row) for event_row in event_rows]
         except (TypeError, ValueError):
-            raise PublicEvidenceIntegrityError(
-                "Recovery event ledger is malformed"
-            ) from None
+            raise PublicEvidenceIntegrityError("Recovery event ledger is malformed") from None
         expected_created_payload: dict[str, JsonValue] = {
             "scenarioId": scenario_id.value,
             "executionMode": execution_mode.value,
@@ -3395,9 +3637,7 @@ class SQLiteStore:
                 cast(str, row["updated_at"]).replace("Z", "+00:00")
             )
         except (TypeError, ValueError):
-            raise PublicEvidenceIntegrityError(
-                "Recovery provenance is invalid"
-            ) from None
+            raise PublicEvidenceIntegrityError("Recovery provenance is invalid") from None
         if (
             recovery_created_at.tzinfo is None
             or recovery_created_at.utcoffset() != timedelta(0)
@@ -3405,9 +3645,7 @@ class SQLiteStore:
             or recovery_updated_at.utcoffset() != timedelta(0)
             or recovery_created_at > recovery_updated_at
         ):
-            raise PublicEvidenceIntegrityError(
-                "Recovery timestamps are invalid"
-            )
+            raise PublicEvidenceIntegrityError("Recovery timestamps are invalid")
         events = self._validated_public_event_ledger_in_connection(
             connection,
             recovery_id=recovery_id,
@@ -3420,9 +3658,7 @@ class SQLiteStore:
         if execution_mode is ExecutionMode.REPLAY_FIXTURE:
             scenario = replay_scenarios.get(scenario_id)
             if scenario is None:
-                raise PublicEvidenceIntegrityError(
-                    "Replay scenario definition is unavailable"
-                )
+                raise PublicEvidenceIntegrityError("Replay scenario definition is unavailable")
             try:
                 self._validate_canonical_replay(
                     connection,
@@ -3435,9 +3671,7 @@ class SQLiteStore:
                     ),
                 )
             except (ReplayIntegrityError, TypeError, ValueError):
-                raise PublicEvidenceIntegrityError(
-                    "Canonical replay evidence is invalid"
-                ) from None
+                raise PublicEvidenceIntegrityError("Canonical replay evidence is invalid") from None
 
         receipt_row = connection.execute(
             """
@@ -3451,9 +3685,45 @@ class SQLiteStore:
 
         if not recovery_status.terminal:
             if receipt_row is not None or terminal_events:
-                raise PublicEvidenceIntegrityError(
-                    "Nonterminal recovery has terminal evidence"
-                )
+                raise PublicEvidenceIntegrityError("Nonterminal recovery has terminal evidence")
+            if scenario_id is ScenarioId.API_QUOTA and execution_mode is ExecutionMode.SDK_STUB:
+                try:
+                    self._require_pristine_quota_recovery(
+                        connection,
+                        recovery_id=recovery_id,
+                        allowed_creation_statuses=frozenset({"started", "unknown"}),
+                        now=self._now(),
+                    )
+                    execution_rows = connection.execute(
+                        "SELECT * FROM executions WHERE recovery_id = ?",
+                        (recovery_id,),
+                    ).fetchall()
+                    if len(execution_rows) != 1:
+                        raise ExecutionConflictError(
+                            "Quota recovery has no exact durable execution"
+                        )
+                    execution = self._require_exact_quota_execution_row(
+                        execution_rows[0],
+                        recovery_id=recovery_id,
+                    )
+                    if execution.status not in {
+                        "pending",
+                        QUOTA_EXECUTION_RESULT_RECORDED,
+                        "completed",
+                    }:
+                        raise ExecutionConflictError(
+                            "Quota execution has no reconcilable durable state"
+                        )
+                    self._require_quota_execution_chronology(
+                        recovery=row,
+                        execution=execution_rows[0],
+                        terminal=False,
+                        now=self._now(),
+                    )
+                except ExecutionConflictError:
+                    raise PublicEvidenceIntegrityError(
+                        "SDK quota in-progress evidence is not canonical"
+                    ) from None
             return None
 
         if (
@@ -3467,18 +3737,14 @@ class SQLiteStore:
             )
 
         try:
-            receipt = RecoveryReceipt.model_validate_json(
-                cast(str, receipt_row["receipt_json"])
-            )
+            receipt = RecoveryReceipt.model_validate_json(cast(str, receipt_row["receipt_json"]))
             terminal_event = terminal_events[0]
             receipt_created_at = datetime.fromisoformat(
                 cast(str, receipt_row["created_at"]).replace("Z", "+00:00")
             )
             event_created_at = terminal_event.created_at
         except (TypeError, ValueError):
-            raise PublicEvidenceIntegrityError(
-                "Terminal recovery evidence is malformed"
-            ) from None
+            raise PublicEvidenceIntegrityError("Terminal recovery evidence is malformed") from None
 
         expected_receipt_status = (
             "simulated_completed"
@@ -3506,9 +3772,7 @@ class SQLiteStore:
             or recovery_updated_at != receipt_created_at
             or receipt_created_at != event_created_at
         ):
-            raise PublicEvidenceIntegrityError(
-                "Terminal recovery provenance does not match"
-            )
+            raise PublicEvidenceIntegrityError("Terminal recovery provenance does not match")
 
         event_data = terminal_event.data
         if (
@@ -3523,11 +3787,19 @@ class SQLiteStore:
             )
             or ("phase" in event_data and event_data["phase"] != "Verify & seal")
         ):
-            raise PublicEvidenceIntegrityError(
-                "Terminal event provenance does not match"
-            )
+            raise PublicEvidenceIntegrityError("Terminal event provenance does not match")
 
         if scenario_id is ScenarioId.API_QUOTA:
+            if execution_mode is ExecutionMode.SDK_STUB:
+                if not self._quota_public_terminal_bundle_matches(
+                    connection,
+                    row=row,
+                    receipt=receipt,
+                ):
+                    raise PublicEvidenceIntegrityError(
+                        "SDK quota terminal evidence is not canonical"
+                    )
+                return receipt
             if (
                 recovery_status is not RecoveryStatus.COMPLETED
                 or execution_mode is ExecutionMode.OPENAI_LIVE
@@ -3538,34 +3810,10 @@ class SQLiteStore:
                 raise PublicEvidenceIntegrityError(
                     "Quota terminal evidence does not match its scenario"
                 )
-            if execution_mode is ExecutionMode.SDK_STUB:
-                expected_quota_event: dict[str, JsonValue] = {
-                    "phase": "Verify & seal",
-                    "approvalCount": 0,
-                    "providerExecution": True,
-                    "executionVerified": True,
-                    "permissionRevoked": True,
-                    "restoredCeilingUnits": 1000,
-                    "summary": "Verified quota recovery evidence sealed.",
-                }
-                if (
-                    cast(str, row["current_step_summary"])
-                    != (
-                        "Execution verified, temporary permission revoked, "
-                        "and receipt sealed."
-                    )
-                    or not receipt.has_canonical_quota_evidence
-                    or terminal_event.data != expected_quota_event
-                ):
-                    raise PublicEvidenceIntegrityError(
-                        "SDK quota terminal evidence is not canonical"
-                    )
             return receipt
 
         if execution_mode is ExecutionMode.REPLAY_FIXTURE:
-            raise PublicEvidenceIntegrityError(
-                "Replay hotel recovery cannot be terminal"
-            )
+            raise PublicEvidenceIntegrityError("Replay hotel recovery cannot be terminal")
         allowed_hotel_event_types = {
             RecoveryStatus.COMPLETED: {"recovery.completed"},
             RecoveryStatus.CLOSED_WITHOUT_ACTION: {
@@ -3578,16 +3826,10 @@ class SQLiteStore:
                 "recovery.claim_expired",
             },
         }
-        if (
-            terminal_event.type not in allowed_hotel_event_types[recovery_status]
-            or (
-                recovery_status is RecoveryStatus.COMPLETED
-                and receipt.approval_count != 1
-            )
+        if terminal_event.type not in allowed_hotel_event_types[recovery_status] or (
+            recovery_status is RecoveryStatus.COMPLETED and receipt.approval_count != 1
         ):
-            raise PublicEvidenceIntegrityError(
-                "Hotel terminal evidence does not match its outcome"
-            )
+            raise PublicEvidenceIntegrityError("Hotel terminal evidence does not match its outcome")
 
         decision_row = connection.execute(
             "SELECT * FROM approval_decisions WHERE recovery_id = ?",
@@ -3619,30 +3861,22 @@ class SQLiteStore:
                     is not None
                 )
             else:
-                valid_decision_evidence = (
-                    self._completed_decision_has_terminal_evidence(
-                        connection,
-                        recovery_id=recovery_id,
-                        decision_row=decision_row,
-                        claim=claim,
-                    )
+                valid_decision_evidence = self._completed_decision_has_terminal_evidence(
+                    connection,
+                    recovery_id=recovery_id,
+                    decision_row=decision_row,
+                    claim=claim,
                 )
             if not valid_decision_evidence:
-                raise PublicEvidenceIntegrityError(
-                    "Terminal decision evidence does not match"
-                )
+                raise PublicEvidenceIntegrityError("Terminal decision evidence does not match")
             return receipt
 
         if terminal_event.type == "recovery.expired":
             if not self._recovery_has_expiration_evidence(connection, recovery_id):
-                raise PublicEvidenceIntegrityError(
-                    "Expiration evidence does not match"
-                )
+                raise PublicEvidenceIntegrityError("Expiration evidence does not match")
             return receipt
 
-        raise PublicEvidenceIntegrityError(
-            "Terminal recovery has no authoritative evidence source"
-        )
+        raise PublicEvidenceIntegrityError("Terminal recovery has no authoritative evidence source")
 
     def _expire_targeted_approval_in_transaction(
         self,
@@ -3712,9 +3946,7 @@ class SQLiteStore:
                 and cast(str, row["scenario_id"]) == ScenarioId.HOTEL.value
             )
             pending_view = (
-                self._public_pending_view(connection, recovery_id)
-                if is_pending_hotel
-                else None
+                self._public_pending_view(connection, recovery_id) if is_pending_hotel else None
             )
             claimed_view = (
                 self._public_claimed_decision_view(connection, recovery_id)
@@ -3836,9 +4068,7 @@ class SQLiteStore:
                 and cast(str, row["scenario_id"]) == ScenarioId.HOTEL.value
             )
             pending_view = (
-                self._public_pending_view(connection, recovery_id)
-                if is_pending_hotel
-                else None
+                self._public_pending_view(connection, recovery_id) if is_pending_hotel else None
             )
             claimed_view = (
                 self._public_claimed_decision_view(connection, recovery_id)
@@ -3915,10 +4145,7 @@ class SQLiteStore:
                 "Immediate pre-execution remedy digest matched the approved digest.",
                 "Demo provider dispatch returned confirmed.",
                 "Provider result stored under one idempotency key.",
-                (
-                    "Temporary provider-dispatch permission revoked after the "
-                    "approved execution."
-                ),
+                ("Temporary provider-dispatch permission revoked after the approved execution."),
             ],
             approvedRemedyDigest=execution.remedy_digest,
         )
@@ -4171,9 +4398,7 @@ class SQLiteStore:
                 recovery_id,
                 claim.request,
             )
-            claimed_at = datetime.fromisoformat(
-                cast(str, decision_row["claimed_at"])
-            )
+            claimed_at = datetime.fromisoformat(cast(str, decision_row["claimed_at"]))
             execution_rows = connection.execute(
                 "SELECT * FROM executions WHERE recovery_id = ?",
                 (recovery_id,),
@@ -4206,8 +4431,7 @@ class SQLiteStore:
         ):
             return None
         active_crash_state = (
-            cast(str, recovery["status"])
-            == RecoveryStatus.PENDING_APPROVAL.value
+            cast(str, recovery["status"]) == RecoveryStatus.PENDING_APPROVAL.value
             and pending.status == "approved"
             and remedy_status is not None
             and cast(str, remedy_status["status"]) == "pending"
@@ -4274,25 +4498,13 @@ class SQLiteStore:
                 """,
                 (recovery_id, pending.remedy_id),
             ).fetchone()
-            if (
-                receipt_row is None
-                or len(terminal_rows) != 1
-                or remedy_row is None
-            ):
+            if receipt_row is None or len(terminal_rows) != 1 or remedy_row is None:
                 return False
-            receipt = RecoveryReceipt.model_validate_json(
-                cast(str, receipt_row["receipt_json"])
-            )
+            receipt = RecoveryReceipt.model_validate_json(cast(str, receipt_row["receipt_json"]))
             terminal_data = json.loads(cast(str, terminal_rows[0]["data_json"]))
-            receipt_created_at = datetime.fromisoformat(
-                cast(str, receipt_row["created_at"])
-            )
-            event_created_at = datetime.fromisoformat(
-                cast(str, terminal_rows[0]["created_at"])
-            )
-            recovery_updated_at = datetime.fromisoformat(
-                cast(str, recovery["updated_at"])
-            )
+            receipt_created_at = datetime.fromisoformat(cast(str, receipt_row["created_at"]))
+            event_created_at = datetime.fromisoformat(cast(str, terminal_rows[0]["created_at"]))
+            recovery_updated_at = datetime.fromisoformat(cast(str, recovery["updated_at"]))
             provenance = self._provenance_from_row(recovery)
             if not self._claim_has_exact_completed_execution(
                 execution_rows,
@@ -4385,38 +4597,21 @@ class SQLiteStore:
                 "SELECT * FROM executions WHERE recovery_id = ?",
                 (recovery_id,),
             ).fetchall()
-            if (
-                receipt_row is None
-                or len(terminal_rows) != 1
-                or remedy_row is None
-            ):
+            if receipt_row is None or len(terminal_rows) != 1 or remedy_row is None:
                 return False
-            receipt = RecoveryReceipt.model_validate_json(
-                cast(str, receipt_row["receipt_json"])
-            )
+            receipt = RecoveryReceipt.model_validate_json(cast(str, receipt_row["receipt_json"]))
             terminal_data = json.loads(cast(str, terminal_rows[0]["data_json"]))
-            claimed_at = datetime.fromisoformat(
-                cast(str, decision_row["claimed_at"])
-            )
-            completed_at = datetime.fromisoformat(
-                cast(str, decision_row["completed_at"])
-            )
-            receipt_created_at = datetime.fromisoformat(
-                cast(str, receipt_row["created_at"])
-            )
-            event_created_at = datetime.fromisoformat(
-                cast(str, terminal_rows[0]["created_at"])
-            )
-            recovery_updated_at = datetime.fromisoformat(
-                cast(str, recovery["updated_at"])
-            )
+            claimed_at = datetime.fromisoformat(cast(str, decision_row["claimed_at"]))
+            completed_at = datetime.fromisoformat(cast(str, decision_row["completed_at"]))
+            receipt_created_at = datetime.fromisoformat(cast(str, receipt_row["created_at"]))
+            event_created_at = datetime.fromisoformat(cast(str, terminal_rows[0]["created_at"]))
+            recovery_updated_at = datetime.fromisoformat(cast(str, recovery["updated_at"]))
         except (ApprovalDecisionError, TypeError, ValueError):
             return False
         response = claim.response
         if (
             response.recovery_id != recovery_id
-            or response.client_decision_id
-            != claim.request.client_decision_id
+            or response.client_decision_id != claim.request.client_decision_id
             or response.action is not claim.request.action
             or receipt.recovery_id != recovery_id
             or receipt.execution_mode is not provenance.execution_mode
@@ -4430,14 +4625,11 @@ class SQLiteStore:
             or receipt.status != response.status
             or cast(str, recovery["status"]) != response.status
             or cast(int, recovery["current_step"]) != 5
-            or cast(str, terminal_rows[0]["type"])
-            != f"recovery.{response.status}"
+            or cast(str, terminal_rows[0]["type"]) != f"recovery.{response.status}"
             or not isinstance(terminal_data, dict)
             or terminal_data.get("recoveryId") != recovery_id
-            or terminal_data.get("executionMode")
-            != provenance.execution_mode.value
-            or terminal_data.get("providerExecution")
-            is not receipt.provider_execution
+            or terminal_data.get("executionMode") != provenance.execution_mode.value
+            or terminal_data.get("providerExecution") is not receipt.provider_execution
             or terminal_data.get("phase") != "Verify & seal"
             or claimed_at.tzinfo is None
             or claimed_at.utcoffset() != timedelta(0)
@@ -4484,8 +4676,7 @@ class SQLiteStore:
             return (
                 response.status == "completed"
                 and response.execution_started is True
-                and response.approved_remedy_digest
-                == claim.request.remedy_digest
+                and response.approved_remedy_digest == claim.request.remedy_digest
                 and pending.status == "completed"
                 and cast(str, remedy_row["status"]) == "approved"
                 and receipt == expected_receipt
@@ -4536,8 +4727,7 @@ class SQLiteStore:
             and response.approved_remedy_digest is None
             and response.execution_started is (False if closed else None)
             and pending.status == ("rejected" if closed else "outcome_unknown")
-            and cast(str, remedy_row["status"])
-            == ("declined" if closed else "outcome_unknown")
+            and cast(str, remedy_row["status"]) == ("declined" if closed else "outcome_unknown")
             and (not execution_rows if closed else True)
             and receipt.approval_count == 0
             and receipt.approved_remedy_digest is None
@@ -4557,8 +4747,7 @@ class SQLiteStore:
                     "cancellation was not claimed."
                 )
             )
-            and tuple(receipt.verification_results)
-            == expected_verification_results
+            and tuple(receipt.verification_results) == expected_verification_results
             and terminal_data == expected_terminal_data
             and cast(str, recovery["current_step_summary"]) == expected_summary
         )
@@ -4582,11 +4771,9 @@ class SQLiteStore:
             or claim.response.action is not DecisionAction.APPROVE
             or claim.response.status != "completed"
             or claim.response.execution_started is not True
-            or claim.response.client_decision_id
-            != claim.request.client_decision_id
+            or claim.response.client_decision_id != claim.request.client_decision_id
             or claim.response.recovery_id != recovery_id
-            or claim.response.approved_remedy_digest
-            != claim.request.remedy_digest
+            or claim.response.approved_remedy_digest != claim.request.remedy_digest
         ):
             return False
         row = connection.execute(
@@ -4614,8 +4801,7 @@ class SQLiteStore:
             and cast(str, row["execution_mode"]) == ExecutionMode.SDK_STUB.value
             and cast(str, row["status"]) == RecoveryStatus.COMPLETED.value
             and cast(int, row["current_step"]) == 5
-            and cast(str, row["current_step_summary"])
-            == "Legacy approval completed."
+            and cast(str, row["current_step_summary"]) == "Legacy approval completed."
             and cast(int, row["pending_count"]) == 0
             and cast(int, row["remedy_count"]) == 0
             and cast(int, row["execution_count"]) == 0
@@ -4711,9 +4897,7 @@ class SQLiteStore:
             (claim.recovery_id,),
         ).fetchone()
         if row is None:
-            raise ApprovalDecisionError(
-                "decision_unavailable", claim.recovery_id, status_code=409
-            )
+            raise ApprovalDecisionError("decision_unavailable", claim.recovery_id, status_code=409)
         durable_claim = self._verified_decision_claim_from_row(
             row,
             recovery_id=claim.recovery_id,
@@ -4722,9 +4906,7 @@ class SQLiteStore:
             durable_claim.request != claim.request
             or durable_claim.request_fingerprint != claim.request_fingerprint
         ):
-            raise ApprovalDecisionError(
-                "decision_id_conflict", claim.recovery_id, status_code=409
-            )
+            raise ApprovalDecisionError("decision_id_conflict", claim.recovery_id, status_code=409)
         if durable_claim.response is not None:
             if not self._completed_decision_has_terminal_evidence(
                 connection,
@@ -4751,9 +4933,7 @@ class SQLiteStore:
             (serialized, now.isoformat(), claim.recovery_id),
         )
         if updated.rowcount != 1:
-            raise ApprovalDecisionError(
-                "decision_unavailable", claim.recovery_id, status_code=409
-            )
+            raise ApprovalDecisionError("decision_unavailable", claim.recovery_id, status_code=409)
         return response
 
     def complete_decline_decision(
@@ -5098,11 +5278,7 @@ class SQLiteStore:
             "approvalDecisionCount": 1,
             "decisionAction": action.value,
             "phase": "Verify & seal",
-            "summary": (
-                CLAIM_EXPIRY_CLOSED_SUMMARY
-                if closed
-                else CLAIM_EXPIRY_UNKNOWN_SUMMARY
-            ),
+            "summary": (CLAIM_EXPIRY_CLOSED_SUMMARY if closed else CLAIM_EXPIRY_UNKNOWN_SUMMARY),
         }
         if closed:
             event_data["executionCount"] = 0
@@ -5165,16 +5341,12 @@ class SQLiteStore:
             not in {ExecutionMode.SDK_STUB.value, ExecutionMode.OPENAI_LIVE.value}
             or cast(int, row["terminal_count"]) != 1
             or cast(int, row["active_live_admission_count"]) != 0
-            or cast(str, row["updated_at"])
-            != cast(str, row["receipt_created_at"])
-            or cast(str, row["receipt_created_at"])
-            != cast(str, row["event_created_at"])
+            or cast(str, row["updated_at"]) != cast(str, row["receipt_created_at"])
+            or cast(str, row["receipt_created_at"]) != cast(str, row["event_created_at"])
         ):
             return False
         try:
-            receipt = RecoveryReceipt.model_validate_json(
-                cast(str, row["receipt_json"])
-            )
+            receipt = RecoveryReceipt.model_validate_json(cast(str, row["receipt_json"]))
             event_data = json.loads(cast(str, row["event_data_json"]))
         except (TypeError, ValueError):
             return False
@@ -5190,8 +5362,7 @@ class SQLiteStore:
                 "summary": EXPIRATION_SUMMARY,
             }
             return (
-                cast(str, row["status"])
-                == RecoveryStatus.CLOSED_WITHOUT_ACTION.value
+                cast(str, row["status"]) == RecoveryStatus.CLOSED_WITHOUT_ACTION.value
                 and cast(int, row["current_step"]) == 5
                 and cast(str, row["current_step_summary"]) == EXPIRATION_SUMMARY
                 and cast(str, row["pending_status"]) == "expired"
@@ -5199,8 +5370,7 @@ class SQLiteStore:
                 and cast(int, row["decision_count"]) == 0
                 and cast(int, row["execution_count"]) == 0
                 and receipt.recovery_id == recovery_id
-                and receipt.execution_mode.value
-                == cast(str, row["execution_mode"])
+                and receipt.execution_mode.value == cast(str, row["execution_mode"])
                 and receipt.status == "closed_without_action"
                 and receipt.simulated is True
                 and receipt.provider_execution is False
@@ -5209,8 +5379,7 @@ class SQLiteStore:
                 and receipt.provider_result == "Provider dispatch did not begin."
                 and receipt.authorization_source
                 == "Consent window expired before an approval decision."
-                and tuple(receipt.verification_results)
-                == EXPIRATION_VERIFICATION_RESULTS
+                and tuple(receipt.verification_results) == EXPIRATION_VERIFICATION_RESULTS
                 and event_data == expected_event_data
             )
 
@@ -5240,15 +5409,9 @@ class SQLiteStore:
                 recovery_id,
                 claim.request,
             )
-            receipt_created_at = datetime.fromisoformat(
-                cast(str, row["receipt_created_at"])
-            )
-            event_created_at = datetime.fromisoformat(
-                cast(str, row["event_created_at"])
-            )
-            claimed_at = datetime.fromisoformat(
-                cast(str, decision_row["claimed_at"])
-            )
+            receipt_created_at = datetime.fromisoformat(cast(str, row["receipt_created_at"]))
+            event_created_at = datetime.fromisoformat(cast(str, row["event_created_at"]))
+            claimed_at = datetime.fromisoformat(cast(str, decision_row["claimed_at"]))
             provenance = self._provenance_from_row(recovery)
         except (ApprovalDecisionError, TypeError, ValueError):
             return False
@@ -5270,8 +5433,7 @@ class SQLiteStore:
             exact_terminal_state = (
                 unknown
                 and cast(int, row["current_step"]) == 5
-                and cast(str, row["current_step_summary"])
-                == CLAIM_EXPIRY_UNKNOWN_SUMMARY
+                and cast(str, row["current_step_summary"]) == CLAIM_EXPIRY_UNKNOWN_SUMMARY
                 and cast(str, row["pending_status"]) == "outcome_unknown"
                 and cast(str, row["remedy_status"]) == "outcome_unknown"
             )
@@ -5279,16 +5441,14 @@ class SQLiteStore:
             exact_terminal_state = (
                 closed
                 and cast(int, row["current_step"]) == 5
-                and cast(str, row["current_step_summary"])
-                == CLAIM_EXPIRY_CLOSED_SUMMARY
+                and cast(str, row["current_step_summary"]) == CLAIM_EXPIRY_CLOSED_SUMMARY
                 and cast(str, row["pending_status"]) == "rejected"
                 and cast(str, row["remedy_status"]) == "declined"
                 and cast(int, row["execution_count"]) == 0
             ) or (
                 unknown
                 and cast(int, row["current_step"]) == 5
-                and cast(str, row["current_step_summary"])
-                == CLAIM_EXPIRY_UNKNOWN_SUMMARY
+                and cast(str, row["current_step_summary"]) == CLAIM_EXPIRY_UNKNOWN_SUMMARY
                 and cast(str, row["pending_status"]) == "outcome_unknown"
                 and cast(str, row["remedy_status"]) == "outcome_unknown"
             )
@@ -5303,14 +5463,10 @@ class SQLiteStore:
             action=claim.request.action,
             status=expected_status,
         )
-        return (
-            receipt == expected_receipt
-            and event_data
-            == self._claim_expiry_event_data(
-                recovery_id=recovery_id,
-                receipt=expected_receipt,
-                action=claim.request.action,
-            )
+        return receipt == expected_receipt and event_data == self._claim_expiry_event_data(
+            recovery_id=recovery_id,
+            receipt=expected_receipt,
+            action=claim.request.action,
         )
 
     def recovery_has_expiration_evidence(self, recovery_id: str) -> bool:
@@ -5681,16 +5837,12 @@ class SQLiteStore:
         return (
             execution.recovery_id == claim.recovery_id
             and execution.idempotency_key
-            == (
-                f"{claim.recovery_id}:{claim.request.tool_call_id}:"
-                f"{claim.request.remedy_digest}"
-            )
+            == (f"{claim.recovery_id}:{claim.request.tool_call_id}:{claim.request.remedy_digest}")
             and execution.request_digest == expected_request_digest
             and execution.tool_call_id == claim.request.tool_call_id
             and execution.remedy_digest == claim.request.remedy_digest
             and result is not None
-            and set(result)
-            == {"dispatch_id", "status", "simulated", "provider_result"}
+            and set(result) == {"dispatch_id", "status", "simulated", "provider_result"}
             and isinstance(result["dispatch_id"], str)
             and bool(result["dispatch_id"])
             and result["status"] == "confirmed"
@@ -5790,11 +5942,7 @@ class SQLiteStore:
                 )
             except (TypeError, ValueError):
                 continue
-            if (
-                expiry.tzinfo is None
-                or expiry.utcoffset() != timedelta(0)
-                or expiry > now
-            ):
+            if expiry.tzinfo is None or expiry.utcoffset() != timedelta(0) or expiry > now:
                 continue
             candidate_kind = cast(str, row["candidate_kind"])
             if candidate_kind in {"claimed", "untouched"}:
@@ -5833,17 +5981,12 @@ class SQLiteStore:
         if now.tzinfo is None or now.utcoffset() != timedelta(0):
             raise ValueError("now must be timezone-aware UTC")
         if not 1 <= batch_size <= MAX_STORE_EXPIRY_BATCH_SIZE:
-            raise ValueError(
-                "batch_size must be between 1 and "
-                f"{MAX_STORE_EXPIRY_BATCH_SIZE}"
-            )
+            raise ValueError(f"batch_size must be between 1 and {MAX_STORE_EXPIRY_BATCH_SIZE}")
         target_clause = "AND recoveries.id = ?" if recovery_id is not None else ""
         parameters: list[str | int] = []
         if recovery_id is not None:
             parameters.append(recovery_id)
-        parameters.append(
-            1 if recovery_id is not None else MAX_STORE_EXPIRY_BATCH_SIZE
-        )
+        parameters.append(1 if recovery_id is not None else MAX_STORE_EXPIRY_BATCH_SIZE)
         now_text = now.isoformat()
         expired_count = 0
 
@@ -5894,11 +6037,7 @@ class SQLiteStore:
                     expiry = datetime.fromisoformat(
                         cast(str, row["remedy_expiry"]).replace("Z", "+00:00")
                     )
-                    if (
-                        expiry.tzinfo is None
-                        or expiry.utcoffset() != timedelta(0)
-                        or expiry > now
-                    ):
+                    if expiry.tzinfo is None or expiry.utcoffset() != timedelta(0) or expiry > now:
                         continue
                     decision_rows = active_connection.execute(
                         "SELECT * FROM approval_decisions WHERE recovery_id = ?",
@@ -5916,9 +6055,7 @@ class SQLiteStore:
                         target_id,
                         claim.request,
                     )
-                    claimed_at = datetime.fromisoformat(
-                        cast(str, decision_row["claimed_at"])
-                    )
+                    claimed_at = datetime.fromisoformat(cast(str, decision_row["claimed_at"]))
                     if (
                         claim.response is not None
                         or consent.expiry != expiry
@@ -5946,13 +6083,11 @@ class SQLiteStore:
                         and pending.status == "pending"
                         and not execution_rows
                     )
-                    terminal_status: Literal[
-                        "closed_without_action", "outcome_unknown"
-                    ] = ("closed_without_action" if closed else "outcome_unknown")
+                    terminal_status: Literal["closed_without_action", "outcome_unknown"] = (
+                        "closed_without_action" if closed else "outcome_unknown"
+                    )
                     summary = (
-                        CLAIM_EXPIRY_CLOSED_SUMMARY
-                        if closed
-                        else CLAIM_EXPIRY_UNKNOWN_SUMMARY
+                        CLAIM_EXPIRY_CLOSED_SUMMARY if closed else CLAIM_EXPIRY_UNKNOWN_SUMMARY
                     )
                     receipt = self._claim_expiry_receipt(
                         recovery_id=target_id,
@@ -6089,10 +6224,7 @@ class SQLiteStore:
         if now.tzinfo is None or now.utcoffset() != timedelta(0):
             raise ValueError("now must be timezone-aware UTC")
         if not 1 <= batch_size <= MAX_STORE_EXPIRY_BATCH_SIZE:
-            raise ValueError(
-                "batch_size must be between 1 and "
-                f"{MAX_STORE_EXPIRY_BATCH_SIZE}"
-            )
+            raise ValueError(f"batch_size must be between 1 and {MAX_STORE_EXPIRY_BATCH_SIZE}")
         target_clause = "AND recoveries.id = ?" if recovery_id is not None else ""
         parameters: list[str | int] = []
         if recovery_id is not None:
@@ -6147,11 +6279,7 @@ class SQLiteStore:
                     expiry = datetime.fromisoformat(raw_expiry.replace("Z", "+00:00"))
                 except ValueError:
                     continue
-                if (
-                    expiry.tzinfo is None
-                    or expiry.utcoffset() != timedelta(0)
-                    or expiry > now
-                ):
+                if expiry.tzinfo is None or expiry.utcoffset() != timedelta(0) or expiry > now:
                     continue
 
                 target_id = cast(str, row["id"])
@@ -6175,9 +6303,7 @@ class SQLiteStore:
                         else SDK_STUB_BOUNDARY
                     ),
                     providerResult="Provider dispatch did not begin.",
-                    authorizationSource=(
-                        "Consent window expired before an approval decision."
-                    ),
+                    authorizationSource=("Consent window expired before an approval decision."),
                     verificationResults=list(EXPIRATION_VERIFICATION_RESULTS),
                     approvalCount=0,
                     approvedRemedyDigest=None,
@@ -6306,9 +6432,7 @@ class SQLiteStore:
 
         self._require_creation_time(expired_at, name="expired_at")
         if not 1 <= batch_size <= MAX_STORE_EXPIRY_BATCH_SIZE:
-            raise ValueError(
-                f"batch_size must be between 1 and {MAX_STORE_EXPIRY_BATCH_SIZE}"
-            )
+            raise ValueError(f"batch_size must be between 1 and {MAX_STORE_EXPIRY_BATCH_SIZE}")
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
@@ -6325,8 +6449,7 @@ class SQLiteStore:
             if request_keys:
                 placeholders = ",".join("?" for _ in request_keys)
                 connection.execute(
-                    f"DELETE FROM recovery_creations "
-                    f"WHERE request_key IN ({placeholders})",
+                    f"DELETE FROM recovery_creations WHERE request_key IN ({placeholders})",
                     request_keys,
                 )
         return len(request_keys)
@@ -6394,10 +6517,7 @@ class SQLiteStore:
                 or decision_row["result_json"] is not None
                 or decision_row["completed_at"] is not None
                 or claim.response is not None
-                or (
-                    status == "approved"
-                    and claim.request.action is not DecisionAction.APPROVE
-                )
+                or (status == "approved" and claim.request.action is not DecisionAction.APPROVE)
                 or (
                     status == "outcome_unknown"
                     and claim.request.action is not DecisionAction.DECLINE
@@ -6414,9 +6534,7 @@ class SQLiteStore:
                 claim.request,
             )
             try:
-                claimed_at = datetime.fromisoformat(
-                    cast(str, decision_row["claimed_at"])
-                )
+                claimed_at = datetime.fromisoformat(cast(str, decision_row["claimed_at"]))
             except (TypeError, ValueError):
                 raise ApprovalDecisionError(
                     "resume_incompatible",
@@ -6602,6 +6720,1478 @@ class SQLiteStore:
             return "pending"
         return "invalid"
 
+    @staticmethod
+    def _quota_execution_id(recovery_id: str) -> str:
+        return f"{recovery_id}:quota-execution"
+
+    @staticmethod
+    def _quota_idempotency_key(recovery_id: str) -> str:
+        return f"{recovery_id}:quota-burst"
+
+    @staticmethod
+    def _canonical_quota_result_payload(
+        result: QuotaRecoveryResult | dict[str, Any],
+    ) -> dict[str, Any]:
+        try:
+            validated = QuotaRecoveryResult.model_validate(result)
+        except (TypeError, ValueError):
+            raise ExecutionConflictError("Durable quota result is invalid") from None
+        if validated != DETERMINISTIC_QUOTA_RESULT:
+            raise ExecutionConflictError(
+                "Durable quota result does not match the exact demo contract"
+            )
+        return validated.model_dump(mode="json")
+
+    @classmethod
+    def _require_exact_quota_execution_row(
+        cls,
+        row: sqlite3.Row,
+        *,
+        recovery_id: str,
+    ) -> DurableExecution:
+        expected_request_digest = quota_request_digest(DETERMINISTIC_QUOTA_REQUEST)
+        if (
+            cast(str, row["id"]) != cls._quota_execution_id(recovery_id)
+            or cast(str, row["recovery_id"]) != recovery_id
+            or cast(str, row["idempotency_key"]) != cls._quota_idempotency_key(recovery_id)
+            or cast(str | None, row["request_digest"]) != expected_request_digest
+            or cast(str | None, row["tool_call_id"]) != QUOTA_TOOL_CALL_ID
+            or row["remedy_digest"] is not None
+        ):
+            raise ExecutionConflictError("Durable quota execution identity is invalid")
+        try:
+            created_at = datetime.fromisoformat(cast(str, row["created_at"]))
+            updated_at = datetime.fromisoformat(cast(str, row["updated_at"]))
+        except (TypeError, ValueError):
+            raise ExecutionConflictError("Durable quota execution timestamps are invalid") from None
+        if (
+            created_at.tzinfo is None
+            or created_at.utcoffset() != timedelta(0)
+            or updated_at.tzinfo is None
+            or updated_at.utcoffset() != timedelta(0)
+            or created_at > updated_at
+        ):
+            raise ExecutionConflictError("Durable quota execution timestamps are invalid")
+        status = row["status"]
+        provider_execution = row["provider_execution"]
+        raw_result = row["result_json"]
+        if (
+            type(status) is not str
+            or type(provider_execution) is not int
+            or provider_execution not in {0, 1}
+        ):
+            raise ExecutionConflictError("Durable quota execution state is invalid")
+        if status == "pending":
+            valid_shape = provider_execution == 0 and raw_result is None
+        elif status in {QUOTA_EXECUTION_RESULT_RECORDED, "completed"}:
+            valid_shape = provider_execution == 1 and raw_result is not None
+        elif status == RecoveryStatus.OUTCOME_UNKNOWN.value:
+            valid_shape = provider_execution == 0 and raw_result is None
+        else:
+            valid_shape = False
+        if not valid_shape:
+            raise ExecutionConflictError("Durable quota execution state is invalid")
+        execution = cls._execution_from_row(row)
+        if execution.result_json is not None:
+            cls._canonical_quota_result_payload(execution.result_json)
+        return execution
+
+    @staticmethod
+    def _require_quota_execution_chronology(
+        *,
+        recovery: sqlite3.Row,
+        execution: sqlite3.Row,
+        terminal: bool,
+        now: datetime | None = None,
+    ) -> None:
+        try:
+            recovery_created_at = datetime.fromisoformat(cast(str, recovery["created_at"]))
+            recovery_updated_at = datetime.fromisoformat(cast(str, recovery["updated_at"]))
+            execution_created_at = datetime.fromisoformat(cast(str, execution["created_at"]))
+            execution_updated_at = datetime.fromisoformat(cast(str, execution["updated_at"]))
+            execution_status = cast(str, execution["status"])
+        except (TypeError, ValueError):
+            raise ExecutionConflictError("Quota execution chronology is invalid") from None
+        timestamps = (
+            recovery_created_at,
+            recovery_updated_at,
+            execution_created_at,
+            execution_updated_at,
+        )
+        if (
+            any(
+                timestamp.tzinfo is None or timestamp.utcoffset() != timedelta(0)
+                for timestamp in timestamps
+            )
+            or execution_created_at != recovery_created_at
+            or execution_updated_at < execution_created_at
+            or (execution_status == "pending" and execution_updated_at != execution_created_at)
+            or (now is not None and execution_updated_at > now)
+            or (terminal and execution_updated_at > recovery_updated_at)
+            or (
+                terminal
+                and execution_status == RecoveryStatus.OUTCOME_UNKNOWN.value
+                and execution_updated_at != recovery_updated_at
+            )
+        ):
+            raise ExecutionConflictError("Quota execution chronology is invalid")
+
+    @staticmethod
+    def _require_quota_recovery_provenance(row: sqlite3.Row) -> None:
+        try:
+            model_ids = json.loads(cast(str, row["model_ids_json"]))
+            root_trace_id = cast(str | None, row["root_trace_id"])
+            definition_digest = cast(str | None, row["definition_digest"])
+            sdk_version = row["sdk_version"]
+            protocol_version = row["protocol_version"]
+            agent_graph_version = row["agent_graph_version"]
+            quota_execution_contract = row["quota_execution_contract"]
+        except (TypeError, ValueError):
+            raise ExecutionConflictError("Quota recovery provenance is invalid") from None
+        if (
+            cast(str, row["scenario_id"]) != ScenarioId.API_QUOTA.value
+            or cast(str, row["execution_mode"]) != ExecutionMode.SDK_STUB.value
+            or model_ids != []
+            or cast(int, row["model_call"]) != 0
+            or not isinstance(root_trace_id, str)
+            or not is_valid_qa_trace_id(root_trace_id)
+            or not isinstance(sdk_version, str)
+            or not sdk_version
+            or not isinstance(protocol_version, str)
+            or not protocol_version
+            or not isinstance(agent_graph_version, str)
+            or not agent_graph_version
+            or not isinstance(definition_digest, str)
+            or len(definition_digest) != 64
+            or type(quota_execution_contract) is not int
+            or quota_execution_contract not in {0, 1}
+            or any(character not in "0123456789abcdef" for character in definition_digest)
+        ):
+            raise ExecutionConflictError("Quota recovery provenance is invalid")
+
+    @classmethod
+    def _require_quota_creation_binding(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        recovery_id: str,
+        allowed_statuses: frozenset[str],
+        now: datetime | None = None,
+    ) -> sqlite3.Row | None:
+        creation_rows = connection.execute(
+            """
+            SELECT * FROM recovery_creations
+            WHERE recovery_id = ?
+            ORDER BY created_at ASC
+            """,
+            (recovery_id,),
+        ).fetchall()
+        access_rows = connection.execute(
+            """
+            SELECT session_key FROM recovery_access
+            WHERE recovery_id = ?
+            ORDER BY session_key ASC
+            """,
+            (recovery_id,),
+        ).fetchall()
+        if not creation_rows:
+            if access_rows:
+                raise ExecutionConflictError("Quota recovery access has no creation owner")
+            return None
+        if len(creation_rows) != 1 or len(access_rows) != 1:
+            raise ExecutionConflictError("Quota recovery creation ownership is ambiguous")
+        creation = creation_rows[0]
+        expected_fingerprint = hashlib.sha256(
+            json.dumps(
+                {
+                    "executionMode": ExecutionMode.SDK_STUB.value,
+                    "scenarioId": ScenarioId.API_QUOTA.value,
+                },
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("ascii")
+        ).hexdigest()
+        try:
+            created_at = datetime.fromisoformat(cast(str, creation["created_at"]))
+            updated_at = datetime.fromisoformat(cast(str, creation["updated_at"]))
+            expires_at = datetime.fromisoformat(cast(str, creation["expires_at"]))
+            recovery = connection.execute(
+                """
+                SELECT created_at, updated_at, quota_execution_contract
+                FROM recoveries
+                WHERE id = ?
+                """,
+                (recovery_id,),
+            ).fetchone()
+            if recovery is None:
+                raise ValueError
+            recovery_created_at = datetime.fromisoformat(cast(str, recovery["created_at"]))
+            recovery_updated_at = datetime.fromisoformat(cast(str, recovery["updated_at"]))
+            quota_execution_contract = recovery["quota_execution_contract"]
+        except (TypeError, ValueError):
+            raise ExecutionConflictError("Quota recovery creation timestamps are invalid") from None
+        creation_status = cast(str, creation["status"])
+        digest_fields = (
+            creation["request_key"],
+            creation["session_key"],
+            creation["ip_key"],
+        )
+        if (
+            cast(str, creation["scenario_id"]) != ScenarioId.API_QUOTA.value
+            or cast(str, creation["execution_mode"]) != ExecutionMode.SDK_STUB.value
+            or cast(str, creation["recovery_id"]) != recovery_id
+            or creation_status not in allowed_statuses
+            or cast(str, creation["request_fingerprint"]) != expected_fingerprint
+            or cast(str, creation["session_key"]) != cast(str, access_rows[0]["session_key"])
+            or any(
+                type(value) is not str
+                or len(value) != 64
+                or any(character not in "0123456789abcdef" for character in value)
+                for value in digest_fields
+            )
+            or created_at.tzinfo is None
+            or created_at.utcoffset() != timedelta(0)
+            or updated_at.tzinfo is None
+            or updated_at.utcoffset() != timedelta(0)
+            or expires_at.tzinfo is None
+            or expires_at.utcoffset() != timedelta(0)
+            or recovery_created_at.tzinfo is None
+            or recovery_created_at.utcoffset() != timedelta(0)
+            or recovery_updated_at.tzinfo is None
+            or recovery_updated_at.utcoffset() != timedelta(0)
+            or type(quota_execution_contract) is not int
+            or quota_execution_contract not in {0, 1}
+            or created_at > updated_at
+            or created_at >= expires_at
+            or created_at > recovery_created_at
+            or (
+                creation_status == "ready"
+                and quota_execution_contract == 1
+                and updated_at != recovery_updated_at
+            )
+            or (
+                creation_status == "ready"
+                and quota_execution_contract == 0
+                and not (recovery_updated_at <= updated_at <= expires_at)
+            )
+            or (creation_status != "ready" and now is not None and updated_at > now)
+        ):
+            raise ExecutionConflictError("Quota recovery creation ownership is invalid")
+        return cast(sqlite3.Row, creation)
+
+    @classmethod
+    def _require_pristine_quota_recovery(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        recovery_id: str,
+        allowed_creation_statuses: frozenset[str] = frozenset({"started"}),
+        now: datetime | None = None,
+    ) -> sqlite3.Row:
+        recovery = connection.execute(
+            "SELECT * FROM recoveries WHERE id = ?",
+            (recovery_id,),
+        ).fetchone()
+        if recovery is None:
+            raise RecoveryNotFoundError("Recovery not found")
+        cls._require_quota_recovery_provenance(recovery)
+        try:
+            recovery_created_at = datetime.fromisoformat(cast(str, recovery["created_at"]))
+            recovery_updated_at = datetime.fromisoformat(cast(str, recovery["updated_at"]))
+            exact_initial_snapshot = (
+                type(recovery["current_step"]) is int
+                and recovery["current_step"] == 0
+                and cast(str, recovery["current_step_summary"]) == QUOTA_SDK_INITIAL_SUMMARY
+                and recovery_created_at.tzinfo is not None
+                and recovery_created_at.utcoffset() == timedelta(0)
+                and recovery_updated_at.tzinfo is not None
+                and recovery_updated_at.utcoffset() == timedelta(0)
+                and recovery_updated_at == recovery_created_at
+                and (now is None or (recovery_created_at <= now and recovery_updated_at <= now))
+            )
+        except (TypeError, ValueError):
+            exact_initial_snapshot = False
+        expected_created_payload = {
+            "scenarioId": ScenarioId.API_QUOTA.value,
+            "executionMode": ExecutionMode.SDK_STUB.value,
+            "summary": "Recovery created for the selected execution mode.",
+        }
+        events = connection.execute(
+            """
+            SELECT seq, type, terminal, data_json, created_at
+            FROM events
+            WHERE recovery_id = ?
+            ORDER BY seq ASC
+            """,
+            (recovery_id,),
+        ).fetchall()
+        try:
+            exact_creation_event = (
+                len(events) == 1
+                and cast(int, events[0]["seq"]) == 1
+                and cast(str, events[0]["type"]) == "recovery.created"
+                and cast(int, events[0]["terminal"]) == 0
+                and json.loads(cast(str, events[0]["data_json"])) == expected_created_payload
+                and datetime.fromisoformat(cast(str, events[0]["created_at"]))
+                == datetime.fromisoformat(cast(str, recovery["created_at"]))
+            )
+        except (TypeError, ValueError):
+            exact_creation_event = False
+        terminal_or_approval_evidence = connection.execute(
+            """
+            SELECT 1
+            WHERE EXISTS (
+                SELECT 1 FROM receipts WHERE recovery_id = ?
+            )
+               OR EXISTS (
+                SELECT 1 FROM pending_approvals WHERE recovery_id = ?
+            )
+               OR EXISTS (
+                SELECT 1 FROM approval_decisions WHERE recovery_id = ?
+            )
+               OR EXISTS (
+                SELECT 1 FROM remedies WHERE recovery_id = ?
+            )
+            """,
+            (recovery_id, recovery_id, recovery_id, recovery_id),
+        ).fetchone()
+        if (
+            cast(str, recovery["status"]) != RecoveryStatus.IN_PROGRESS.value
+            or cast(int, recovery["quota_execution_contract"]) != 1
+            or not exact_initial_snapshot
+            or not exact_creation_event
+            or terminal_or_approval_evidence is not None
+        ):
+            raise ExecutionConflictError("Quota recovery is not eligible for durable dispatch")
+        cls._require_quota_creation_binding(
+            connection,
+            recovery_id=recovery_id,
+            allowed_statuses=allowed_creation_statuses,
+            now=now,
+        )
+        return cast(sqlite3.Row, recovery)
+
+    @classmethod
+    def _insert_quota_execution_claim_in_connection(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        recovery_id: str,
+        now: datetime,
+    ) -> None:
+        """Insert the pre-dispatch quota claim in the recovery transaction."""
+
+        existing = connection.execute(
+            "SELECT 1 FROM executions WHERE recovery_id = ?",
+            (recovery_id,),
+        ).fetchone()
+        if existing is not None:
+            raise ExecutionConflictError("Quota recovery already has a durable execution")
+        connection.execute(
+            """
+            INSERT INTO executions (
+                id, recovery_id, idempotency_key, status,
+                provider_execution, request_digest, tool_call_id,
+                remedy_digest, result_json, created_at, updated_at
+            ) VALUES (?, ?, ?, 'pending', 0, ?, ?, NULL, NULL, ?, ?)
+            """,
+            (
+                cls._quota_execution_id(recovery_id),
+                recovery_id,
+                cls._quota_idempotency_key(recovery_id),
+                quota_request_digest(DETERMINISTIC_QUOTA_REQUEST),
+                QUOTA_TOOL_CALL_ID,
+                now.isoformat(),
+                now.isoformat(),
+            ),
+        )
+
+    def record_completed_quota_execution(
+        self,
+        execution: DurableExecution,
+        *,
+        result: QuotaRecoveryResult,
+    ) -> tuple[DurableExecution, bool]:
+        """Commit the exact provider result before SDK completion is validated."""
+
+        canonical_result = self._canonical_quota_result_payload(result)
+        serialized_result = json.dumps(
+            canonical_result,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current_time = self._now()
+            recovery = self._require_pristine_quota_recovery(
+                connection,
+                recovery_id=execution.recovery_id,
+                now=current_time,
+            )
+            rows = connection.execute(
+                "SELECT * FROM executions WHERE recovery_id = ?",
+                (execution.recovery_id,),
+            ).fetchall()
+            if not rows:
+                raise ExecutionConflictError("Quota execution claim is missing")
+            if len(rows) != 1:
+                raise ExecutionConflictError("Quota recovery has ambiguous durable executions")
+            row = rows[0]
+            current = self._require_exact_quota_execution_row(
+                row,
+                recovery_id=execution.recovery_id,
+            )
+            self._require_quota_execution_chronology(
+                recovery=recovery,
+                execution=row,
+                terminal=False,
+                now=current_time,
+            )
+            if current.status in {QUOTA_EXECUTION_RESULT_RECORDED, "completed"}:
+                if current.result_json != canonical_result:
+                    raise ExecutionConflictError("Durable quota result changed")
+                return current, False
+            if current.status != "pending" or current != execution:
+                raise ExecutionConflictError("Quota execution claim is no longer dispatchable")
+            updated = connection.execute(
+                """
+                UPDATE executions
+                SET status = ?, provider_execution = 1,
+                    result_json = ?, updated_at = ?
+                WHERE id = ? AND status = 'pending'
+                  AND provider_execution = 0 AND result_json IS NULL
+                """,
+                (
+                    QUOTA_EXECUTION_RESULT_RECORDED,
+                    serialized_result,
+                    current_time.isoformat(),
+                    execution.execution_id,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise ExecutionConflictError("Quota execution result lost its durable claim")
+            completed_row = connection.execute(
+                "SELECT * FROM executions WHERE id = ?",
+                (execution.execution_id,),
+            ).fetchone()
+            if completed_row is None:
+                raise RuntimeError("Quota execution result did not persist")
+            return (
+                self._require_exact_quota_execution_row(
+                    completed_row,
+                    recovery_id=execution.recovery_id,
+                ),
+                True,
+            )
+
+    def validate_quota_sdk_completion(
+        self,
+        execution: DurableExecution,
+    ) -> DurableExecution:
+        """Durably attest that the SDK returned with zero human interruptions."""
+
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current_time = self._now()
+            recovery = connection.execute(
+                "SELECT * FROM recoveries WHERE id = ?",
+                (execution.recovery_id,),
+            ).fetchone()
+            execution_rows = connection.execute(
+                "SELECT * FROM executions WHERE recovery_id = ?",
+                (execution.recovery_id,),
+            ).fetchall()
+            if recovery is None or not execution_rows:
+                raise RecoveryNotFoundError("Quota recovery execution not found")
+            if len(execution_rows) != 1:
+                raise ExecutionConflictError("Quota recovery has ambiguous durable executions")
+            current_row = execution_rows[0]
+            current = self._require_exact_quota_execution_row(
+                current_row,
+                recovery_id=execution.recovery_id,
+            )
+            self._require_quota_recovery_provenance(recovery)
+            if cast(int, recovery["quota_execution_contract"]) != 1:
+                raise ExecutionConflictError("Quota recovery has no durable execution contract")
+            recovery_is_terminal = cast(str, recovery["status"]) in {
+                RecoveryStatus.COMPLETED.value,
+                RecoveryStatus.OUTCOME_UNKNOWN.value,
+            }
+            self._require_quota_execution_chronology(
+                recovery=recovery,
+                execution=current_row,
+                terminal=recovery_is_terminal,
+                now=current_time,
+            )
+            if (
+                current.execution_id != execution.execution_id
+                or current.result_json != execution.result_json
+            ):
+                raise ExecutionConflictError("Recorded quota result changed before SDK validation")
+            if current.status == "completed":
+                receipt = self._quota_receipt_for_execution_row(
+                    recovery=recovery,
+                    execution=current,
+                )
+                specs = self._quota_completed_transition_specs(
+                    QuotaRecoveryResult.model_validate(current.result_json)
+                )
+                if recovery_is_terminal:
+                    if not self._quota_terminal_bundle_matches(
+                        connection,
+                        recovery=recovery,
+                        execution=current,
+                        receipt=receipt,
+                        specs=specs,
+                    ):
+                        raise ReceiptTransitionError("Existing quota terminal evidence mismatch")
+                else:
+                    self._require_pristine_quota_recovery(
+                        connection,
+                        recovery_id=execution.recovery_id,
+                        allowed_creation_statuses=frozenset({"started", "unknown"}),
+                        now=current_time,
+                    )
+                return current
+            if recovery_is_terminal:
+                raise ExecutionConflictError("Unvalidated quota result has terminal evidence")
+            self._require_pristine_quota_recovery(
+                connection,
+                recovery_id=execution.recovery_id,
+                allowed_creation_statuses=frozenset({"started", "unknown"}),
+                now=current_time,
+            )
+            if current.status != QUOTA_EXECUTION_RESULT_RECORDED:
+                raise ExecutionConflictError("Recorded quota result changed before SDK validation")
+            updated = connection.execute(
+                """
+                UPDATE executions
+                SET status = 'completed', updated_at = ?
+                WHERE id = ? AND status = ?
+                  AND provider_execution = 1 AND result_json IS NOT NULL
+                """,
+                (
+                    current_time.isoformat(),
+                    current.execution_id,
+                    QUOTA_EXECUTION_RESULT_RECORDED,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise ExecutionConflictError("Quota SDK validation marker did not persist")
+            validated_row = connection.execute(
+                "SELECT * FROM executions WHERE id = ?",
+                (current.execution_id,),
+            ).fetchone()
+            if validated_row is None:
+                raise RuntimeError("Validated quota execution did not persist")
+            validated = self._require_exact_quota_execution_row(
+                validated_row,
+                recovery_id=execution.recovery_id,
+            )
+            self._require_quota_execution_chronology(
+                recovery=recovery,
+                execution=validated_row,
+                terminal=False,
+                now=current_time,
+            )
+            return validated
+
+    def quarantine_quota_execution_invariant_failure(
+        self,
+        execution: DurableExecution,
+    ) -> None:
+        """Retain evidence that cannot support the zero-interruption contract."""
+
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current_time = self._now()
+            recovery = connection.execute(
+                "SELECT * FROM recoveries WHERE id = ?",
+                (execution.recovery_id,),
+            ).fetchone()
+            execution_rows = connection.execute(
+                "SELECT * FROM executions WHERE recovery_id = ?",
+                (execution.recovery_id,),
+            ).fetchall()
+            if recovery is None or not execution_rows:
+                raise RecoveryNotFoundError("Quota recovery execution not found")
+            if len(execution_rows) != 1:
+                raise ExecutionConflictError("Quota recovery has ambiguous durable executions")
+            current_row = execution_rows[0]
+            current = self._require_exact_quota_execution_row(
+                current_row,
+                recovery_id=execution.recovery_id,
+            )
+            self._require_quota_recovery_provenance(recovery)
+            if cast(int, recovery["quota_execution_contract"]) != 1:
+                raise ExecutionConflictError("Quota recovery has no durable execution contract")
+            recovery_status = RecoveryStatus(cast(str, recovery["status"]))
+            self._require_quota_execution_chronology(
+                recovery=recovery,
+                execution=current_row,
+                terminal=recovery_status is not RecoveryStatus.IN_PROGRESS,
+                now=current_time,
+            )
+            if recovery_status is not RecoveryStatus.IN_PROGRESS or current.status not in {
+                "pending",
+                QUOTA_EXECUTION_RESULT_RECORDED,
+            }:
+                raise ExecutionConflictError("Quota invariant state cannot be quarantined")
+            if current != execution:
+                raise ExecutionConflictError("Quota invariant execution changed before quarantine")
+            self._require_pristine_quota_recovery(
+                connection,
+                recovery_id=execution.recovery_id,
+                allowed_creation_statuses=frozenset({"started", "unknown"}),
+                now=current_time,
+            )
+            creation = connection.execute(
+                """
+                SELECT request_key, request_fingerprint, status
+                FROM recovery_creations
+                WHERE recovery_id = ?
+                """,
+                (execution.recovery_id,),
+            ).fetchone()
+            updated = connection.execute(
+                """
+                UPDATE executions
+                SET status = ?, updated_at = ?
+                WHERE id = ? AND status = ?
+                """,
+                (
+                    QUOTA_EXECUTION_INVARIANT_FAILED,
+                    current_time.isoformat(),
+                    current.execution_id,
+                    current.status,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise ExecutionConflictError("Quota invariant evidence was not quarantined")
+            if creation is not None and cast(str, creation["status"]) == "started":
+                creation_updated = connection.execute(
+                    """
+                    UPDATE recovery_creations
+                    SET status = 'unknown', updated_at = ?
+                    WHERE request_key = ? AND request_fingerprint = ?
+                      AND recovery_id = ? AND status = 'started'
+                    """,
+                    (
+                        current_time.isoformat(),
+                        cast(str, creation["request_key"]),
+                        cast(str, creation["request_fingerprint"]),
+                        execution.recovery_id,
+                    ),
+                )
+                if creation_updated.rowcount != 1:
+                    raise ExecutionConflictError(
+                        "Quota invariant creation evidence was not quarantined"
+                    )
+            self._require_quota_creation_binding(
+                connection,
+                recovery_id=execution.recovery_id,
+                allowed_statuses=frozenset({"unknown"}),
+                now=current_time,
+            )
+
+    @staticmethod
+    def _quota_completed_transition_specs(
+        result: QuotaRecoveryResult,
+    ) -> list[tuple[str, int, str, dict[str, JsonValue]]]:
+        proof = result.ceiling_proof
+        grant = result.grant
+        authority = result.authority
+        return [
+            (
+                "quota.pressure_detected",
+                0,
+                "Quota demand exceeds the provider-proven baseline ceiling.",
+                {
+                    "phase": "Detect",
+                    "region": grant.region,
+                    "baselineCeilingUnits": proof.baseline_ceiling_units,
+                    "requiredUnits": proof.required_units,
+                    "shortfallUnits": proof.shortfall_units,
+                },
+            ),
+            (
+                "quota.ceiling_proven",
+                1,
+                "Provider evidence proves the exact quota ceiling and shortfall.",
+                {
+                    "phase": "Prove",
+                    "providerEvidenceId": proof.provider_evidence_id,
+                    "baselineCeilingUnits": proof.baseline_ceiling_units,
+                    "requiredUnits": proof.required_units,
+                    "shortfallUnits": proof.shortfall_units,
+                },
+            ),
+            (
+                "quota.burst_selected",
+                2,
+                "A temporary US-region burst covers the proven shortfall.",
+                {
+                    "phase": "Negotiate",
+                    "permissionId": grant.permission_id,
+                    "region": grant.region,
+                    "burstUnits": grant.burst_units,
+                    "effectiveCeilingUnits": grant.effective_ceiling_units,
+                    "durationSeconds": grant.duration_seconds,
+                    "extraCostMinor": grant.extra_cost_minor,
+                    "currency": grant.currency,
+                },
+            ),
+            (
+                "quota.delegated_authority_confirmed",
+                3,
+                ("Delegated policy authorizes the exact burst with zero human approvals."),
+                {
+                    "phase": "Authorize",
+                    "approvalCount": result.approval_count,
+                    "hardConstraintsSatisfied": result.hard_constraints_satisfied,
+                    "delegatedAuthoritySatisfied": (result.delegated_authority_satisfied),
+                    "maximumExtraCostMinor": authority.maximum_extra_cost_minor,
+                    "maximumDurationSeconds": authority.maximum_duration_seconds,
+                    "allowedRegions": list(authority.allowed_regions),
+                },
+            ),
+            (
+                "quota.burst_executed",
+                4,
+                "The demo adapter executed and verified the temporary burst.",
+                {
+                    "phase": "Execute",
+                    "providerExecution": True,
+                    "executionVerified": result.execution_verified,
+                    "effectiveCeilingUnits": grant.effective_ceiling_units,
+                },
+            ),
+            (
+                "quota.receipt_sealed",
+                5,
+                ("Execution verified, temporary permission revoked, and receipt sealed."),
+                {
+                    "phase": "Verify & seal",
+                    "approvalCount": result.approval_count,
+                    "providerExecution": True,
+                    "executionVerified": result.execution_verified,
+                    "permissionRevoked": result.permission_revoked,
+                    "restoredCeilingUnits": result.restored_ceiling_units,
+                    "summary": "Verified quota recovery evidence sealed.",
+                },
+            ),
+        ]
+
+    @staticmethod
+    def _quota_unknown_transition_spec(
+        recovery_id: str,
+    ) -> tuple[str, int, str, dict[str, JsonValue]]:
+        return (
+            "quota.outcome_unknown",
+            5,
+            QUOTA_SDK_UNKNOWN_SUMMARY,
+            {
+                "recoveryId": recovery_id,
+                "executionMode": ExecutionMode.SDK_STUB.value,
+                "approvalCount": 0,
+                "providerExecution": None,
+                "phase": "Verify & seal",
+                "redispatched": False,
+                "summary": QUOTA_SDK_UNKNOWN_SUMMARY,
+            },
+        )
+
+    @classmethod
+    def _quota_receipt_for_execution_row(
+        cls,
+        *,
+        recovery: sqlite3.Row,
+        execution: DurableExecution,
+    ) -> RecoveryReceipt:
+        cls._require_quota_recovery_provenance(recovery)
+        provenance = cls._provenance_from_row(recovery)
+        if provenance.recovery_id != execution.recovery_id:
+            raise ReceiptTransitionError("Quota execution provenance recovery ID mismatch")
+        if execution.status == "completed":
+            if execution.result_json is None:
+                raise ReceiptTransitionError("Completed quota execution has no durable result")
+            cls._canonical_quota_result_payload(execution.result_json)
+            return RecoveryReceipt(
+                recoveryId=execution.recovery_id,
+                executionMode=ExecutionMode.SDK_STUB,
+                status="completed",
+                simulated=True,
+                providerExecution=True,
+                modelCall=False,
+                modelIds=[],
+                rootTraceId=provenance.root_trace_id,
+                sdkVersion=provenance.sdk_version,
+                protocolVersion=provenance.protocol_version,
+                agentGraphVersion=provenance.agent_graph_version,
+                definitionDigest=provenance.definition_digest,
+                boundary=QUOTA_SDK_STUB_BOUNDARY,
+                providerResult=QUOTA_SDK_PROVIDER_RESULT,
+                authorizationSource=QUOTA_SDK_AUTHORIZATION_SOURCE,
+                verificationResults=list(QUOTA_SDK_VERIFICATION_RESULTS),
+                approvalCount=0,
+            )
+        if execution.status != RecoveryStatus.OUTCOME_UNKNOWN.value:
+            raise ReceiptTransitionError("Quota execution cannot produce an unknown receipt")
+        return RecoveryReceipt(
+            recoveryId=execution.recovery_id,
+            executionMode=ExecutionMode.SDK_STUB,
+            status=RecoveryStatus.OUTCOME_UNKNOWN.value,
+            simulated=True,
+            providerExecution=None,
+            modelCall=False,
+            modelIds=[],
+            rootTraceId=provenance.root_trace_id,
+            sdkVersion=provenance.sdk_version,
+            protocolVersion=provenance.protocol_version,
+            agentGraphVersion=provenance.agent_graph_version,
+            definitionDigest=provenance.definition_digest,
+            boundary=QUOTA_SDK_STUB_BOUNDARY,
+            providerResult=QUOTA_SDK_UNKNOWN_PROVIDER_RESULT,
+            authorizationSource=QUOTA_SDK_UNKNOWN_AUTHORIZATION_SOURCE,
+            verificationResults=list(QUOTA_SDK_UNKNOWN_VERIFICATION_RESULTS),
+            approvalCount=0,
+        )
+
+    @classmethod
+    def _quota_terminal_bundle_matches(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        recovery: sqlite3.Row,
+        execution: DurableExecution,
+        receipt: RecoveryReceipt,
+        specs: list[tuple[str, int, str, dict[str, JsonValue]]],
+    ) -> bool:
+        recovery_id = execution.recovery_id
+        if execution.status == "completed":
+            expected_status = RecoveryStatus.COMPLETED
+        elif execution.status == RecoveryStatus.OUTCOME_UNKNOWN.value:
+            expected_status = RecoveryStatus.OUTCOME_UNKNOWN
+        else:
+            return False
+        expected_summary = specs[-1][2]
+        if (
+            cast(str, recovery["status"]) != expected_status.value
+            or cast(int, recovery["current_step"]) != 5
+            or cast(str, recovery["current_step_summary"]) != expected_summary
+        ):
+            return False
+        receipt_row = connection.execute(
+            """
+            SELECT receipt_json, created_at
+            FROM receipts
+            WHERE recovery_id = ?
+            """,
+            (recovery_id,),
+        ).fetchone()
+        event_rows = connection.execute(
+            """
+            SELECT seq, type, terminal, data_json, created_at
+            FROM events
+            WHERE recovery_id = ?
+            ORDER BY seq ASC
+            """,
+            (recovery_id,),
+        ).fetchall()
+        forbidden_human_evidence = connection.execute(
+            """
+            SELECT 1
+            WHERE EXISTS (
+                SELECT 1 FROM pending_approvals WHERE recovery_id = ?
+            )
+               OR EXISTS (
+                SELECT 1 FROM approval_decisions WHERE recovery_id = ?
+            )
+               OR EXISTS (
+                SELECT 1 FROM remedies WHERE recovery_id = ?
+            )
+            """,
+            (recovery_id, recovery_id, recovery_id),
+        ).fetchone()
+        if (
+            receipt_row is None
+            or len(event_rows) != len(specs) + 1
+            or forbidden_human_evidence is not None
+        ):
+            return False
+        expected_created_payload: dict[str, JsonValue] = {
+            "scenarioId": ScenarioId.API_QUOTA.value,
+            "executionMode": ExecutionMode.SDK_STUB.value,
+            "summary": "Recovery created for the selected execution mode.",
+        }
+        expected_events = [
+            ("recovery.created", False, expected_created_payload),
+            *[
+                (event_type, index == len(specs) - 1, data)
+                for index, (event_type, _step, _summary, data) in enumerate(specs)
+            ],
+        ]
+        try:
+            stored_receipt = RecoveryReceipt.model_validate_json(
+                cast(str, receipt_row["receipt_json"])
+            )
+            event_times = [
+                datetime.fromisoformat(cast(str, event["created_at"])) for event in event_rows
+            ]
+            receipt_created_at = datetime.fromisoformat(cast(str, receipt_row["created_at"]))
+            recovery_created_at = datetime.fromisoformat(cast(str, recovery["created_at"]))
+            recovery_updated_at = datetime.fromisoformat(cast(str, recovery["updated_at"]))
+            actual_events = [
+                (
+                    cast(str, event["type"]),
+                    bool(cast(int, event["terminal"])),
+                    json.loads(cast(str, event["data_json"])),
+                )
+                for event in event_rows
+            ]
+        except (TypeError, ValueError):
+            return False
+        if (
+            stored_receipt != receipt
+            or actual_events != expected_events
+            or [cast(int, event["seq"]) for event in event_rows]
+            != list(range(1, len(event_rows) + 1))
+            or event_times[0] != recovery_created_at
+            or receipt_created_at != recovery_updated_at
+            or event_times[-1] != recovery_updated_at
+            or any(
+                event_time.tzinfo is None or event_time.utcoffset() != timedelta(0)
+                for event_time in event_times
+            )
+            or any(
+                later < earlier
+                for earlier, later in zip(
+                    event_times,
+                    event_times[1:],
+                    strict=False,
+                )
+            )
+        ):
+            return False
+        try:
+            quota_execution_contract = recovery["quota_execution_contract"]
+            if type(quota_execution_contract) is not int or quota_execution_contract not in {0, 1}:
+                return False
+            allowed_creation_statuses = (
+                frozenset({"started", "unknown", "ready"})
+                if quota_execution_contract == 0
+                else frozenset({"ready"})
+            )
+            cls._require_quota_creation_binding(
+                connection,
+                recovery_id=recovery_id,
+                allowed_statuses=allowed_creation_statuses,
+            )
+        except ExecutionConflictError:
+            return False
+        return True
+
+    @classmethod
+    def _mark_quota_creation_ready_in_connection(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        recovery_id: str,
+        now: datetime,
+    ) -> None:
+        creation = cls._require_quota_creation_binding(
+            connection,
+            recovery_id=recovery_id,
+            allowed_statuses=frozenset({"started", "unknown"}),
+            now=now,
+        )
+        if creation is None:
+            return
+        updated = connection.execute(
+            """
+            UPDATE recovery_creations
+            SET status = 'ready', updated_at = ?
+            WHERE request_key = ? AND recovery_id = ?
+              AND status IN ('started', 'unknown')
+            """,
+            (
+                now.isoformat(),
+                cast(str, creation["request_key"]),
+                recovery_id,
+            ),
+        )
+        if updated.rowcount != 1:
+            raise ExecutionConflictError("Quota recovery creation could not be finalized")
+        cls._require_quota_creation_binding(
+            connection,
+            recovery_id=recovery_id,
+            allowed_statuses=frozenset({"ready"}),
+        )
+
+    def _finalize_quota_execution_in_connection(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        requested_execution: DurableExecution,
+        expected_result: bool,
+        now: datetime,
+    ) -> bool:
+        recovery_id = requested_execution.recovery_id
+        recovery = connection.execute(
+            "SELECT * FROM recoveries WHERE id = ?",
+            (recovery_id,),
+        ).fetchone()
+        execution_rows = connection.execute(
+            "SELECT * FROM executions WHERE recovery_id = ?",
+            (recovery_id,),
+        ).fetchall()
+        if recovery is None or not execution_rows:
+            raise RecoveryNotFoundError("Quota recovery execution not found")
+        if len(execution_rows) != 1:
+            raise ExecutionConflictError("Quota recovery has ambiguous durable executions")
+        execution_row = execution_rows[0]
+        current = self._require_exact_quota_execution_row(
+            execution_row,
+            recovery_id=recovery_id,
+        )
+        self._require_quota_recovery_provenance(recovery)
+        if cast(int, recovery["quota_execution_contract"]) != 1:
+            raise ExecutionConflictError("Quota recovery has no durable execution contract")
+        recovery_is_terminal = cast(str, recovery["status"]) in {
+            RecoveryStatus.COMPLETED.value,
+            RecoveryStatus.OUTCOME_UNKNOWN.value,
+        }
+        self._require_quota_execution_chronology(
+            recovery=recovery,
+            execution=execution_row,
+            terminal=recovery_is_terminal,
+            now=now,
+        )
+        if recovery_is_terminal:
+            receipt = self._quota_receipt_for_execution_row(
+                recovery=recovery,
+                execution=current,
+            )
+            specs = (
+                self._quota_completed_transition_specs(
+                    QuotaRecoveryResult.model_validate(current.result_json)
+                )
+                if current.status == "completed"
+                else [self._quota_unknown_transition_spec(recovery_id)]
+            )
+            if not self._quota_terminal_bundle_matches(
+                connection,
+                recovery=recovery,
+                execution=current,
+                receipt=receipt,
+                specs=specs,
+            ):
+                raise ReceiptTransitionError("Existing quota terminal evidence mismatch")
+            return False
+
+        self._require_pristine_quota_recovery(
+            connection,
+            recovery_id=recovery_id,
+            allowed_creation_statuses=frozenset({"started", "unknown"}),
+            now=now,
+        )
+        if expected_result and current.status != "completed":
+            raise ExecutionConflictError("Completed quota finalization lost its durable result")
+        if not expected_result and current.status == "completed":
+            expected_result = True
+        if current.status not in {"pending", "completed"}:
+            raise ExecutionConflictError("Quota execution cannot be reconciled")
+
+        if expected_result:
+            if current.result_json is None:
+                raise ExecutionConflictError("Completed quota result is missing")
+            result = QuotaRecoveryResult.model_validate(
+                self._canonical_quota_result_payload(current.result_json)
+            )
+            specs = self._quota_completed_transition_specs(result)
+            terminal_status = RecoveryStatus.COMPLETED
+            durable_execution = current
+        else:
+            updated = connection.execute(
+                """
+                UPDATE executions
+                SET status = 'outcome_unknown', updated_at = ?
+                WHERE id = ? AND status = 'pending'
+                  AND provider_execution = 0 AND result_json IS NULL
+                """,
+                (now.isoformat(), current.execution_id),
+            )
+            if updated.rowcount != 1:
+                raise ExecutionConflictError("Quota dispatch claim could not be sealed unknown")
+            unknown_row = connection.execute(
+                "SELECT * FROM executions WHERE id = ?",
+                (current.execution_id,),
+            ).fetchone()
+            if unknown_row is None:
+                raise RuntimeError("Unknown quota execution did not persist")
+            durable_execution = self._require_exact_quota_execution_row(
+                unknown_row,
+                recovery_id=recovery_id,
+            )
+            specs = [self._quota_unknown_transition_spec(recovery_id)]
+            terminal_status = RecoveryStatus.OUTCOME_UNKNOWN
+
+        receipt = self._quota_receipt_for_execution_row(
+            recovery=recovery,
+            execution=durable_execution,
+        )
+        next_sequence = 2
+        for index, (event_type, _step, _summary, data) in enumerate(specs):
+            terminal = index == len(specs) - 1
+            connection.execute(
+                """
+                INSERT INTO events (
+                    recovery_id, seq, type, terminal, data_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    recovery_id,
+                    next_sequence,
+                    event_type,
+                    int(terminal),
+                    json.dumps(
+                        data,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                    now.isoformat(),
+                ),
+            )
+            next_sequence += 1
+        connection.execute(
+            """
+            INSERT INTO receipts (recovery_id, receipt_json, created_at)
+            VALUES (?, ?, ?)
+            """,
+            (
+                recovery_id,
+                receipt.model_dump_json(by_alias=True),
+                now.isoformat(),
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE recoveries
+            SET status = ?, current_step = 5,
+                current_step_summary = ?, updated_at = ?
+            WHERE id = ? AND status = 'in_progress'
+            """,
+            (
+                terminal_status.value,
+                specs[-1][2],
+                now.isoformat(),
+                recovery_id,
+            ),
+        )
+        self._mark_quota_creation_ready_in_connection(
+            connection,
+            recovery_id=recovery_id,
+            now=now,
+        )
+        return True
+
+    def get_quota_execution(
+        self,
+        recovery_id: str,
+    ) -> DurableExecution | None:
+        """Return one exact quota execution row without accepting hotel rows."""
+
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN")
+            recovery = connection.execute(
+                """
+                SELECT * FROM recoveries
+                WHERE id = ?
+                  AND scenario_id = 'api-quota'
+                  AND execution_mode = 'sdk_stub'
+                """,
+                (recovery_id,),
+            ).fetchone()
+            if recovery is None:
+                return None
+            self._require_quota_recovery_provenance(recovery)
+            if cast(int, recovery["quota_execution_contract"]) != 1:
+                raise ExecutionConflictError("Quota recovery has no durable execution contract")
+            rows = connection.execute(
+                """
+                SELECT executions.*
+                FROM executions
+                JOIN recoveries ON recoveries.id = executions.recovery_id
+                WHERE executions.recovery_id = ?
+                  AND recoveries.scenario_id = 'api-quota'
+                  AND recoveries.execution_mode = 'sdk_stub'
+                """,
+                (recovery_id,),
+            ).fetchall()
+            if not rows:
+                raise ExecutionConflictError("Quota recovery has no exact durable execution")
+            if len(rows) != 1:
+                raise ExecutionConflictError("Quota recovery has ambiguous durable executions")
+            execution = self._require_exact_quota_execution_row(
+                rows[0],
+                recovery_id=recovery_id,
+            )
+            current_time = self._now()
+            recovery_status = RecoveryStatus(cast(str, recovery["status"]))
+            if recovery_status is RecoveryStatus.IN_PROGRESS:
+                if execution.status not in {
+                    "pending",
+                    QUOTA_EXECUTION_RESULT_RECORDED,
+                    "completed",
+                }:
+                    raise ExecutionConflictError(
+                        "Quota execution has no dispatchable durable state"
+                    )
+                self._require_quota_execution_chronology(
+                    recovery=recovery,
+                    execution=rows[0],
+                    terminal=False,
+                    now=current_time,
+                )
+                self._require_pristine_quota_recovery(
+                    connection,
+                    recovery_id=recovery_id,
+                    allowed_creation_statuses=frozenset({"started", "unknown"}),
+                    now=current_time,
+                )
+                return execution
+            if recovery_status not in {
+                RecoveryStatus.COMPLETED,
+                RecoveryStatus.OUTCOME_UNKNOWN,
+            }:
+                raise ExecutionConflictError("Quota recovery has no readable durable execution")
+            if (
+                recovery_status is RecoveryStatus.COMPLETED and execution.status != "completed"
+            ) or (
+                recovery_status is RecoveryStatus.OUTCOME_UNKNOWN
+                and execution.status != RecoveryStatus.OUTCOME_UNKNOWN.value
+            ):
+                raise ExecutionConflictError("Quota terminal execution state does not match")
+            self._require_quota_execution_chronology(
+                recovery=recovery,
+                execution=rows[0],
+                terminal=True,
+                now=current_time,
+            )
+            receipt = self._quota_receipt_for_execution_row(
+                recovery=recovery,
+                execution=execution,
+            )
+            specs = (
+                self._quota_completed_transition_specs(
+                    QuotaRecoveryResult.model_validate(execution.result_json)
+                )
+                if execution.status == "completed"
+                else [self._quota_unknown_transition_spec(recovery_id)]
+            )
+            if not self._quota_terminal_bundle_matches(
+                connection,
+                recovery=recovery,
+                execution=execution,
+                receipt=receipt,
+                specs=specs,
+            ):
+                raise ExecutionConflictError("Quota terminal execution evidence does not match")
+            return execution
+
+    @classmethod
+    def _preflight_quota_execution_evidence(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        now: datetime,
+    ) -> list[DurableExecution]:
+        """Validate every durable SDK quota row in one database snapshot."""
+
+        invalid_legacy = connection.execute(
+            """
+            SELECT quota_legacy_completions.recovery_id
+            FROM quota_legacy_completions
+            LEFT JOIN recoveries
+              ON recoveries.id = quota_legacy_completions.recovery_id
+            WHERE recoveries.id IS NULL
+               OR recoveries.scenario_id != 'api-quota'
+               OR recoveries.execution_mode != 'sdk_stub'
+               OR recoveries.status != 'completed'
+               OR recoveries.quota_execution_contract != 0
+            LIMIT 1
+            """
+        ).fetchone()
+        if invalid_legacy is not None:
+            raise ExecutionConflictError("Legacy quota completion provenance is invalid")
+        quarantined = connection.execute(
+            """
+            SELECT executions.recovery_id
+            FROM executions
+            JOIN recoveries ON recoveries.id = executions.recovery_id
+            WHERE recoveries.scenario_id = 'api-quota'
+              AND recoveries.execution_mode = 'sdk_stub'
+              AND recoveries.quota_execution_contract = 1
+              AND executions.status = ?
+            LIMIT 1
+            """,
+            (QUOTA_EXECUTION_INVARIANT_FAILED,),
+        ).fetchone()
+        if quarantined is not None:
+            raise ExecutionConflictError("Quota SDK invariant failure requires operator review")
+        unsupported_mode = connection.execute(
+            """
+            SELECT id
+            FROM recoveries
+            WHERE scenario_id = 'api-quota'
+              AND execution_mode NOT IN ('sdk_stub', 'replay_fixture')
+            LIMIT 1
+            """
+        ).fetchone()
+        if unsupported_mode is not None:
+            raise ExecutionConflictError("API quota recovery has an unsupported execution mode")
+        recovery_rows = connection.execute(
+            """
+            SELECT recoveries.*
+            FROM recoveries
+            WHERE recoveries.scenario_id = 'api-quota'
+              AND recoveries.execution_mode = 'sdk_stub'
+            ORDER BY recoveries.created_at ASC, recoveries.id ASC
+            """
+        ).fetchall()
+        reconciliations: list[DurableExecution] = []
+        for recovery in recovery_rows:
+            recovery_id = cast(str, recovery["id"])
+            cls._require_quota_recovery_provenance(recovery)
+            recovery_status = RecoveryStatus(cast(str, recovery["status"]))
+            if recovery_status is RecoveryStatus.IN_PROGRESS:
+                if cast(int, recovery["quota_execution_contract"]) != 1:
+                    raise ExecutionConflictError(
+                        "In-progress quota recovery has no exact durable execution"
+                    )
+                execution_rows = connection.execute(
+                    "SELECT * FROM executions WHERE recovery_id = ?",
+                    (recovery_id,),
+                ).fetchall()
+                if len(execution_rows) != 1:
+                    raise ExecutionConflictError(
+                        "In-progress quota recovery has no exact durable execution"
+                    )
+                execution = cls._require_exact_quota_execution_row(
+                    execution_rows[0],
+                    recovery_id=recovery_id,
+                )
+                if execution.status not in {
+                    "pending",
+                    QUOTA_EXECUTION_RESULT_RECORDED,
+                    "completed",
+                }:
+                    raise ExecutionConflictError(
+                        "Quota execution has no reconcilable durable state"
+                    )
+                cls._require_quota_execution_chronology(
+                    recovery=recovery,
+                    execution=execution_rows[0],
+                    terminal=False,
+                    now=now,
+                )
+                cls._require_pristine_quota_recovery(
+                    connection,
+                    recovery_id=recovery_id,
+                    allowed_creation_statuses=frozenset({"started", "unknown"}),
+                    now=now,
+                )
+                reconciliations.append(execution)
+                continue
+            if recovery_status not in {
+                RecoveryStatus.COMPLETED,
+                RecoveryStatus.OUTCOME_UNKNOWN,
+            }:
+                raise ExecutionConflictError("SDK quota recovery has an invalid durable status")
+            receipt_rows = connection.execute(
+                "SELECT receipt_json FROM receipts WHERE recovery_id = ?",
+                (recovery_id,),
+            ).fetchall()
+            if len(receipt_rows) != 1:
+                raise ExecutionConflictError("Terminal quota recovery has no exact durable receipt")
+            try:
+                receipt = RecoveryReceipt.model_validate_json(
+                    cast(str, receipt_rows[0]["receipt_json"])
+                )
+            except (TypeError, ValueError):
+                raise ExecutionConflictError("Terminal quota recovery receipt is invalid") from None
+            if not cls._quota_public_terminal_bundle_matches(
+                connection,
+                row=recovery,
+                receipt=receipt,
+            ):
+                raise ExecutionConflictError("Terminal quota recovery evidence is not canonical")
+        return reconciliations
+
+    def quota_evidence_is_ready(
+        self,
+        connection: sqlite3.Connection,
+    ) -> bool:
+        """Return whether all durable quota evidence passes startup preflight."""
+
+        try:
+            self._preflight_quota_execution_evidence(
+                connection,
+                now=self._now(),
+            )
+        except (
+            ExecutionConflictError,
+            ReceiptTransitionError,
+            RecoveryNotFoundError,
+            TypeError,
+            ValueError,
+        ):
+            return False
+        return True
+
+    def list_quota_executions_needing_reconciliation(
+        self,
+    ) -> list[DurableExecution]:
+        """Return unfinished exact quota claims/results after full startup preflight."""
+
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN")
+            return self._preflight_quota_execution_evidence(
+                connection,
+                now=self._now(),
+            )
+
+    def finalize_completed_quota_execution(
+        self,
+        execution: DurableExecution,
+    ) -> bool:
+        """Atomically seal a committed quota result without provider redispatch."""
+
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            return self._finalize_quota_execution_in_connection(
+                connection,
+                requested_execution=execution,
+                expected_result=True,
+                now=self._now(),
+            )
+
+    def finalize_pending_quota_execution_unknown(
+        self,
+        execution: DurableExecution,
+    ) -> bool:
+        """Atomically seal an unresolved quota dispatch claim as unknown."""
+
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            return self._finalize_quota_execution_in_connection(
+                connection,
+                requested_execution=execution,
+                expected_result=False,
+                now=self._now(),
+            )
+
     def record_completed_execution(
         self,
         *,
@@ -6649,9 +8239,7 @@ class SQLiteStore:
                 (recovery_id, idempotency_key),
             ).fetchone()
             if conflicting_execution is not None:
-                raise ExecutionConflictError(
-                    "Recovery already has a different durable execution"
-                )
+                raise ExecutionConflictError("Recovery already has a different durable execution")
 
             if existing is not None:
                 existing_shape = self._execution_persistence_shape(existing)
@@ -6760,10 +8348,13 @@ class SQLiteStore:
                 """
                 SELECT executions.*
                 FROM executions
+                JOIN recoveries
+                  ON recoveries.id = executions.recovery_id
                 LEFT JOIN receipts
                   ON receipts.recovery_id = executions.recovery_id
                 WHERE executions.status = 'completed'
                   AND executions.provider_execution = 1
+                  AND recoveries.scenario_id = 'hotel'
                   AND NOT EXISTS (
                     SELECT 1 FROM approval_decisions
                     WHERE approval_decisions.recovery_id = executions.recovery_id
@@ -6828,8 +8419,7 @@ class SQLiteStore:
             )
             if (
                 durable_claim.request != claim.request
-                or durable_claim.request_fingerprint
-                != claim.request_fingerprint
+                or durable_claim.request_fingerprint != claim.request_fingerprint
             ):
                 raise ApprovalDecisionError(
                     "decision_id_conflict",
@@ -6955,13 +8545,9 @@ class SQLiteStore:
         if terminal_events:
             terminal_event = terminal_events[0]
             try:
-                stored_terminal_data = json.loads(
-                    cast(str, terminal_event["data_json"])
-                )
+                stored_terminal_data = json.loads(cast(str, terminal_event["data_json"]))
             except (TypeError, ValueError):
-                raise ReceiptTransitionError(
-                    "Existing terminal evidence mismatch"
-                ) from None
+                raise ReceiptTransitionError("Existing terminal evidence mismatch") from None
             if (
                 cast(str, terminal_event["type"]) != "recovery.completed"
                 or stored_terminal_data != terminal_data
@@ -7118,9 +8704,7 @@ class SQLiteStore:
                 (session_key,),
             ).fetchone()
             if unresolved_creation is not None:
-                raise ResetCreationPendingError(
-                    "Session has an unresolved recovery creation"
-                )
+                raise ResetCreationPendingError("Session has an unresolved recovery creation")
             now_text = self._now().isoformat()
             connection.execute(
                 """

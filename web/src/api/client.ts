@@ -30,7 +30,7 @@ export const RECOVERY_CREATION_MESSAGES = {
   idempotency_conflict:
     "This recovery start no longer matches its original request. No additional run was started.",
   creation_pending:
-    "Recovery creation is still in progress. Retry the same start shortly.",
+    "Recovery creation is unresolved. Retry the same start shortly.",
   creation_outcome_unknown:
     "The recovery start outcome could not be confirmed. No replacement run was started.",
   creation_capacity:
@@ -552,6 +552,34 @@ export function isRecoveryReceipt(value: unknown): value is RecoveryReceipt {
       value.providerExecution === false &&
       value.approvedRemedyDigest === null &&
       (value.executionMode !== "sdk_stub" || value.boundary === sdkBoundary)
+    );
+  }
+  const quotaUnknownVerificationResults = [
+    "Recovery creation was durably marked started.",
+    "No human approval was recorded.",
+    "No complete quota receipt was committed before restart.",
+    "Provider execution, verification, and permission revocation are not asserted.",
+    "Startup reconciliation did not redispatch the quota operation.",
+    "Uncertain quota outcome receipt sealed.",
+  ];
+  if (
+    value.status === "outcome_unknown" &&
+    value.executionMode === "sdk_stub" &&
+    value.approvalCount === 0 &&
+    value.boundary === quotaBoundary
+  ) {
+    return (
+      value.providerExecution === null &&
+      value.approvedRemedyDigest === null &&
+      value.boundary === quotaBoundary &&
+      value.providerResult ===
+        "Demo quota dispatch may have begun; its outcome could not be confirmed." &&
+      value.authorizationSource ===
+        "Predelegated quota authority existed, but restart evidence cannot confirm execution." &&
+      value.verificationResults.length === quotaUnknownVerificationResults.length &&
+      value.verificationResults.every(
+        (result, index) => result === quotaUnknownVerificationResults[index],
+      )
     );
   }
   return (

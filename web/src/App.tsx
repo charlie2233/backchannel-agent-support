@@ -154,10 +154,18 @@ function receiptMatchesSnapshot(
     receipt.modelIds.every((modelId, index) => modelId === snapshot.modelIds[index]);
   if (!provenanceMatches) return false;
   if (snapshot.scenarioId === "api-quota") {
+    if (snapshot.status === "completed") {
+      return (
+        snapshot.executionMode !== "openai_live" &&
+        receipt.approvalCount === 0
+      );
+    }
     return (
-      snapshot.status === "completed" &&
-      snapshot.executionMode !== "openai_live" &&
-      receipt.approvalCount === 0
+      snapshot.status === "outcome_unknown" &&
+      snapshot.executionMode === "sdk_stub" &&
+      receipt.approvalCount === 0 &&
+      receipt.boundary ===
+        "Deterministic Agents SDK stub and demo quota adapter only; no OpenAI model call or real quota change."
     );
   }
   return (
@@ -199,6 +207,18 @@ function serverLifecycleDetails(snapshot: RecoverySnapshot): RecoveryScenario["l
         Execute: "No quota adapter execution occurred; this is a replay fixture.",
         "Verify & seal":
           "Recorded verification and permission-revocation evidence was replayed.",
+      };
+    }
+    if (snapshot.status === "outcome_unknown") {
+      return {
+        Detect: "Recovery creation was durably recorded before the interruption.",
+        Prove: "No complete provider proof was committed before restart.",
+        Negotiate: "No temporary burst terms are asserted from incomplete evidence.",
+        Authorize:
+          "Delegated authority existed; no human approval was recorded, and an unrecorded request remains possible.",
+        Execute: "Provider dispatch may have begun; its outcome remains unknown.",
+        "Verify & seal":
+          "Verification and permission revocation are not asserted; an unknown-outcome receipt was sealed.",
       };
     }
     return {

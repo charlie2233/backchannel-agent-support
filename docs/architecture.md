@@ -75,9 +75,9 @@ signed-cookie expiry, canonical scenario/mode fingerprint, and reserved recovery
 short SQLite `BEGIN IMMEDIATE` elects one owner; the transaction ends before replay, SDK, or
 live work begins. Exact ready retries in the same surviving signed session return the
 authoritative stored snapshot without another orchestration, admission, or budget charge.
-Changed payloads fail with `idempotency_conflict`, active contenders receive
-`creation_pending`, and uncertain post-start outcomes fail closed as
-`creation_outcome_unknown` without launching a replacement.
+Changed payloads fail with `idempotency_conflict`, active contenders and hard-loss starts inside
+their five-minute stale window receive `creation_pending`, and uncertain handled or stale
+post-start outcomes fail closed as `creation_outcome_unknown` without launching a replacement.
 
 Only row-absent claims enter the capacity gate inside that same `BEGIN IMMEDIATE`
 transaction. Defaults allow 32 unexpired creation rows for one signed session, 128 for one
@@ -106,8 +106,37 @@ dispositions without fabricating or exposing historical addresses.
 Ready and reconciled claims do not trust a recovery status alone. Replay retries pass through
 the canonical fixture/event/receipt integrity validator. Hotel SDK/live results require either
 valid pending or claimed consent evidence, or a terminal mode-matched receipt. SDK quota
-creation requires its canonical completed receipt and QA trace evidence. Missing or tampered
-evidence converts the claim to unknown.
+creation requires one canonical terminal bundle and QA trace evidence. A normal completion binds
+the exact durable quota result to the full seven-event ledger and receipt. A restart after only
+the pre-dispatch claim binds an exact `outcome_unknown` receipt and `quota.outcome_unknown`
+terminal event instead; that bundle claims neither provider execution nor permission revocation.
+For a normal completion, the SDK tool boundary first commits the execution result as
+`result_recorded`. After the SDK runner returns, the orchestrator accepts only a concrete empty
+interruption list and then durably promotes that row to `completed`. A later `BEGIN IMMEDIATE`
+transaction atomically binds the validated result to the recovery, terminal event, receipt, and
+matching creation claim. For the no-result restart path, the execution's `outcome_unknown`
+transition and that terminal evidence change in the same transaction. A recovery created under
+this contract carries an internal marker that requires exactly one canonical execution row.
+Migrated marker-free completed quota bundles remain readable with the marker defaulted to
+legacy zero only when the same schema-upgrade transaction recorded a fingerprint of the exact
+recovery row. Table creation, fingerprint registration, and marker addition share one
+savepoint, so an interrupted first open rolls back and retries without losing legacy
+provenance. A current marker cannot be downgraded into that set by deleting its execution. An
+exact sealed legacy terminal bundle may promote its same-owner started or unknown creation claim
+to ready. Legacy in-progress rows and marked rows with missing or non-reconcilable executions
+fail startup unchanged and without redispatch. Startup and readiness apply the canonical
+terminal-bundle validator to every durable SDK quota completion and unknown outcome. Missing,
+cross-bound, partial, or tampered evidence fails closed.
+
+The zero-approval SDK return is also an evidence boundary. Any human interruption, missing or
+non-list interruption field, or exception after the demo result was stored leaves only
+`result_recorded`; the server retains it under `sdk_invariant_failed` rather than converting it
+into a zero-approval terminal bundle. A restart that finds `result_recorded` applies the same
+quarantine because the SDK return was never durably validated. The outer creation claim becomes
+unknown, public terminal validation rejects the bundle, and subsequent startup refuses the
+quarantined row unchanged for operator review. A concurrent runtime cannot publish that
+unvalidated result; only a previously validated `completed` marker can be finalized after a
+crash.
 
 This is request deduplication inside one signed-session and identity-secret scope, not an
 exactly-once guarantee for an external provider outcome. Losing or expiring the cookie, or

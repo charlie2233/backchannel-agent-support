@@ -70,9 +70,7 @@ def _application_table_counts(database_path: Path) -> dict[str, int]:
         ]
         return {
             table_name: int(
-                connection.execute(
-                    f'SELECT COUNT(*) FROM "{table_name}"'
-                ).fetchone()[0]
+                connection.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
             )
             for table_name in table_names
         }
@@ -269,9 +267,7 @@ def test_readiness_rejects_invalid_probe_schema_or_singleton(
                 )
                 """
             )
-            connection.execute(
-                "INSERT INTO readiness_probe (id, generation) VALUES (1, 0)"
-            )
+            connection.execute("INSERT INTO readiness_probe (id, generation) VALUES (1, 0)")
         elif failure == "wrong_primary_key":
             connection.execute("DROP TABLE readiness_probe")
             connection.execute(
@@ -282,19 +278,13 @@ def test_readiness_rejects_invalid_probe_schema_or_singleton(
                 )
                 """
             )
-            connection.execute(
-                "INSERT INTO readiness_probe (id, generation) VALUES (1, 0)"
-            )
+            connection.execute("INSERT INTO readiness_probe (id, generation) VALUES (1, 0)")
         elif failure == "extra_row":
             connection.execute("PRAGMA ignore_check_constraints = ON")
-            connection.execute(
-                "INSERT INTO readiness_probe (id, generation) VALUES (2, 1)"
-            )
+            connection.execute("INSERT INTO readiness_probe (id, generation) VALUES (2, 1)")
         elif failure == "invalid_generation":
             connection.execute("PRAGMA ignore_check_constraints = ON")
-            connection.execute(
-                "UPDATE readiness_probe SET generation = 2 WHERE id = 1"
-            )
+            connection.execute("UPDATE readiness_probe SET generation = 2 WHERE id = 1")
         elif failure == "fractional_generation":
             connection.execute("DROP TABLE readiness_probe")
             connection.execute(
@@ -305,9 +295,7 @@ def test_readiness_rejects_invalid_probe_schema_or_singleton(
                 )
                 """
             )
-            connection.execute(
-                "INSERT INTO readiness_probe (id, generation) VALUES (1, 1.5)"
-            )
+            connection.execute("INSERT INTO readiness_probe (id, generation) VALUES (1, 1.5)")
         elif failure == "generated_extra_column":
             connection.execute("DROP TABLE readiness_probe")
             connection.execute(
@@ -319,14 +307,10 @@ def test_readiness_rejects_invalid_probe_schema_or_singleton(
                 )
                 """
             )
-            connection.execute(
-                "INSERT INTO readiness_probe (id, generation) VALUES (1, 0)"
-            )
+            connection.execute("INSERT INTO readiness_probe (id, generation) VALUES (1, 0)")
         else:
             trigger_target = (
-                "readiness_probe"
-                if failure == "destructive_trigger"
-                else "ReAdInEsS_PrObE"
+                "readiness_probe" if failure == "destructive_trigger" else "ReAdInEsS_PrObE"
             )
             connection.execute(
                 """
@@ -346,9 +330,7 @@ def test_readiness_rejects_invalid_probe_schema_or_singleton(
                 """
             )
 
-    with TestClient(
-        create_app(RuntimeSettings(live_ready=False), store=store)
-    ) as client:
+    with TestClient(create_app(RuntimeSettings(live_ready=False), store=store)) as client:
         readiness = client.get("/readyz")
         health = client.get("/health")
 
@@ -357,9 +339,7 @@ def test_readiness_rejects_invalid_probe_schema_or_singleton(
     assert health.status_code == 200
     if failure in {"destructive_trigger", "case_variant_trigger"}:
         with sqlite3.connect(database_path) as connection:
-            assert connection.execute(
-                "SELECT COUNT(*) FROM usage_ledger"
-            ).fetchone()[0] == 1
+            assert connection.execute("SELECT COUNT(*) FROM usage_ledger").fetchone()[0] == 1
     elif failure in {"missing_table", "missing_row"}:
         with sqlite3.connect(database_path) as connection:
             table_exists = (
@@ -376,9 +356,7 @@ def test_readiness_rejects_invalid_probe_schema_or_singleton(
                 assert table_exists is False
             else:
                 assert table_exists is True
-                assert connection.execute(
-                    "SELECT COUNT(*) FROM readiness_probe"
-                ).fetchone()[0] == 0
+                assert connection.execute("SELECT COUNT(*) FROM readiness_probe").fetchone()[0] == 0
     store.close()
 
 
@@ -417,9 +395,7 @@ def test_store_initialization_migrates_and_seeds_legacy_database(
     migrated_store = SQLiteStore(database_path)
 
     assert _readiness_row(database_path) == (1, 0)
-    with TestClient(
-        create_app(RuntimeSettings(live_ready=False), store=migrated_store)
-    ) as client:
+    with TestClient(create_app(RuntimeSettings(live_ready=False), store=migrated_store)) as client:
         response = client.get("/readyz")
     assert response.status_code == 200
     assert _readiness_row(database_path) == (1, 1)
@@ -489,6 +465,7 @@ def test_concurrent_readiness_requests_coalesce_to_one_committed_probe(
             readiness_commit=controlled_commit,
         )
     ) as client:
+
         def request() -> int:
             return client.get("/readyz").status_code
 
@@ -536,6 +513,8 @@ def test_readiness_is_generic_503_when_configured_static_index_is_missing(
         "malformed_schema",
         "malformed_creation_ip",
         "malformed_creation_ip_value",
+        "missing_quota_execution_contract",
+        "missing_quota_legacy_provenance",
         "missing_access",
         "malformed_access",
         "access_foreign_key_violation",
@@ -563,13 +542,11 @@ def test_readiness_is_generic_503_for_sqlite_or_schema_failure(
                     connection.execute("DROP TABLE receipts")
                 elif failure == "malformed_schema":
                     connection.execute(
-                        "ALTER TABLE receipts "
-                        "RENAME COLUMN receipt_json TO broken_receipt"
+                        "ALTER TABLE receipts RENAME COLUMN receipt_json TO broken_receipt"
                     )
                 elif failure == "malformed_creation_ip":
                     connection.execute(
-                        "ALTER TABLE recovery_creations "
-                        "RENAME COLUMN ip_key TO broken_ip_key"
+                        "ALTER TABLE recovery_creations RENAME COLUMN ip_key TO broken_ip_key"
                     )
                 elif failure == "malformed_creation_ip_value":
                     connection.execute(
@@ -592,6 +569,14 @@ def test_readiness_is_generic_503_for_sqlite_or_schema_failure(
                             "2026-07-25T12:00:00+00:00",
                         ),
                     )
+                elif failure == "missing_quota_execution_contract":
+                    connection.execute(
+                        "ALTER TABLE recoveries RENAME COLUMN "
+                        "quota_execution_contract TO "
+                        "broken_quota_execution_contract"
+                    )
+                elif failure == "missing_quota_legacy_provenance":
+                    connection.execute("DROP TABLE quota_legacy_completions")
                 elif failure == "missing_access":
                     connection.execute("DROP TABLE recovery_access")
                 elif failure == "malformed_access":
@@ -625,9 +610,7 @@ def test_api_only_test_app_requires_database_but_not_a_static_index(
     tmp_path: Path,
 ) -> None:
     store = SQLiteStore(tmp_path / "api-only-ready.sqlite3")
-    with TestClient(
-        create_app(RuntimeSettings(live_ready=False), store=store)
-    ) as client:
+    with TestClient(create_app(RuntimeSettings(live_ready=False), store=store)) as client:
         response = client.get("/readyz")
 
     assert response.status_code == 200

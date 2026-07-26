@@ -872,7 +872,7 @@
                         },
                         "message": {
                           "enum": [
-                            "Recovery creation is still in progress. Retry the same start shortly."
+                            "Recovery creation is unresolved. Retry the same start shortly."
                           ],
                           "type": "string"
                         },

@@ -54,10 +54,7 @@ from server.agents.versioning import (
 from server.digest import remedy_consent_digest
 from server.logging import get_safe_logger
 from server.models import (
-    QUOTA_SDK_AUTHORIZATION_SOURCE,
-    QUOTA_SDK_PROVIDER_RESULT,
-    QUOTA_SDK_STUB_BOUNDARY,
-    QUOTA_SDK_VERIFICATION_RESULTS,
+    QUOTA_SDK_INITIAL_SUMMARY,
     ApprovalDecisionRequest,
     ApprovalDecisionResponse,
     DecisionAction,
@@ -84,9 +81,11 @@ from server.providers.quota_simulator import (
     quota_definition_digest,
 )
 from server.store import (
+    QUOTA_EXECUTION_RESULT_RECORDED,
     ApprovalDecisionClaim,
     ApprovalDecisionError,
     DurableExecution,
+    ExecutionConflictError,
     PendingApprovalEnvelope,
     ReceiptTransitionError,
     RecoveryNotFoundError,
@@ -157,6 +156,7 @@ class RecoveryOrchestrator:
         self._live_ready = live_ready
         self._model_provider = model_provider
         self._reconcile_claimed_decisions()
+        self._reconcile_quota_executions()
         self._reconcile_completed_executions()
 
     @staticmethod
@@ -198,6 +198,37 @@ class RecoveryOrchestrator:
                 )
                 raise
 
+    def _reconcile_quota_executions(self) -> None:
+        """Finalize durable quota results or conservatively seal stale claims."""
+
+        for execution in self._store.list_quota_executions_needing_reconciliation():
+            try:
+                if execution.status == "completed":
+                    self._store.finalize_completed_quota_execution(execution)
+                elif execution.status == QUOTA_EXECUTION_RESULT_RECORDED:
+                    try:
+                        self._store.quarantine_quota_execution_invariant_failure(execution)
+                    except ExecutionConflictError:
+                        current = self._store.get_quota_execution(execution.recovery_id)
+                        if current is None or current.status != "completed":
+                            raise
+                        self._store.finalize_completed_quota_execution(current)
+                    else:
+                        raise ExecutionConflictError(
+                            "Quota SDK completion was not durably validated"
+                        )
+                elif execution.status == "pending":
+                    self._store.finalize_pending_quota_execution_unknown(execution)
+                else:
+                    raise ValueError("Quota execution has no reconcilable durable state")
+            except Exception as error:
+                logger.error(
+                    "quota_execution_reconcile_failed recovery_id=%s error_type=%s",
+                    execution.recovery_id,
+                    type(error).__name__,
+                )
+                raise
+
     def _reconcile_claimed_decisions(self) -> None:
         """Complete claimed responses whose durable dispatch already committed."""
 
@@ -222,8 +253,7 @@ class RecoveryOrchestrator:
                 if pending_recovery.status is not RecoveryStatus.PENDING_APPROVAL:
                     raise
                 logger.warning(
-                    "claimed_execution_reconcile_deferred "
-                    "recovery_id=%s error_type=%s",
+                    "claimed_execution_reconcile_deferred recovery_id=%s error_type=%s",
                     claim.recovery_id,
                     type(error).__name__,
                 )
@@ -478,9 +508,20 @@ class RecoveryOrchestrator:
 
         quota_recovery_id = recovery_id or str(uuid4())
         root_trace_id = new_qa_trace_id()
+        execution_claim: DurableExecution | None = None
+
+        def persist_result(result: QuotaRecoveryResult) -> None:
+            if execution_claim is None:
+                raise RuntimeError("Quota result cannot persist before its durable dispatch claim")
+            self._store.record_completed_quota_execution(
+                execution_claim,
+                result=result,
+            )
+
         context = QuotaAgentContext(
             recovery_id=quota_recovery_id,
             provider=self._quota_provider,
+            persist_result=persist_result,
         )
         agent = build_quota_agent(context=context)
         definition_digest = quota_definition_digest(agent)
@@ -489,7 +530,7 @@ class RecoveryOrchestrator:
             scenario_id=ScenarioId.API_QUOTA,
             execution_mode=ExecutionMode.SDK_STUB,
             current_step=0,
-            current_step_summary="Deterministic API quota SDK recovery started.",
+            current_step_summary=QUOTA_SDK_INITIAL_SUMMARY,
             model_ids=[],
             root_trace_id=root_trace_id,
             model_call=False,
@@ -498,155 +539,47 @@ class RecoveryOrchestrator:
             agent_graph_version=QUOTA_AGENT_GRAPH_VERSION,
             definition_digest=definition_digest,
             session_key=session_key,
+            quota_execution_claim=True,
         )
-        sdk_result = await Runner.run(
-            agent,
-            QUOTA_START_PROMPT,
-            context=context,
-            run_config=configure_sdk_stub_tracing(
-                "Backchannel deterministic API quota recovery"
-            ),
-        )
-        if sdk_result.interruptions:
-            raise RuntimeError("Quota SDK run must not create a human interruption")
-        result = self._quota_provider.result_for(context.idempotency_key)
-        self._record_quota_trace(
-            recovery_id=quota_recovery_id,
-            root_trace_id=root_trace_id,
-            definition_digest=definition_digest,
-            result=result,
-        )
+        execution_claim = self._store.get_quota_execution(quota_recovery_id)
+        if execution_claim is None or execution_claim.status != "pending":
+            raise RuntimeError("Quota recovery did not persist its dispatch claim")
+        try:
+            sdk_result = await Runner.run(
+                agent,
+                QUOTA_START_PROMPT,
+                context=context,
+                run_config=configure_sdk_stub_tracing(
+                    "Backchannel deterministic API quota recovery"
+                ),
+            )
+            interruptions = sdk_result.interruptions
+        except BaseException:
+            durable_execution = self._store.get_quota_execution(quota_recovery_id)
+            if (
+                durable_execution is not None
+                and durable_execution.status == QUOTA_EXECUTION_RESULT_RECORDED
+            ):
+                self._store.quarantine_quota_execution_invariant_failure(durable_execution)
+            elif durable_execution is not None and durable_execution.status == "completed":
+                self._store.finalize_completed_quota_execution(durable_execution)
+            raise
+        durable_execution = self._store.get_quota_execution(quota_recovery_id)
+        if type(interruptions) is not list or interruptions:
+            if durable_execution is not None:
+                self._store.quarantine_quota_execution_invariant_failure(durable_execution)
+            raise RuntimeError("Quota SDK run must return an exact empty interruption list")
+        if durable_execution is None:
+            raise RuntimeError("Quota SDK result lost its durable execution")
+        if durable_execution.status == QUOTA_EXECUTION_RESULT_RECORDED:
+            durable_execution = self._store.validate_quota_sdk_completion(durable_execution)
+        elif durable_execution.status != "completed":
+            self._store.quarantine_quota_execution_invariant_failure(durable_execution)
+            raise RuntimeError("Quota SDK result did not persist a validated completion")
+        self._store.finalize_completed_quota_execution(durable_execution)
         return CompletedSdkRecovery(
             recovery=self._store.get_recovery(quota_recovery_id),
             sdk_result=sdk_result,
-        )
-
-    def _record_quota_trace(
-        self,
-        *,
-        recovery_id: str,
-        root_trace_id: str,
-        definition_digest: str,
-        result: QuotaRecoveryResult,
-    ) -> None:
-        """Persist the completed, already-revoked quota history and terminal receipt."""
-
-        proof = result.ceiling_proof
-        grant = result.grant
-        authority = result.authority
-        transitions: list[tuple[str, int, str, dict[str, Any]]] = [
-            (
-                "quota.pressure_detected",
-                0,
-                "Quota demand exceeds the provider-proven baseline ceiling.",
-                {
-                    "phase": "Detect",
-                    "region": grant.region,
-                    "baselineCeilingUnits": proof.baseline_ceiling_units,
-                    "requiredUnits": proof.required_units,
-                    "shortfallUnits": proof.shortfall_units,
-                },
-            ),
-            (
-                "quota.ceiling_proven",
-                1,
-                "Provider evidence proves the exact quota ceiling and shortfall.",
-                {
-                    "phase": "Prove",
-                    "providerEvidenceId": proof.provider_evidence_id,
-                    "baselineCeilingUnits": proof.baseline_ceiling_units,
-                    "requiredUnits": proof.required_units,
-                    "shortfallUnits": proof.shortfall_units,
-                },
-            ),
-            (
-                "quota.burst_selected",
-                2,
-                "A temporary US-region burst covers the proven shortfall.",
-                {
-                    "phase": "Negotiate",
-                    "permissionId": grant.permission_id,
-                    "region": grant.region,
-                    "burstUnits": grant.burst_units,
-                    "effectiveCeilingUnits": grant.effective_ceiling_units,
-                    "durationSeconds": grant.duration_seconds,
-                    "extraCostMinor": grant.extra_cost_minor,
-                    "currency": grant.currency,
-                },
-            ),
-            (
-                "quota.delegated_authority_confirmed",
-                3,
-                "Delegated policy authorizes the exact burst with zero human approvals.",
-                {
-                    "phase": "Authorize",
-                    "approvalCount": result.approval_count,
-                    "hardConstraintsSatisfied": result.hard_constraints_satisfied,
-                    "delegatedAuthoritySatisfied": result.delegated_authority_satisfied,
-                    "maximumExtraCostMinor": authority.maximum_extra_cost_minor,
-                    "maximumDurationSeconds": authority.maximum_duration_seconds,
-                    "allowedRegions": list(authority.allowed_regions),
-                },
-            ),
-            (
-                "quota.burst_executed",
-                4,
-                "The demo adapter executed and verified the temporary burst.",
-                {
-                    "phase": "Execute",
-                    "providerExecution": True,
-                    "executionVerified": result.execution_verified,
-                    "effectiveCeilingUnits": grant.effective_ceiling_units,
-                },
-            ),
-        ]
-        for event_type, step, summary, data in transitions:
-            self._store.record_transition(
-                recovery_id,
-                status=RecoveryStatus.IN_PROGRESS,
-                current_step=step,
-                current_step_summary=summary,
-                event_type=event_type,
-                event_data=data,
-            )
-
-        receipt = RecoveryReceipt(
-            recoveryId=recovery_id,
-            executionMode=ExecutionMode.SDK_STUB,
-            status="completed",
-            simulated=True,
-            providerExecution=True,
-            modelCall=False,
-            modelIds=[],
-            rootTraceId=root_trace_id,
-            sdkVersion=self._version_policy.sdk_version,
-            protocolVersion=QUOTA_PROTOCOL_VERSION,
-            agentGraphVersion=QUOTA_AGENT_GRAPH_VERSION,
-            definitionDigest=definition_digest,
-            boundary=QUOTA_SDK_STUB_BOUNDARY,
-            providerResult=QUOTA_SDK_PROVIDER_RESULT,
-            authorizationSource=QUOTA_SDK_AUTHORIZATION_SOURCE,
-            verificationResults=list(QUOTA_SDK_VERIFICATION_RESULTS),
-            approvalCount=0,
-        )
-        self._store.record_transition(
-            recovery_id,
-            status=RecoveryStatus.COMPLETED,
-            current_step=5,
-            current_step_summary=(
-                "Execution verified, temporary permission revoked, and receipt sealed."
-            ),
-            event_type="quota.receipt_sealed",
-            event_data={
-                "phase": "Verify & seal",
-                "approvalCount": result.approval_count,
-                "providerExecution": True,
-                "executionVerified": result.execution_verified,
-                "permissionRevoked": result.permission_revoked,
-                "restoredCeilingUnits": result.restored_ceiling_units,
-                "summary": "Verified quota recovery evidence sealed.",
-            },
-            receipt=receipt,
         )
 
     def _complete_committed_claim(

@@ -153,7 +153,20 @@ def test_quota_sdk_stub_completes_without_interruptions_and_seals_receipt(
     with sqlite3.connect(database_path) as connection:
         assert connection.execute("SELECT COUNT(*) FROM pending_approvals").fetchone() == (0,)
         assert connection.execute("SELECT COUNT(*) FROM approval_decisions").fetchone() == (0,)
-        assert connection.execute("SELECT COUNT(*) FROM executions").fetchone() == (0,)
+        assert connection.execute(
+            """
+            SELECT status, provider_execution, request_digest IS NOT NULL,
+                   tool_call_id, remedy_digest, result_json IS NOT NULL
+            FROM executions
+            """
+        ).fetchone() == (
+            "completed",
+            1,
+            1,
+            "recover-api-quota-demo",
+            None,
+            1,
+        )
         assert connection.execute("SELECT COUNT(*) FROM receipts").fetchone() == (1,)
 
 

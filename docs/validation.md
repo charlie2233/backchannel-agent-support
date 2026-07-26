@@ -50,7 +50,8 @@ reset preserves cooldown/budget history, and retention cleanup cascades access r
 The creation-idempotency suite proves strict bounded request IDs, session-scoped HMAC
 storage with no raw-token persistence, one SDK/live owner across sequential, concurrent, and
 restart retries, conflict before admission or budget accounting, fixed pending retry metadata,
-response-loss replay, permanent no-rerun handling for uncertain or stale starts, safe
+response-loss replay, pending-before-stale and permanent no-rerun handling for uncertain or stale
+starts, safe
 abandonment after a known live admission denial, and canonical replay sharing across sessions.
 It also proves canonical replay integrity is revalidated on exact retry; bare or tampered
 status/receipt/event evidence cannot become ready; authoritative terminal evidence can be
@@ -129,6 +130,42 @@ keys make replay ambiguous. Trigger-injected insert and update failures roll bac
 authorization or execution evidence. A sole completed exact-key result still replays after
 finalization and consent expiry. This is durable SQLite demo-adapter evidence, not exactly-once
 proof for an external provider side effect.
+The quota restart-durability suite proves that a provider result is stored as
+`result_recorded` inside the SDK tool boundary before terminal trace persistence. An exact empty
+SDK interruption list then writes a separate `completed` validation marker; a fresh runtime
+reconstructs the exact seven-event completion without redispatch only after that marker exists.
+If only the pre-dispatch claim survived, two concurrent fresh store/orchestrator instances
+converge on one `outcome_unknown` event and receipt with zero provider calls, no recorded human
+approval, and no execution, verification, or revocation assertion. Exact owner POST retry,
+snapshot, receipt, and SSE reads return the same recovered resource while a foreign session
+receives generic 404. For the no-result restart path, an injected receipt insert failure proves
+the `outcome_unknown` execution transition, terminal event, receipt, snapshot, and creation-claim
+changes roll back together before a later clean reconciliation. For a validated completed tool
+call, the same failure proves that the durable result remains intact while all later
+terminal-evidence changes roll back together. Counterexample tests reject changed creation
+fingerprints, future creation or execution chronology, a pending execution attached to a
+terminal unknown bundle, new marked rows with deleted executions, pre-contract in-progress
+rows, and in-progress rows with terminal execution state. A pre-marker schema migration
+preserves only a complete legacy terminal completion whose exact recovery fingerprint was
+recorded in the same savepoint that adds the marker column, including ready claims with later
+timestamps and exact same-owner promotion of lagging started or unknown claims. An injected
+fingerprint failure proves table creation and marker addition roll back so the next open can
+retry. Downgrading a current marker-one completion after deleting its execution remains invalid.
+Deleting a marker-one terminal execution also makes both fresh startup and `/readyz` fail
+closed before public reads. Deterministic
+barriers prove that reconciliation preflight reads one SQLite snapshot and that an original
+runtime accepts a validated result finalized concurrently by a fresh runtime without
+duplicating terminal events. SDK invariant mutations cover a truthy human interruption,
+missing or false-shaped interruption fields, and an exception after result persistence. Each
+quarantines the retained result and changes an exact started outer creation to unknown in the
+same transaction, without a zero-approval terminal claim; a trigger-injected creation update
+failure rolls both changes back. Restart then fails closed unchanged. A fresh runtime racing
+before SDK validation likewise cannot publish
+`result_recorded`; it quarantines that evidence for operator review. A second barrier freezes
+the restart's stale `result_recorded` snapshot while the original runtime validates and
+finalizes. The quarantine compare-and-swap then preserves the canonical completion rather than
+retracting it. This is deterministic SQLite and demo-adapter evidence in the
+documented single-process runtime, not proof of a real quota provider or distributed lease.
 The event-stream admission suites prove atomic global/per-recovery caps under threaded stress,
 idempotent cleanup, finite exact capacity framing without a polling loop, privacy and cursor
 ordering while saturated, expiry-before-admission, replay preservation, and reacquisition after

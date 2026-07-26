@@ -169,8 +169,7 @@ describe("createRecovery public errors", () => {
     },
     {
       code: "creation_pending",
-      message:
-        "Recovery creation is still in progress. Retry the same start shortly.",
+      message: "Recovery creation is unresolved. Retry the same start shortly.",
     },
     {
       code: "creation_outcome_unknown",
@@ -682,6 +681,79 @@ describe("getReceipt runtime validation", () => {
     await expect(getReceipt(quotaReceipt.recoveryId)).resolves.toEqual(quotaReceipt);
   });
 
+  it("accepts canonical zero-approval SDK quota uncertainty evidence", async () => {
+    const unknownQuotaReceipt = {
+      ...validReceipt,
+      status: "outcome_unknown",
+      providerExecution: null,
+      approvalCount: 0,
+      approvedRemedyDigest: null,
+      boundary:
+        "Deterministic Agents SDK stub and demo quota adapter only; no OpenAI model call or real quota change.",
+      providerResult:
+        "Demo quota dispatch may have begun; its outcome could not be confirmed.",
+      authorizationSource:
+        "Predelegated quota authority existed, but restart evidence cannot confirm execution.",
+      verificationResults: [
+        "Recovery creation was durably marked started.",
+        "No human approval was recorded.",
+        "No complete quota receipt was committed before restart.",
+        "Provider execution, verification, and permission revocation are not asserted.",
+        "Startup reconciliation did not redispatch the quota operation.",
+        "Uncertain quota outcome receipt sealed.",
+      ],
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify(unknownQuotaReceipt), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+
+    await expect(getReceipt(unknownQuotaReceipt.recoveryId)).resolves.toEqual(
+      unknownQuotaReceipt,
+    );
+  });
+
+  it("rejects drift in canonical SDK quota uncertainty evidence", async () => {
+    const changedUnknownQuotaReceipt = {
+      ...validReceipt,
+      status: "outcome_unknown",
+      providerExecution: null,
+      approvalCount: 0,
+      approvedRemedyDigest: null,
+      boundary:
+        "Deterministic Agents SDK stub and demo quota adapter only; no OpenAI model call or real quota change.",
+      providerResult: "Quota outcome was probably fine.",
+      authorizationSource:
+        "Predelegated quota authority existed, but restart evidence cannot confirm execution.",
+      verificationResults: [
+        "Recovery creation was durably marked started.",
+        "No human approval was recorded.",
+        "No complete quota receipt was committed before restart.",
+        "Provider execution, verification, and permission revocation are not asserted.",
+        "Startup reconciliation did not redispatch the quota operation.",
+        "Uncertain quota outcome receipt sealed.",
+      ],
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify(changedUnknownQuotaReceipt), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+
+    await expect(
+      getReceipt(changedUnknownQuotaReceipt.recoveryId),
+    ).rejects.toThrow("Receipt response did not match the receipt contract");
+  });
+
   it("accepts a canonical unknown-outcome receipt for one claimed approval", async () => {
     const unknownReceipt = {
       ...validReceipt,
@@ -712,6 +784,35 @@ describe("getReceipt runtime validation", () => {
     );
 
     await expect(getReceipt(unknownReceipt.recoveryId)).resolves.toEqual(unknownReceipt);
+  });
+
+  it("preserves zero-approval SDK hotel uncertainty evidence", async () => {
+    const unknownHotelReceipt = {
+      ...validReceipt,
+      status: "outcome_unknown",
+      providerExecution: null,
+      providerResult: "Hotel provider outcome remains unknown.",
+      authorizationSource: "No provider outcome is asserted.",
+      verificationResults: [
+        "No human approval was recorded.",
+        "Provider execution is not asserted.",
+      ],
+      approvalCount: 0,
+      approvedRemedyDigest: null,
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify(unknownHotelReceipt), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+
+    await expect(getReceipt(unknownHotelReceipt.recoveryId)).resolves.toEqual(
+      unknownHotelReceipt,
+    );
   });
 
   it.each([
