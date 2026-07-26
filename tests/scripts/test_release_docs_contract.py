@@ -37,8 +37,7 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     )
 
     assert manifest["sourceCommit"] in current_evidence
-    assert "4a317e563c8d45bc45f676e465b01780b2b0be78" in current_evidence
-    assert "1289b773abe92bb2f5842f77e3c7f50c432352f4" in current_evidence
+    assert "55af1e6d68f11542b1c5cc5e3465b87dc158ec08" in current_evidence
     assert runtime_input["digest"] in current_evidence
     assert f"{len(runtime_input['paths'])} runtime paths" in current_evidence
     assert f"{browser['name']} {browser['version']}" in current_evidence
@@ -57,30 +56,21 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
 
     assert "`npm run capture:judge` reported `29 passed`" in current_evidence
     assert (
-        "`uv run pytest -q tests/domain/test_cleanup.py` reported `15 passed`"
+        "Five PNGs changed and `mobile-consent.png` remained byte-identical"
         in current_evidence
     )
-    for evidence_id in ("30174822102", "89721793096", "89721989116"):
-        assert evidence_id in current_evidence
-    assert "Both job annotation APIs returned `[]`" in current_evidence
-    for observed_current_count in (
-        "29 capture contracts",
-        "292 web tests",
-        "19 web test files / 292 tests",
-        "550 Python tests",
-        "strict MyPy over 34 source files",
+    for absent_current_claim in (
+        "No current Task28 GitHub Actions run or job has been observed.",
+        "No current Task28 hosted container result has been observed.",
     ):
-        assert observed_current_count in current_evidence
-    for hosted_container_fact in (
-        "`10001:10001`",
-        "`deterministic-qa`",
-        "`deployed-readonly`",
-    ):
-        assert hosted_container_fact in current_evidence
+        assert absent_current_claim in current_evidence
     assert "CI did not execute the browser capture" in current_evidence
-    assert "No Task25 hosted GitHub Actions run or job" not in current_evidence
-    assert "No current Task25 hosted container result" not in current_evidence
 
+    immediate_prior_capture = "742e3caf2af5a9cce3cd8de242cf113424e8528f"
+    immediate_prior_activation = "4a317e563c8d45bc45f676e465b01780b2b0be78"
+    immediate_prior_successor = "1289b773abe92bb2f5842f77e3c7f50c432352f4"
+    immediate_prior_run = "30174822102"
+    immediate_prior_jobs = ("89721793096", "89721989116")
     prior_capture = "7d9128a8171ddb4978d8f7b0debb9effce997e27"
     prior_activation = "576ba5e3dfd3d13b9f797c1c516c2352c4e40688"
     prior_run = "30162644778"
@@ -91,6 +81,14 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     for historical_identifier in (
         "85e1e8ec9147242adca311c4ba10ea8c1c3008dc",
         "85e1e8e…",
+        immediate_prior_capture,
+        "742e3ca…",
+        immediate_prior_activation,
+        "4a317e5…",
+        immediate_prior_successor,
+        "1289b77…",
+        immediate_prior_run,
+        *immediate_prior_jobs,
         prior_capture,
         "7d9128a…",
         prior_activation,
@@ -104,6 +102,14 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     ):
         assert historical_identifier not in current_evidence
     for required_historical_identifier in (
+        immediate_prior_capture,
+        "742e3ca…",
+        immediate_prior_activation,
+        "4a317e5…",
+        immediate_prior_successor,
+        "1289b77…",
+        immediate_prior_run,
+        *immediate_prior_jobs,
         prior_capture,
         "7d9128a…",
         prior_activation,
@@ -128,6 +134,15 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     (
         "85e1e8ec9147242adca311c4ba10ea8c1c3008dc",
         "85e1e8e…",
+        "742e3caf2af5a9cce3cd8de242cf113424e8528f",
+        "742e3ca…",
+        "4a317e563c8d45bc45f676e465b01780b2b0be78",
+        "4a317e5…",
+        "1289b773abe92bb2f5842f77e3c7f50c432352f4",
+        "1289b77…",
+        "30174822102",
+        "89721793096",
+        "89721989116",
         "7d9128a8171ddb4978d8f7b0debb9effce997e27",
         "7d9128a…",
         "576ba5e3dfd3d13b9f797c1c516c2352c4e40688",
@@ -348,6 +363,7 @@ def test_release_docs_cover_architecture_protocol_and_evidence_boundaries() -> N
     assert "`codex/backchannel-v0.3`" in validation
     assert "## Current capture and evidence activation" in validation
     assert "## Superseded historical hosted baseline" in validation
+    assert "### Immediate prior capture and hosted baseline (superseded)" in validation
     assert "### Prior capture and hosted baseline (superseded)" in validation
     assert "### Older hosted baseline (superseded)" in validation
     assert (

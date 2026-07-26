@@ -9,56 +9,36 @@ results from any sibling branch.
 ## Current capture and evidence activation
 
 - Capture source / frozen runtime:
-  `742e3caf2af5a9cce3cd8de242cf113424e8528f`
+  `8823d29d7de93d44f4843a2fa4db1adec4e452bd`
 - Evidence activation:
-  `4a317e563c8d45bc45f676e465b01780b2b0be78`
-- Hosted validation successor:
-  `1289b773abe92bb2f5842f77e3c7f50c432352f4`
-- GitHub Actions:
-  [run 30174822102](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30174822102)
-- Result: `verify`
-  ([job 89721793096](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30174822102/job/89721793096))
-  reported `PASS`; `container-smoke`
-  ([job 89721989116](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30174822102/job/89721989116))
-  reported `PASS`. Both job annotation APIs returned `[]`.
+  `55af1e6d68f11542b1c5cc5e3465b87dc158ec08`
 - `npm run capture:judge` reported `29 passed` against the clean capture source
   in Google Chrome 150.0.7871.186 and produced six manifest-bound PNGs at
   1440×1024 and 390×844.
-- `uv run pytest -q tests/domain/test_cleanup.py` reported `15 passed` on the
-  capture source.
-- The local exact-parent gate on `1289b77…` covered 29 capture contracts,
-  offline manifest verification, 292 web tests, 550 Python tests, TypeScript/Vite,
-  Ruff, strict MyPy over 34 source files, stub smoke, local deterministic-production
-  and deployed-readonly smokes, OpenAPI freshness, history-aware secret scan, Node
-  syntax, and diff checks.
-- Hosted `verify` ran the canonical check: 29 capture contracts,
-  `capture_manifest_valid`, 19 web test files / 292 tests, Ruff, strict MyPy over
-  34 source files, and 550 Python tests; it also ran stub smoke, OpenAPI verification,
-  and the history-aware secret scan.
-- Hosted `container-smoke` built the packaged Docker image, confirmed image user
-  `10001:10001`, and passed the offline `deterministic-qa` and `deployed-readonly`
-  profiles.
+- Five PNGs changed and `mobile-consent.png` remained byte-identical against the
+  immediately prior capture set.
+- No current Task28 GitHub Actions run or job has been observed.
+- No current Task28 hosted container result has been observed.
 
 ## Per-SHA proof matrix
 
 | Lane | Exact evidence | Status and boundary |
 | --- | --- | --- |
-| Local source and tests | Exact-parent gate above | **Verified locally** on hosted successor `1289b77…`; not external proof |
-| Local final-build captures | [`docs/assets/final/manifest.json`](assets/final/manifest.json); six provenance-checked PNGs under [`docs/assets/final`](assets/final) | **Verified locally** on capture source `742e3ca…` in Google Chrome at 1440×1024 and 390×844; not container, deployment, live OpenAI, or release proof |
+| Local source and tests | Capture source and `capture:judge` result above | **Verified locally for the capture contract** on source `8823d29…`; a broader exact-tree or hosted source gate is not claimed in this pre-CI checkpoint |
+| Local final-build captures | [`docs/assets/final/manifest.json`](assets/final/manifest.json); six provenance-checked PNGs under [`docs/assets/final`](assets/final) | **Verified locally** on capture source `8823d29…` in Google Chrome at 1440×1024 and 390×844; not container, deployment, live OpenAI, or release proof |
 | Live OpenAI | [`live-validation.md`](live-validation.md) records only a redacted invalid-key result | **Blocked / Unverified**; no valid `OPENAI_API_KEY`, one-run trace, or three consecutive successes |
 | Local Docker | No Docker-family runtime is installed on this Mac | **Unverified locally** |
-| GitHub CI/container | Run 30174822102; `verify` and packaged `container-smoke` | **Verified** on successor `1289b77…`; both jobs passed with empty annotations, but this is not browser capture or public deployment proof |
+| GitHub CI/container | No current Task28 run or job result | **Unverified** for this source/capture checkpoint |
 | Public deployment | No public application origin | **Blocked / Unverified** |
 | Tag/release | No release tag or GitHub release | **Blocked / Unverified** |
 
 ## Hosted container evidence boundary
 
-The current hosted container job proves packaged image build, non-root image user
-`10001:10001`, and two offline packaged smoke profiles: `deterministic-qa` and
-`deployed-readonly`. It then cleans up. It does not prove local Docker, long-lived
-`/data` persistence, target-host durability/networking, abrupt host-loss or backup
-restoration, concurrent multi-container SQLite, a public browser origin, or live
-OpenAI.
+No current Task28 hosted container result has been observed. Historical container
+results below do not transfer to this source/capture checkpoint. They also do not
+prove local Docker, long-lived `/data` persistence, target-host
+durability/networking, abrupt host-loss or backup restoration, concurrent
+multi-container SQLite, a public browser origin, or live OpenAI.
 
 ## Capture contract
 
@@ -69,21 +49,29 @@ validates API and DOM provenance before each viewport screenshot.
 
 The tracked [`docs/assets/final/manifest.json`](assets/final/manifest.json) is schema
 v1 and binds the full capture source SHA above, runtime SHA-256 digest
-`1bde9788d551e5f76b895b977ad69291c6b1f44d26095b242d531f1bf289418c`
+`4ad336eaf2d304906e939fc0eb433c6633519e73d9855207ae72c4daea42eed2`
 across 83 runtime paths, capture profile `keyless_sdk_stub`, environment
 `en-US` / `UTC` / `reduce` / `light`, and all six artifact hashes, states, and
 dimensions.
 
-Capture source `742e3ca…`; evidence activation `4a317e5…`. The browser capture was
+Capture source `8823d29…`; evidence activation `55af1e6…`. The browser capture was
 produced against the clean source SHA, and the activation successor added the captured
-files. Run 30174822102 validates hosted successor `1289b77…`.
-CI did not execute the browser capture. The six images prove only the local keyless
+files. CI did not execute the browser capture. The six images prove only the local keyless
 SDK-stub final build; they do not prove live OpenAI, a public deployment, a container,
 a release, or a real provider mutation.
 
 A later documentation-only successor does not inherit a new browser claim. Keep the
-capture lane bound to `742e3ca…` unless `npm run capture:judge` is observed again on a
+capture lane bound to `8823d29…` unless `npm run capture:judge` is observed again on a
 different clean frozen tree.
+
+## Request-body availability proof boundary
+
+The capture source rejects framed `GET` and `HEAD` requests before body reads,
+preserves ordinary bodyless receives for downstream disconnect/SSE handling, and
+bounds allowed-body pre-buffering with a configurable cooperative deadline. Those
+are source and raw-ASGI contract properties. The six screenshots do not prove
+adversarial transport timing, public-host availability, or hard cancellation of a
+non-cooperative dependency.
 
 ## Creation-admission proof boundary
 
@@ -92,7 +80,7 @@ and global limits. Its tests cover atomic race admission, rollback on an injecte
 second/third write failure, validation-before-charge, live-ledger separation, reset
 and restart persistence, bounded retention, and the generic `429`/`Retry-After`
 contract. This source/test evidence does not change the final-build capture lane from
-`742e3ca…` and is not public deployment, live OpenAI, container-host durability, tag,
+`8823d29…` and is not public deployment, live OpenAI, container-host durability, tag,
 or release proof.
 
 ## Live deadline proof boundary
@@ -108,6 +96,40 @@ source/test evidence only; it is not a real OpenAI trace, hard
 process-termination proof, public deployment, or release claim.
 
 ## Superseded historical hosted baseline
+
+### Immediate prior capture and hosted baseline (superseded)
+
+- Prior capture source:
+  `742e3caf2af5a9cce3cd8de242cf113424e8528f`
+- Prior evidence activation:
+  `4a317e563c8d45bc45f676e465b01780b2b0be78`
+- Prior hosted validation successor:
+  `1289b773abe92bb2f5842f77e3c7f50c432352f4`
+- Prior GitHub Actions:
+  [run 30174822102](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30174822102),
+  including `verify`
+  ([job 89721793096](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30174822102/job/89721793096))
+  and `container-smoke`
+  ([job 89721989116](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30174822102/job/89721989116)).
+- Both prior jobs passed and both job annotation APIs returned `[]`.
+- The prior local exact-parent gate on `1289b77…` covered 29 capture contracts,
+  offline manifest verification, 292 web tests, 550 Python tests, TypeScript/Vite,
+  Ruff, strict MyPy over 34 source files, stub smoke, local
+  deterministic-production and deployed-readonly smokes, OpenAPI freshness,
+  history-aware secret scan, Node syntax, and diff checks.
+- Prior hosted `verify` ran 29 capture contracts, `capture_manifest_valid`, 19 web
+  test files / 292 tests, Ruff, strict MyPy over 34 source files, 550 Python tests,
+  stub smoke, OpenAPI verification, and the history-aware secret scan.
+- Prior hosted `container-smoke` built the packaged Docker image, confirmed image
+  user `10001:10001`, and passed two offline packaged smoke profiles:
+  `deterministic-qa` and `deployed-readonly`.
+- The prior manifest digest was
+  `1bde9788d551e5f76b895b977ad69291c6b1f44d26095b242d531f1bf289418c`
+  across 83 runtime paths.
+
+Prior capture source `742e3ca…`; activation `4a317e5…`; hosted successor
+`1289b77…`. This evidence remains truthful historical proof, but is superseded and
+is not current Task28 source, capture, hosted CI, or container proof.
 
 ### Prior capture and hosted baseline (superseded)
 
