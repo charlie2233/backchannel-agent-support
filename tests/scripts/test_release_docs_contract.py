@@ -69,6 +69,9 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     immediate_prior_capture = "742e3caf2af5a9cce3cd8de242cf113424e8528f"
     immediate_prior_activation = "4a317e563c8d45bc45f676e465b01780b2b0be78"
     immediate_prior_successor = "1289b773abe92bb2f5842f77e3c7f50c432352f4"
+    immediate_prior_digest = (
+        "1bde9788d551e5f76b895b977ad69291c6b1f44d26095b242d531f1bf289418c"
+    )
     immediate_prior_run = "30174822102"
     immediate_prior_jobs = ("89721793096", "89721989116")
     prior_capture = "7d9128a8171ddb4978d8f7b0debb9effce997e27"
@@ -87,6 +90,7 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
         "4a317e5…",
         immediate_prior_successor,
         "1289b77…",
+        immediate_prior_digest,
         immediate_prior_run,
         *immediate_prior_jobs,
         prior_capture,
@@ -108,6 +112,7 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
         "4a317e5…",
         immediate_prior_successor,
         "1289b77…",
+        immediate_prior_digest,
         immediate_prior_run,
         *immediate_prior_jobs,
         prior_capture,
@@ -140,6 +145,7 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
         "4a317e5…",
         "1289b773abe92bb2f5842f77e3c7f50c432352f4",
         "1289b77…",
+        "1bde9788d551e5f76b895b977ad69291c6b1f44d26095b242d531f1bf289418c",
         "30174822102",
         "89721793096",
         "89721989116",
