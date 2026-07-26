@@ -28,9 +28,6 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     browser = manifest["browser"]
     environment = manifest["environment"]
     artifacts = manifest["artifacts"]
-    current_hosted_sha = "117e4ebe40efea36f89bbb737143de9c918f938f"
-    current_run = "30182741263"
-    current_jobs = ("89742014836", "89742159778")
 
     historical_heading = "## Superseded historical hosted baseline"
     assert historical_heading in validation
@@ -41,8 +38,22 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     normalized_current_evidence = " ".join(current_evidence.split())
 
     assert manifest["sourceCommit"] in current_evidence
-    assert "55af1e6d68f11542b1c5cc5e3465b87dc158ec08" in current_evidence
+    current_activation = "cca97a8e75d52a26889d3bbb66740756041d9caf"
+    current_failed_run = "30206582233"
+    current_failed_jobs = ("89805619343", "89805788728")
+    assert current_activation in current_evidence
     assert runtime_input["digest"] in current_evidence
+    for current_identifier in (
+        manifest["sourceCommit"],
+        "8d0a896…",
+        current_activation,
+        "cca97a8…",
+        runtime_input["digest"],
+        "a1e0eca…",
+        current_failed_run,
+        *current_failed_jobs,
+    ):
+        assert current_identifier not in historical_evidence
     assert f"{len(runtime_input['paths'])} runtime paths" in current_evidence
     assert f"{browser['name']} {browser['version']}" in current_evidence
     browser_mode = "headless" if browser["headless"] else "headed"
@@ -63,37 +74,55 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
         "Five PNGs changed and `mobile-consent.png` remained byte-identical"
         in current_evidence
     )
-    for current_identifier in (
-        current_hosted_sha,
-        current_run,
-        *current_jobs,
-    ):
-        assert current_identifier in current_evidence
-        assert current_identifier not in historical_evidence
-    assert "Both job annotation APIs returned `[]`" in current_evidence
     for observed_current_fact in (
-        "29 capture contracts",
-        "`capture_manifest_valid`",
+        "two consecutive focused Task29 matrices passed 133 tests",
         "19 web test files / 292 tests",
         "Ruff",
-        "strict MyPy over 34 source files",
-        "568 Python tests passed with 1 warning",
-        "deterministic stub smoke",
-        "OpenAPI check",
+        "strict MyPy over 35 source files",
+        "622 Python tests with 1 warning",
+        "Stub",
+        "single-process production smokes",
+        "OpenAPI freshness",
         "history-aware secret scan",
-        "packaged Docker image",
-        "`10001:10001`",
-        "network-none",
-        "`deterministic-qa`",
-        "`deployed-readonly`",
+        "diff checks",
     ):
         assert observed_current_fact in normalized_current_evidence
+    for absent_current_claim in (
+        "No green current Task29 GitHub Actions run or job has been observed.",
+        "No current Task29 packaged container smoke was executed.",
+    ):
+        assert absent_current_claim in current_evidence
+    for observed_failed_ci_fact in (
+        current_failed_run,
+        *current_failed_jobs,
+        "reported `FAILURE`",
+        "reported `SKIPPED`",
+        "`1 failed, 621 passed`",
+    ):
+        assert observed_failed_ci_fact in current_evidence
+    assert set(re.findall(r"/actions/runs/(\d+)", current_evidence)) == {
+        current_failed_run
+    }
+    assert set(re.findall(r"/job/(\d+)", current_evidence)) == set(
+        current_failed_jobs
+    )
+    for forbidden_current_claim in (
+        "Hosted validation successor:",
+        "reported `PASS`",
+        "Both job annotation APIs returned `[]`",
+        "Hosted `verify`",
+        "Hosted `container-smoke`",
+        "**Verified in hosted CI**",
+        "**Verified** on successor",
+    ):
+        assert forbidden_current_claim not in current_evidence
     for unproved_current_boundary in (
-        "does not prove local Docker",
+        "do not prove local Docker",
         "public deployment or browser URL",
         "live OpenAI",
         "real provider execution",
         "container replacement or restart",
+        "long-lived `/data` volume persistence",
         "abrupt host-loss or backup",
         "concurrent multi-container SQLite",
         "tag or release",
@@ -101,6 +130,14 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
         assert unproved_current_boundary in normalized_current_evidence
     assert "CI did not execute the browser capture" in current_evidence
 
+    request_boundary_capture = "8823d29d7de93d44f4843a2fa4db1adec4e452bd"
+    request_boundary_activation = "55af1e6d68f11542b1c5cc5e3465b87dc158ec08"
+    request_boundary_successor = "117e4ebe40efea36f89bbb737143de9c918f938f"
+    request_boundary_digest = (
+        "4ad336eaf2d304906e939fc0eb433c6633519e73d9855207ae72c4daea42eed2"
+    )
+    request_boundary_run = "30182741263"
+    request_boundary_jobs = ("89742014836", "89742159778")
     immediate_prior_capture = "742e3caf2af5a9cce3cd8de242cf113424e8528f"
     immediate_prior_activation = "4a317e563c8d45bc45f676e465b01780b2b0be78"
     immediate_prior_successor = "1289b773abe92bb2f5842f77e3c7f50c432352f4"
@@ -119,6 +156,15 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     for historical_identifier in (
         "85e1e8ec9147242adca311c4ba10ea8c1c3008dc",
         "85e1e8e…",
+        request_boundary_capture,
+        "8823d29…",
+        request_boundary_activation,
+        "55af1e6…",
+        request_boundary_successor,
+        "117e4eb…",
+        request_boundary_digest,
+        request_boundary_run,
+        *request_boundary_jobs,
         immediate_prior_capture,
         "742e3ca…",
         immediate_prior_activation,
@@ -141,6 +187,15 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     ):
         assert historical_identifier not in current_evidence
     for required_historical_identifier in (
+        request_boundary_capture,
+        "8823d29…",
+        request_boundary_activation,
+        "55af1e6…",
+        request_boundary_successor,
+        "117e4eb…",
+        request_boundary_digest,
+        request_boundary_run,
+        *request_boundary_jobs,
         immediate_prior_capture,
         "742e3ca…",
         immediate_prior_activation,
@@ -174,6 +229,16 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     (
         "85e1e8ec9147242adca311c4ba10ea8c1c3008dc",
         "85e1e8e…",
+        "8823d29d7de93d44f4843a2fa4db1adec4e452bd",
+        "8823d29…",
+        "55af1e6d68f11542b1c5cc5e3465b87dc158ec08",
+        "55af1e6…",
+        "117e4ebe40efea36f89bbb737143de9c918f938f",
+        "117e4eb…",
+        "4ad336eaf2d304906e939fc0eb433c6633519e73d9855207ae72c4daea42eed2",
+        "30182741263",
+        "89742014836",
+        "89742159778",
         "742e3caf2af5a9cce3cd8de242cf113424e8528f",
         "742e3ca…",
         "4a317e563c8d45bc45f676e465b01780b2b0be78",
@@ -216,13 +281,15 @@ def test_validation_rejects_superseded_provenance_in_current_evidence(
 @pytest.mark.parametrize(
     "current_identifier",
     (
-        "117e4ebe40efea36f89bbb737143de9c918f938f",
-        "30182741263",
-        "89742014836",
-        "89742159778",
+        "8d0a896c753c4c60894301a20a3866bbbfa1e76f",
+        "8d0a896…",
+        "cca97a8e75d52a26889d3bbb66740756041d9caf",
+        "cca97a8…",
+        "a1e0ecaf69926044419e29c7359102188c80550834ddb9351021aae411705054",
+        "a1e0eca…",
     ),
 )
-def test_validation_rejects_current_hosted_provenance_in_historical_evidence(
+def test_validation_rejects_current_capture_provenance_in_historical_evidence(
     current_identifier: str,
 ) -> None:
     validation = _read("docs/validation.md")
@@ -230,6 +297,36 @@ def test_validation_rejects_current_hosted_provenance_in_historical_evidence(
     polluted_validation = validation.replace(
         historical_heading,
         f"{historical_heading}\n\nInjected current provenance: {current_identifier}",
+        1,
+    )
+
+    with pytest.raises(AssertionError):
+        _assert_validation_matches_current_capture(polluted_validation)
+
+
+@pytest.mark.parametrize(
+    "contradictory_current_claim",
+    (
+        "- Hosted validation successor:\n  `deadbeefdeadbeefdeadbeefdeadbeefdeadbeef`",
+        (
+            "- GitHub Actions:\n"
+            "  [run 999999](https://github.com/example/repo/actions/runs/999999)"
+        ),
+        "- Result: `verify` reported `PASS`; `container-smoke` reported `PASS`.",
+        (
+            "| GitHub CI/container | Run 999999 | **Verified** on successor "
+            "`deadbee…` |"
+        ),
+    ),
+)
+def test_validation_rejects_hosted_success_claims_while_current_ci_is_unverified(
+    contradictory_current_claim: str,
+) -> None:
+    validation = _read("docs/validation.md")
+    historical_heading = "## Superseded historical hosted baseline"
+    polluted_validation = validation.replace(
+        historical_heading,
+        f"{contradictory_current_claim}\n\n{historical_heading}",
         1,
     )
 
