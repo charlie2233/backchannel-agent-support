@@ -293,6 +293,14 @@ CREATE TABLE IF NOT EXISTS recovery_creations (
 CREATE INDEX IF NOT EXISTS recovery_creations_status_updated_idx
 ON recovery_creations(status, updated_at);
 
+CREATE TABLE IF NOT EXISTS expiry_scan_state (
+    candidate_kind TEXT PRIMARY KEY CHECK (
+        candidate_kind IN ('oldest', 'claimed', 'untouched')
+    ),
+    last_expiry TEXT NOT NULL,
+    last_recovery_id TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS readiness_probe (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     generation INTEGER NOT NULL CHECK (generation IN (0, 1))
@@ -485,6 +493,22 @@ class RemedyConsentRecord:
             or policy.delegated_authority_satisfied is not True
         ):
             raise ValueError("Remedy consent is not policy eligible")
+
+
+@dataclass(frozen=True, slots=True)
+class _HotelApprovalEvidence:
+    """Canonical immutable foundation shared by active and expired hotel reads."""
+
+    pending: PendingApprovalEnvelope
+    consent: RemedyConsentRecord
+    pending_row: sqlite3.Row
+    remedy_row: sqlite3.Row
+    claim: ApprovalDecisionClaim | None
+    decision_row: sqlite3.Row | None
+    execution_rows: tuple[sqlite3.Row, ...]
+    approval_requested_at: datetime
+    pending_updated_at: datetime
+    claimed_at: datetime | None
 
 
 class SQLiteStore:
@@ -2264,37 +2288,340 @@ class SQLiteStore:
             specs=specs,
         )
 
-    def _creation_pending_matches_recovery(
+    def _hotel_approval_evidence(
         self,
         connection: sqlite3.Connection,
         *,
         row: sqlite3.Row,
-        recovery_id: str,
-        pending_view: PendingApprovalView | None,
-        claimed_view: ClaimedDecisionView | None,
-    ) -> bool:
-        if (pending_view is None) == (claimed_view is None):
-            return False
-        pending_row = connection.execute(
+        events: list[RecoveryEvent],
+    ) -> _HotelApprovalEvidence | None:
+        """Load the immutable approval facts shared by active and expiry evidence."""
+
+        recovery_id = cast(str, row["id"])
+        expected_approval_data: dict[str, JsonValue] = {
+            "phase": "Authorize",
+            "providerExecution": False,
+            "summary": "An internal Agents SDK approval interruption is pending.",
+        }
+        try:
+            execution_mode = ExecutionMode(cast(str, row["execution_mode"]))
+            provenance = self._provenance_from_row(row)
+        except (TypeError, ValueError):
+            return None
+        raw_model_call = row["model_call"]
+        quota_execution_contract = row["quota_execution_contract"]
+        if (
+            cast(str, row["scenario_id"]) != ScenarioId.HOTEL.value
+            or execution_mode
+            not in {
+                ExecutionMode.SDK_STUB,
+                ExecutionMode.OPENAI_LIVE,
+            }
+            or type(raw_model_call) is not int
+            or raw_model_call != int(execution_mode is ExecutionMode.OPENAI_LIVE)
+            or type(quota_execution_contract) is not int
+            or quota_execution_contract != 0
+            or provenance.recovery_id != recovery_id
+            or provenance.execution_mode is not execution_mode
+            or (
+                execution_mode is ExecutionMode.SDK_STUB
+                and (
+                    provenance.model_ids
+                    or not isinstance(provenance.root_trace_id, str)
+                    or not is_valid_qa_trace_id(provenance.root_trace_id)
+                )
+            )
+            or (
+                execution_mode is ExecutionMode.OPENAI_LIVE
+                and (
+                    provenance.model_ids != ("gpt-5.6-luna", "gpt-5.6-terra")
+                    or not isinstance(provenance.root_trace_id, str)
+                    or not is_valid_live_trace_id(provenance.root_trace_id)
+                )
+            )
+            or any(
+                not isinstance(marker, str) or not marker
+                for marker in (
+                    provenance.sdk_version,
+                    provenance.protocol_version,
+                    provenance.agent_graph_version,
+                    provenance.definition_digest,
+                )
+            )
+            or not isinstance(provenance.definition_digest, str)
+            or len(provenance.definition_digest) != 64
+            or any(
+                character not in "0123456789abcdef" for character in provenance.definition_digest
+            )
+            or len(events) < 2
+            or events[1].seq != 2
+            or events[1].type != "approval.requested"
+            or events[1].terminal
+            or events[1].data != expected_approval_data
+        ):
+            return None
+
+        pending_rows = connection.execute(
             "SELECT * FROM pending_approvals WHERE recovery_id = ?",
             (recovery_id,),
-        ).fetchone()
-        if pending_row is None:
-            return False
+        ).fetchall()
+        remedy_rows = connection.execute(
+            "SELECT * FROM remedies WHERE recovery_id = ?",
+            (recovery_id,),
+        ).fetchall()
+        decision_rows = connection.execute(
+            "SELECT * FROM approval_decisions WHERE recovery_id = ?",
+            (recovery_id,),
+        ).fetchall()
+        execution_rows = connection.execute(
+            "SELECT * FROM executions WHERE recovery_id = ?",
+            (recovery_id,),
+        ).fetchall()
+        if len(pending_rows) != 1 or len(remedy_rows) != 1 or len(decision_rows) > 1:
+            return None
+
         try:
+            pending_row = pending_rows[0]
+            remedy_row = remedy_rows[0]
             pending = self._pending_approval_from_row(pending_row)
+            consent = self._remedy_consent_from_row(remedy_row)
+            self._require_pending_consent_binding(pending, consent)
+            pending_created_at = datetime.fromisoformat(cast(str, pending_row["created_at"]))
+            pending_updated_at = datetime.fromisoformat(cast(str, pending_row["updated_at"]))
+            remedy_created_at = datetime.fromisoformat(cast(str, remedy_row["created_at"]))
             stored_model_ids = json.loads(cast(str, row["model_ids_json"]))
+            if (
+                pending.recovery_id != recovery_id
+                or consent.recovery_id != recovery_id
+                or list(pending.model_ids) != stored_model_ids
+                or pending.execution_mode is not execution_mode
+                or pending.root_trace_id != provenance.root_trace_id
+                or pending.sdk_version != provenance.sdk_version
+                or pending.protocol_version != provenance.protocol_version
+                or pending.agent_graph_version != provenance.agent_graph_version
+                or pending.definition_digest != provenance.definition_digest
+                or not pending.state_json
+                or pending_created_at.tzinfo is None
+                or pending_created_at.utcoffset() != timedelta(0)
+                or pending_updated_at.tzinfo is None
+                or pending_updated_at.utcoffset() != timedelta(0)
+                or remedy_created_at.tzinfo is None
+                or remedy_created_at.utcoffset() != timedelta(0)
+                or consent.expiry.tzinfo is None
+                or consent.expiry.utcoffset() != timedelta(0)
+                or pending_created_at != events[1].created_at
+                or remedy_created_at != events[1].created_at
+                or pending_updated_at < pending_created_at
+                or events[1].created_at >= consent.expiry
+            ):
+                return None
+
+            claim: ApprovalDecisionClaim | None = None
+            decision_row: sqlite3.Row | None = None
+            claimed_at: datetime | None = None
+            if decision_rows:
+                decision_row = decision_rows[0]
+                claim = self._verified_decision_claim_from_row(
+                    decision_row,
+                    recovery_id=recovery_id,
+                )
+                claimed_at = datetime.fromisoformat(cast(str, decision_row["claimed_at"]))
+                if (
+                    cast(str, decision_row["status"]) != "claimed"
+                    or claim.response is not None
+                    or claim.request.remedy_id != pending.remedy_id
+                    or claim.request.remedy_digest != pending.consent_digest
+                    or claim.request.tool_call_id != pending.tool_call_id
+                    or claimed_at.tzinfo is None
+                    or claimed_at.utcoffset() != timedelta(0)
+                    or not events[1].created_at <= claimed_at < consent.expiry
+                ):
+                    return None
+        except (ApprovalDecisionError, TypeError, ValueError):
+            return None
+
+        return _HotelApprovalEvidence(
+            pending=pending,
+            consent=consent,
+            pending_row=pending_row,
+            remedy_row=remedy_row,
+            claim=claim,
+            decision_row=decision_row,
+            execution_rows=tuple(execution_rows),
+            approval_requested_at=events[1].created_at,
+            pending_updated_at=pending_updated_at,
+            claimed_at=claimed_at,
+        )
+
+    def _active_hotel_expiry_source_matches(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        row: sqlite3.Row,
+        events: list[RecoveryEvent],
+        now: datetime,
+    ) -> bool:
+        """Validate active approval structure before any expiry writer can seal it."""
+
+        evidence = self._hotel_approval_evidence(connection, row=row, events=events)
+        try:
+            recovery_updated_at = datetime.fromisoformat(cast(str, row["updated_at"]))
         except (TypeError, ValueError):
             return False
-        return (
-            pending.execution_mode is ExecutionMode(cast(str, row["execution_mode"]))
-            and list(pending.model_ids) == stored_model_ids
-            and pending.root_trace_id == cast(str | None, row["root_trace_id"])
-            and pending.sdk_version == cast(str | None, row["sdk_version"])
-            and pending.protocol_version == cast(str | None, row["protocol_version"])
-            and pending.agent_graph_version == cast(str | None, row["agent_graph_version"])
-            and pending.definition_digest == cast(str | None, row["definition_digest"])
+        if (
+            evidence is None
+            or now.tzinfo is None
+            or now.utcoffset() != timedelta(0)
+            or cast(str, row["status"]) != RecoveryStatus.PENDING_APPROVAL.value
+            or cast(int, row["current_step"]) != 3
+            or len(events) != 2
+            or cast(str, evidence.remedy_row["status"]) != "pending"
+            or recovery_updated_at.tzinfo is None
+            or recovery_updated_at.utcoffset() != timedelta(0)
+            or recovery_updated_at > now
+        ):
+            return False
+
+        if evidence.claim is None:
+            return (
+                evidence.pending.status == "pending"
+                and not evidence.execution_rows
+                and cast(str, row["current_step_summary"])
+                == "Approval required before demo-provider dispatch."
+                and recovery_updated_at == evidence.approval_requested_at
+                and evidence.pending_updated_at == evidence.approval_requested_at
+            )
+
+        claim = evidence.claim
+        claimed_at = evidence.claimed_at
+        if (
+            claimed_at is None
+            or cast(str, row["current_step_summary"])
+            != f"Exact {claim.request.action.value} claimed; outcome pending."
+            or recovery_updated_at != claimed_at
+            or claimed_at > now
+        ):
+            return False
+        if evidence.pending.status == "pending":
+            valid_pending_chronology = evidence.pending_updated_at == evidence.approval_requested_at
+        else:
+            valid_pending_chronology = (
+                claimed_at <= evidence.pending_updated_at <= now
+                and evidence.pending_updated_at < evidence.consent.expiry
+            )
+        return valid_pending_chronology and (
+            claim.request.action is DecisionAction.APPROVE
+            and evidence.pending.status in {"pending", "approved"}
+            or claim.request.action is DecisionAction.DECLINE
+            and evidence.pending.status in {"pending", "approved", "outcome_unknown"}
         )
+
+    def _hotel_expiry_source_row_matches(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        row: sqlite3.Row,
+        now: datetime,
+    ) -> bool:
+        """Load and validate one active expiry candidate without mutating it."""
+
+        try:
+            recovery_id = cast(str, row["id"])
+            scenario_id = ScenarioId(cast(str, row["scenario_id"]))
+            execution_mode = ExecutionMode(cast(str, row["execution_mode"]))
+            recovery_created_at = datetime.fromisoformat(cast(str, row["created_at"]))
+            recovery_updated_at = datetime.fromisoformat(cast(str, row["updated_at"]))
+            events = self._validated_public_event_ledger_in_connection(
+                connection,
+                recovery_id=recovery_id,
+                scenario_id=scenario_id,
+                execution_mode=execution_mode,
+                recovery_created_at=recovery_created_at,
+                recovery_updated_at=recovery_updated_at,
+            )
+        except (PublicEvidenceIntegrityError, TypeError, ValueError):
+            return False
+        return self._active_hotel_expiry_source_matches(
+            connection,
+            row=row,
+            events=events,
+            now=now,
+        )
+
+    def _active_hotel_public_bundle_matches(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        row: sqlite3.Row,
+        events: list[RecoveryEvent],
+        pending_view: PendingApprovalView | None,
+        claimed_view: ClaimedDecisionView | None,
+        now: datetime,
+    ) -> bool:
+        """Accept only one exact active hotel approval and its public ledger."""
+
+        evidence = self._hotel_approval_evidence(connection, row=row, events=events)
+        if evidence is None or not self._active_hotel_expiry_source_matches(
+            connection,
+            row=row,
+            events=events,
+            now=now,
+        ):
+            return False
+
+        expected_pending_view = evidence.consent.public_view(
+            tool_call_id=evidence.pending.tool_call_id
+        )
+        if evidence.claim is None:
+            return (
+                pending_view == expected_pending_view
+                and claimed_view is None
+                and not evidence.execution_rows
+            )
+
+        claim = evidence.claim
+        claimed_at = evidence.claimed_at
+        if claimed_at is None:
+            return False
+        expected_claimed_view = ClaimedDecisionView(
+            action=claim.request.action,
+            remedyDigest=claim.request.remedy_digest,
+            expiry=evidence.consent.expiry,
+        )
+        if claim.request.action is DecisionAction.DECLINE:
+            return (
+                not evidence.execution_rows
+                and pending_view is None
+                and (
+                    evidence.pending.status == "pending"
+                    and claimed_view == expected_claimed_view
+                    or evidence.pending.status == "outcome_unknown"
+                    and claimed_view is None
+                )
+            )
+
+        if pending_view is not None or claimed_view != expected_claimed_view:
+            return False
+        if evidence.pending.status == "pending":
+            return not evidence.execution_rows
+        if evidence.pending.status != "approved":
+            return False
+        if not evidence.execution_rows:
+            return True
+        if not self._claim_has_exact_completed_execution(
+            list(evidence.execution_rows),
+            claim=claim,
+            consent=evidence.consent,
+            claimed_at=claimed_at,
+        ):
+            return False
+        try:
+            execution_updated_at = datetime.fromisoformat(
+                cast(str, evidence.execution_rows[0]["updated_at"])
+            )
+        except (TypeError, ValueError):
+            return False
+        return execution_updated_at <= now
 
     def _creation_authoritative_snapshot(
         self,
@@ -2341,14 +2668,13 @@ class SQLiteStore:
                     connection,
                     recovery_id,
                 )
-                if not self._creation_pending_matches_recovery(
+                self._validate_public_evidence_in_connection(
                     connection,
                     row=row,
-                    recovery_id=recovery_id,
+                    replay_scenarios={},
                     pending_view=pending_view,
                     claimed_view=claimed_view,
-                ):
-                    return None
+                )
                 return self._recovery_from_row(
                     row,
                     pending_approval=pending_view,
@@ -2356,6 +2682,22 @@ class SQLiteStore:
                 )
             if not recovery_status.terminal:
                 return None
+            if scenario_id is ScenarioId.HOTEL and execution_mode in {
+                ExecutionMode.SDK_STUB,
+                ExecutionMode.OPENAI_LIVE,
+            }:
+                if (
+                    self._validate_public_evidence_in_connection(
+                        connection,
+                        row=row,
+                        replay_scenarios={},
+                        pending_view=None,
+                        claimed_view=None,
+                    )
+                    is None
+                ):
+                    return None
+                return self._recovery_from_row(row)
             receipt_row = connection.execute(
                 "SELECT receipt_json FROM receipts WHERE recovery_id = ?",
                 (recovery_id,),
@@ -2379,7 +2721,7 @@ class SQLiteStore:
             if not valid_terminal:
                 return None
             return self._recovery_from_row(row)
-        except (TypeError, ValueError):
+        except (PublicEvidenceIntegrityError, TypeError, ValueError):
             return None
 
     def get_authoritative_recovery_creation(
@@ -3621,6 +3963,8 @@ class SQLiteStore:
         *,
         row: sqlite3.Row,
         replay_scenarios: Mapping[ScenarioId, ReplayScenarioDefinition],
+        pending_view: PendingApprovalView | None,
+        claimed_view: ClaimedDecisionView | None,
     ) -> RecoveryReceipt | None:
         """Validate one public snapshot, terminal event, and receipt as a bundle."""
 
@@ -3686,6 +4030,25 @@ class SQLiteStore:
         if not recovery_status.terminal:
             if receipt_row is not None or terminal_events:
                 raise PublicEvidenceIntegrityError("Nonterminal recovery has terminal evidence")
+            if (
+                scenario_id is ScenarioId.HOTEL
+                and execution_mode
+                in {
+                    ExecutionMode.SDK_STUB,
+                    ExecutionMode.OPENAI_LIVE,
+                }
+                and not self._active_hotel_public_bundle_matches(
+                    connection,
+                    row=row,
+                    events=events,
+                    pending_view=pending_view,
+                    claimed_view=claimed_view,
+                    now=self._now(),
+                )
+            ):
+                raise PublicEvidenceIntegrityError(
+                    "Active hotel approval evidence is not canonical"
+                )
             if scenario_id is ScenarioId.API_QUOTA and execution_mode is ExecutionMode.SDK_STUB:
                 try:
                     self._require_pristine_quota_recovery(
@@ -3929,18 +4292,42 @@ class SQLiteStore:
             ).fetchone()
             if access is None:
                 raise RecoveryNotFoundError("Recovery not found")
-            if seal_expired:
-                self._expire_targeted_approval_in_transaction(
-                    connection,
-                    recovery_id=recovery_id,
-                    now=self._now(),
-                )
             row = connection.execute(
                 "SELECT * FROM recoveries WHERE id = ?",
                 (recovery_id,),
             ).fetchone()
             if row is None:
                 raise RecoveryNotFoundError("Recovery not found")
+            if seal_expired:
+                current_time = self._now()
+                if (
+                    cast(str, row["status"]) == RecoveryStatus.PENDING_APPROVAL.value
+                    and cast(str, row["scenario_id"]) == ScenarioId.HOTEL.value
+                    and cast(str, row["execution_mode"])
+                    in {
+                        ExecutionMode.SDK_STUB.value,
+                        ExecutionMode.OPENAI_LIVE.value,
+                    }
+                    and not self._hotel_expiry_source_row_matches(
+                        connection,
+                        row=row,
+                        now=current_time,
+                    )
+                ):
+                    raise PublicEvidenceIntegrityError(
+                        "Active hotel approval evidence is not canonical"
+                    )
+                self._expire_targeted_approval_in_transaction(
+                    connection,
+                    recovery_id=recovery_id,
+                    now=current_time,
+                )
+                row = connection.execute(
+                    "SELECT * FROM recoveries WHERE id = ?",
+                    (recovery_id,),
+                ).fetchone()
+                if row is None:
+                    raise RecoveryNotFoundError("Recovery not found")
             is_pending_hotel = (
                 cast(str, row["status"]) == RecoveryStatus.PENDING_APPROVAL.value
                 and cast(str, row["scenario_id"]) == ScenarioId.HOTEL.value
@@ -3957,6 +4344,8 @@ class SQLiteStore:
                 connection,
                 row=row,
                 replay_scenarios=replay_scenarios,
+                pending_view=pending_view,
+                claimed_view=claimed_view,
             )
             event_rows = (
                 connection.execute(
@@ -5289,6 +5678,35 @@ class SQLiteStore:
         connection: sqlite3.Connection,
         recovery_id: str,
     ) -> bool:
+        recovery_row = connection.execute(
+            "SELECT * FROM recoveries WHERE id = ?",
+            (recovery_id,),
+        ).fetchone()
+        if recovery_row is None:
+            return False
+        try:
+            scenario_id = ScenarioId(cast(str, recovery_row["scenario_id"]))
+            execution_mode = ExecutionMode(cast(str, recovery_row["execution_mode"]))
+            recovery_created_at = datetime.fromisoformat(cast(str, recovery_row["created_at"]))
+            recovery_updated_at = datetime.fromisoformat(cast(str, recovery_row["updated_at"]))
+            events = self._validated_public_event_ledger_in_connection(
+                connection,
+                recovery_id=recovery_id,
+                scenario_id=scenario_id,
+                execution_mode=execution_mode,
+                recovery_created_at=recovery_created_at,
+                recovery_updated_at=recovery_updated_at,
+            )
+        except (PublicEvidenceIntegrityError, TypeError, ValueError):
+            return False
+        approval_evidence = self._hotel_approval_evidence(
+            connection,
+            row=recovery_row,
+            events=events,
+        )
+        if len(events) != 3 or approval_evidence is None:
+            return False
+
         rows = connection.execute(
             """
             SELECT
@@ -5348,7 +5766,15 @@ class SQLiteStore:
         try:
             receipt = RecoveryReceipt.model_validate_json(cast(str, row["receipt_json"]))
             event_data = json.loads(cast(str, row["event_data_json"]))
+            seal_at = datetime.fromisoformat(cast(str, row["receipt_created_at"]))
         except (TypeError, ValueError):
+            return False
+        if (
+            seal_at.tzinfo is None
+            or seal_at.utcoffset() != timedelta(0)
+            or seal_at < approval_evidence.consent.expiry
+            or approval_evidence.pending_updated_at != seal_at
+        ):
             return False
 
         if cast(str, row["event_type"]) == "recovery.expired":
@@ -5367,6 +5793,7 @@ class SQLiteStore:
                 and cast(str, row["current_step_summary"]) == EXPIRATION_SUMMARY
                 and cast(str, row["pending_status"]) == "expired"
                 and cast(str, row["remedy_status"]) == "expired"
+                and approval_evidence.claim is None
                 and cast(int, row["decision_count"]) == 0
                 and cast(int, row["execution_count"]) == 0
                 and receipt.recovery_id == recovery_id
@@ -5859,6 +6286,47 @@ class SQLiteStore:
             and (sealed_at is None or updated_at <= sealed_at)
         )
 
+    @staticmethod
+    def _expiry_scan_cursor(
+        connection: sqlite3.Connection,
+        candidate_kind: Literal["oldest", "claimed", "untouched"],
+    ) -> tuple[str, str] | None:
+        row = connection.execute(
+            """
+            SELECT last_expiry, last_recovery_id
+            FROM expiry_scan_state
+            WHERE candidate_kind = ?
+            """,
+            (candidate_kind,),
+        ).fetchone()
+        if row is None:
+            return None
+        return cast(str, row["last_expiry"]), cast(str, row["last_recovery_id"])
+
+    @staticmethod
+    def _set_expiry_scan_cursor(
+        connection: sqlite3.Connection,
+        candidate_kind: Literal["oldest", "claimed", "untouched"],
+        cursor: tuple[str, str] | None,
+    ) -> None:
+        if cursor is None:
+            connection.execute(
+                "DELETE FROM expiry_scan_state WHERE candidate_kind = ?",
+                (candidate_kind,),
+            )
+            return
+        connection.execute(
+            """
+            INSERT INTO expiry_scan_state (
+                candidate_kind, last_expiry, last_recovery_id
+            ) VALUES (?, ?, ?)
+            ON CONFLICT(candidate_kind) DO UPDATE SET
+                last_expiry = excluded.last_expiry,
+                last_recovery_id = excluded.last_recovery_id
+            """,
+            (candidate_kind, cursor[0], cursor[1]),
+        )
+
     def oldest_expiry_candidate_kind(
         self,
         *,
@@ -5869,9 +6337,26 @@ class SQLiteStore:
         if now.tzinfo is None or now.utcoffset() != timedelta(0):
             raise ValueError("now must be timezone-aware UTC")
         with self._lock, self._connect() as connection:
-            rows = connection.execute(
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = self._expiry_scan_cursor(connection, "oldest")
+            cursor_clause = ""
+            parameters: list[str | int] = []
+            if cursor is not None:
+                cursor_clause = """
+                  AND (
+                      remedies.expiry > ?
+                      OR (
+                          remedies.expiry = ?
+                          AND recoveries.id > ?
+                      )
+                  )
                 """
+                parameters.extend((cursor[0], cursor[0], cursor[1]))
+            parameters.append(MAX_STORE_EXPIRY_BATCH_SIZE)
+            rows = connection.execute(
+                f"""
                 SELECT
+                    recoveries.id AS recovery_id,
                     remedies.expiry AS remedy_expiry,
                     CASE
                         WHEN EXISTS (
@@ -5930,27 +6415,39 @@ class SQLiteStore:
                           )
                       )
                   )
+                  {cursor_clause}
                 ORDER BY remedies.expiry ASC, recoveries.id ASC
                 LIMIT ?
                 """,
-                (MAX_STORE_EXPIRY_BATCH_SIZE,),
+                parameters,
             ).fetchall()
-        for row in rows:
-            try:
-                expiry = datetime.fromisoformat(
-                    cast(str, row["remedy_expiry"]).replace("Z", "+00:00")
-                )
-            except (TypeError, ValueError):
-                continue
-            if expiry.tzinfo is None or expiry.utcoffset() != timedelta(0) or expiry > now:
-                continue
-            candidate_kind = cast(str, row["candidate_kind"])
-            if candidate_kind in {"claimed", "untouched"}:
-                return cast(
-                    Literal["claimed", "untouched"],
-                    candidate_kind,
-                )
-        return None
+            selected_kind: Literal["claimed", "untouched"] | None = None
+            last_scanned: tuple[str, str] | None = None
+            for row in rows:
+                raw_expiry = cast(str, row["remedy_expiry"])
+                recovery_id = cast(str, row["recovery_id"])
+                last_scanned = raw_expiry, recovery_id
+                try:
+                    expiry = datetime.fromisoformat(raw_expiry.replace("Z", "+00:00"))
+                except (TypeError, ValueError):
+                    continue
+                if expiry.tzinfo is None or expiry.utcoffset() != timedelta(0) or expiry > now:
+                    continue
+                candidate_kind = cast(str, row["candidate_kind"])
+                if candidate_kind in {"claimed", "untouched"}:
+                    selected_kind = cast(
+                        Literal["claimed", "untouched"],
+                        candidate_kind,
+                    )
+                    break
+            if not rows:
+                self._set_expiry_scan_cursor(connection, "oldest", None)
+            elif selected_kind is not None or len(rows) == MAX_STORE_EXPIRY_BATCH_SIZE:
+                self._set_expiry_scan_cursor(connection, "oldest", last_scanned)
+            else:
+                self._set_expiry_scan_cursor(connection, "oldest", None)
+            connection.commit()
+        return selected_kind
 
     def expire_claimed_decisions(
         self,
@@ -5983,17 +6480,34 @@ class SQLiteStore:
         if not 1 <= batch_size <= MAX_STORE_EXPIRY_BATCH_SIZE:
             raise ValueError(f"batch_size must be between 1 and {MAX_STORE_EXPIRY_BATCH_SIZE}")
         target_clause = "AND recoveries.id = ?" if recovery_id is not None else ""
-        parameters: list[str | int] = []
-        if recovery_id is not None:
-            parameters.append(recovery_id)
-        parameters.append(1 if recovery_id is not None else MAX_STORE_EXPIRY_BATCH_SIZE)
         now_text = now.isoformat()
         expired_count = 0
 
         with self._expiry_transaction(connection) as active_connection:
+            parameters: list[str | int] = []
+            if recovery_id is not None:
+                parameters.append(recovery_id)
+            scan_cursor = (
+                None
+                if recovery_id is not None
+                else self._expiry_scan_cursor(active_connection, "claimed")
+            )
+            cursor_clause = ""
+            if scan_cursor is not None:
+                cursor_clause = """
+                  AND (
+                      remedies.expiry > ?
+                      OR (
+                          remedies.expiry = ?
+                          AND recoveries.id > ?
+                      )
+                  )
+                """
+                parameters.extend((scan_cursor[0], scan_cursor[0], scan_cursor[1]))
+            parameters.append(1 if recovery_id is not None else MAX_STORE_EXPIRY_BATCH_SIZE)
             rows = active_connection.execute(
                 f"""
-                SELECT recoveries.id, remedies.expiry AS remedy_expiry
+                SELECT recoveries.*, remedies.expiry AS remedy_expiry
                 FROM recoveries
                 JOIN pending_approvals
                   ON pending_approvals.recovery_id = recoveries.id
@@ -6023,20 +6537,30 @@ class SQLiteStore:
                         AND events.terminal = 1
                   )
                   {target_clause}
+                  {cursor_clause}
                 ORDER BY remedies.expiry ASC, recoveries.id ASC
                 LIMIT ?
                 """,
                 parameters,
             ).fetchall()
 
+            last_scanned: tuple[str, str] | None = None
+            scanned_all = True
             for row in rows:
                 if expired_count >= batch_size:
+                    scanned_all = False
                     break
                 target_id = cast(str, row["id"])
+                raw_expiry = cast(str, row["remedy_expiry"])
+                last_scanned = raw_expiry, target_id
+                if not self._hotel_expiry_source_row_matches(
+                    active_connection,
+                    row=row,
+                    now=now,
+                ):
+                    continue
                 try:
-                    expiry = datetime.fromisoformat(
-                        cast(str, row["remedy_expiry"]).replace("Z", "+00:00")
-                    )
+                    expiry = datetime.fromisoformat(raw_expiry.replace("Z", "+00:00"))
                     if expiry.tzinfo is None or expiry.utcoffset() != timedelta(0) or expiry > now:
                         continue
                     decision_rows = active_connection.execute(
@@ -6193,6 +6717,26 @@ class SQLiteStore:
                 )
                 expired_count += 1
 
+            if recovery_id is None:
+                if not rows:
+                    self._set_expiry_scan_cursor(
+                        active_connection,
+                        "claimed",
+                        None,
+                    )
+                elif not scanned_all or len(rows) == MAX_STORE_EXPIRY_BATCH_SIZE:
+                    self._set_expiry_scan_cursor(
+                        active_connection,
+                        "claimed",
+                        last_scanned,
+                    )
+                else:
+                    self._set_expiry_scan_cursor(
+                        active_connection,
+                        "claimed",
+                        None,
+                    )
+
         return expired_count
 
     def expire_pending_approvals(
@@ -6226,14 +6770,31 @@ class SQLiteStore:
         if not 1 <= batch_size <= MAX_STORE_EXPIRY_BATCH_SIZE:
             raise ValueError(f"batch_size must be between 1 and {MAX_STORE_EXPIRY_BATCH_SIZE}")
         target_clause = "AND recoveries.id = ?" if recovery_id is not None else ""
-        parameters: list[str | int] = []
-        if recovery_id is not None:
-            parameters.append(recovery_id)
-        parameters.append(batch_size)
         now_text = now.isoformat()
         expired_count = 0
 
         with self._expiry_transaction(connection) as active_connection:
+            parameters: list[str | int] = []
+            if recovery_id is not None:
+                parameters.append(recovery_id)
+            scan_cursor = (
+                None
+                if recovery_id is not None
+                else self._expiry_scan_cursor(active_connection, "untouched")
+            )
+            cursor_clause = ""
+            if scan_cursor is not None:
+                cursor_clause = """
+                  AND (
+                      remedies.expiry > ?
+                      OR (
+                          remedies.expiry = ?
+                          AND recoveries.id > ?
+                      )
+                  )
+                """
+                parameters.extend((scan_cursor[0], scan_cursor[0], scan_cursor[1]))
+            parameters.append(1 if recovery_id is not None else MAX_STORE_EXPIRY_BATCH_SIZE)
             rows = active_connection.execute(
                 f"""
                 SELECT recoveries.*, remedies.expiry AS remedy_expiry
@@ -6267,14 +6828,28 @@ class SQLiteStore:
                         AND events.terminal = 1
                   )
                   {target_clause}
+                  {cursor_clause}
                 ORDER BY remedies.expiry ASC, recoveries.id ASC
                 LIMIT ?
                 """,
                 parameters,
             ).fetchall()
 
+            last_scanned: tuple[str, str] | None = None
+            scanned_all = True
             for row in rows:
+                if expired_count >= batch_size:
+                    scanned_all = False
+                    break
+                target_id = cast(str, row["id"])
                 raw_expiry = cast(str, row["remedy_expiry"])
+                last_scanned = raw_expiry, target_id
+                if not self._hotel_expiry_source_row_matches(
+                    active_connection,
+                    row=row,
+                    now=now,
+                ):
+                    continue
                 try:
                     expiry = datetime.fromisoformat(raw_expiry.replace("Z", "+00:00"))
                 except ValueError:
@@ -6282,7 +6857,6 @@ class SQLiteStore:
                 if expiry.tzinfo is None or expiry.utcoffset() != timedelta(0) or expiry > now:
                     continue
 
-                target_id = cast(str, row["id"])
                 provenance = self._provenance_from_row(row)
                 receipt = RecoveryReceipt(
                     recoveryId=target_id,
@@ -6385,6 +6959,26 @@ class SQLiteStore:
                     (now_text, target_id),
                 )
                 expired_count += 1
+
+            if recovery_id is None:
+                if not rows:
+                    self._set_expiry_scan_cursor(
+                        active_connection,
+                        "untouched",
+                        None,
+                    )
+                elif not scanned_all or len(rows) == MAX_STORE_EXPIRY_BATCH_SIZE:
+                    self._set_expiry_scan_cursor(
+                        active_connection,
+                        "untouched",
+                        last_scanned,
+                    )
+                else:
+                    self._set_expiry_scan_cursor(
+                        active_connection,
+                        "untouched",
+                        None,
+                    )
 
         return expired_count
 

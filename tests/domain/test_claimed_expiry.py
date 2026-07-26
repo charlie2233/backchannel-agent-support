@@ -41,6 +41,7 @@ def _claimed(
     *,
     action: DecisionAction,
     pending_status: str = "pending",
+    client_decision_id: str | None = None,
 ) -> tuple[SQLiteStore, HotelSimulator, str, datetime, ApprovalDecisionRequest]:
     store = SQLiteStore(database_path)
     provider = HotelSimulator(store=store)
@@ -54,7 +55,7 @@ def _claimed(
     assert approval is not None
     request = ApprovalDecisionRequest(
         action=action,
-        clientDecisionId=f"claimed-expiry-{action.value}-{pending_status}",
+        clientDecisionId=(client_decision_id or f"claimed-expiry-{action.value}-{pending_status}"),
         remedyId=approval.remedy_id,
         remedyDigest=approval.remedy_digest,
         toolCallId=approval.tool_call_id,
@@ -68,14 +69,15 @@ def _claimed(
                 status=pending_status,
             )
         else:
+            updated_at = datetime.now(UTC).isoformat()
             with sqlite3.connect(database_path) as connection:
                 connection.execute(
                     """
                     UPDATE pending_approvals
-                    SET status = ?
+                    SET status = ?, updated_at = ?
                     WHERE recovery_id = ?
                     """,
-                    (pending_status, pending.recovery.recovery_id),
+                    (pending_status, updated_at, pending.recovery.recovery_id),
                 )
     return store, provider, pending.recovery.recovery_id, approval.expiry, request
 
@@ -770,41 +772,75 @@ def test_claimed_expiry_recognizer_fails_closed_for_each_tampered_layer(
     assert store.recovery_has_expiration_evidence(recovery_id) is True
 
 
-def test_malformed_earlier_claim_does_not_starve_valid_expired_claim(
+def test_corrupt_claimed_pages_do_not_starve_valid_expired_claim(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database_path = tmp_path / "claimed-expiry-fairness.sqlite3"
-    store, _provider, malformed_id, malformed_expiry, _request = _claimed(
-        database_path,
-        action=DecisionAction.APPROVE,
-    )
-    _second_store, _provider, valid_id, valid_expiry, _request = _claimed(
-        database_path,
-        action=DecisionAction.DECLINE,
-    )
-    with sqlite3.connect(database_path) as connection:
-        connection.execute(
-            """
-            UPDATE remedies SET expiry = ?
-            WHERE recovery_id = ?
-            """,
-            (
-                (min(malformed_expiry, valid_expiry) - timedelta(minutes=1)).isoformat(),
-                malformed_id,
-            ),
+    candidates: list[tuple[datetime, str]] = []
+    store: SQLiteStore | None = None
+    for index, action in enumerate(
+        (
+            DecisionAction.APPROVE,
+            DecisionAction.APPROVE,
+            DecisionAction.DECLINE,
         )
+    ):
+        candidate_store, _provider, recovery_id, expiry, _request = _claimed(
+            database_path,
+            action=action,
+            client_decision_id=f"claimed-expiry-cursor-{index}",
+        )
+        store = candidate_store
+        candidates.append((expiry, recovery_id))
+    assert store is not None
+    candidates.sort()
+    corrupt_ids = [candidates[0][1], candidates[1][1]]
+    valid_id = candidates[2][1]
+    with sqlite3.connect(database_path) as connection:
+        for index, corrupt_id in enumerate(corrupt_ids):
+            connection.execute(
+                """
+                UPDATE remedies SET expiry = ?
+                WHERE recovery_id = ?
+                """,
+                (
+                    (candidates[0][0] - timedelta(minutes=2 - index)).isoformat(),
+                    corrupt_id,
+                ),
+            )
+    monkeypatch.setattr("server.store.MAX_STORE_EXPIRY_BATCH_SIZE", 1)
+    sweep_now = max(expiry for expiry, _recovery_id in candidates)
 
     assert (
         expire_pending_approvals(
             store,
-            now=max(malformed_expiry, valid_expiry),
+            now=sweep_now,
+            batch_size=1,
+        )
+        == 0
+    )
+    assert all(
+        store.get_recovery(corrupt_id).status is RecoveryStatus.PENDING_APPROVAL
+        for corrupt_id in corrupt_ids
+    )
+    assert store.get_recovery(valid_id).status is RecoveryStatus.PENDING_APPROVAL
+
+    assert (
+        expire_pending_approvals(
+            store,
+            now=sweep_now,
             batch_size=1,
         )
         == 1
     )
-
-    assert store.get_recovery(malformed_id).status is RecoveryStatus.PENDING_APPROVAL
-    assert store.recovery_has_expiration_evidence(malformed_id) is False
+    assert all(
+        store.get_recovery(corrupt_id).status is RecoveryStatus.PENDING_APPROVAL
+        for corrupt_id in corrupt_ids
+    )
+    assert all(
+        store.recovery_has_expiration_evidence(corrupt_id) is False for corrupt_id in corrupt_ids
+    )
     assert store.get_recovery(valid_id).status is RecoveryStatus.CLOSED_WITHOUT_ACTION
     assert store.recovery_has_expiration_evidence(valid_id) is True
 
@@ -875,19 +911,25 @@ def test_claimed_and_untouched_expiry_share_batch_by_oldest_class(
     )
     untouched_approval = untouched.recovery.pending_approval
     assert untouched_approval is not None
-    with sqlite3.connect(database_path) as connection:
-        connection.execute(
-            "UPDATE remedies SET expiry = ? WHERE recovery_id = ?",
-            (
-                (claimed_expiry - timedelta(minutes=1)).isoformat(),
-                untouched.recovery.recovery_id,
-            ),
-        )
+    sweep_now = max(claimed_expiry, untouched_approval.expiry)
 
     assert (
         expire_pending_approvals(
             store,
-            now=claimed_expiry,
+            now=sweep_now,
+            batch_size=1,
+        )
+        == 1
+    )
+    assert store.get_recovery(claimed_id).status is RecoveryStatus.OUTCOME_UNKNOWN
+    assert (
+        store.get_recovery(untouched.recovery.recovery_id).status is RecoveryStatus.PENDING_APPROVAL
+    )
+
+    assert (
+        expire_pending_approvals(
+            store,
+            now=sweep_now,
             batch_size=1,
         )
         == 1
@@ -896,17 +938,6 @@ def test_claimed_and_untouched_expiry_share_batch_by_oldest_class(
         store.get_recovery(untouched.recovery.recovery_id).status
         is RecoveryStatus.CLOSED_WITHOUT_ACTION
     )
-    assert store.get_recovery(claimed_id).status is RecoveryStatus.PENDING_APPROVAL
-
-    assert (
-        expire_pending_approvals(
-            store,
-            now=claimed_expiry,
-            batch_size=1,
-        )
-        == 1
-    )
-    assert store.get_recovery(claimed_id).status is RecoveryStatus.OUTCOME_UNKNOWN
     assert store.count_decisions(claimed_id) == 1
     assert store.count_decisions(untouched.recovery.recovery_id) == 0
 

@@ -364,7 +364,7 @@ def test_terms_mutated_after_display_fail_digest_recheck_with_zero_execution(
     assert store.count_executions(recovery_id) == 0
 
 
-def test_rebound_commitment_is_hidden_when_action_digest_still_diverges(
+def test_rebound_commitment_is_rejected_when_action_digest_still_diverges(
     tmp_path,
 ) -> None:
     database_path = tmp_path / "restored-consent-mismatch.sqlite3"
@@ -375,7 +375,8 @@ def test_rebound_commitment_is_hidden_when_action_digest_still_diverges(
             RuntimeSettings(live_ready=False),
             store=store,
             hotel_provider=provider,
-        )
+        ),
+        raise_server_exceptions=False,
     ) as client:
         initial = _create_api_recovery(client)
         recovery_id = str(initial["recoveryId"])
@@ -413,8 +414,14 @@ def test_rebound_commitment_is_hidden_when_action_digest_still_diverges(
                 (displayed_digest, recovery_id),
             )
 
-        displayed = client.get(f"/api/recoveries/{recovery_id}").json()
-        assert displayed["pendingApproval"] is None
+        displayed = client.get(f"/api/recoveries/{recovery_id}")
+        assert displayed.status_code == 500
+        assert displayed.json() == {
+            "code": "internal_error",
+            "message": "The request could not be completed.",
+            "requestId": displayed.headers["x-request-id"],
+        }
+        assert displayed.headers["cache-control"] == "no-store"
         payload = _decision_payload(initial, "restored-consent-mismatch")
         payload["remedyDigest"] = displayed_digest
         response = client.post(

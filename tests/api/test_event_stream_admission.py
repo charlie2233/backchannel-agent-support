@@ -2,9 +2,8 @@ import asyncio
 import json
 import logging
 import re
-import sqlite3
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from unittest.mock import Mock
 from uuid import uuid4
 
@@ -20,8 +19,7 @@ from server.models import RecoveryStatus
 from server.store import SQLiteStore
 
 _INVALID_EVENT_CURSOR_DETAIL = (
-    "Last-Event-ID must contain only ASCII digits and be between "
-    "0 and 9223372036854775807"
+    "Last-Event-ID must contain only ASCII digits and be between 0 and 9223372036854775807"
 )
 
 
@@ -84,10 +82,7 @@ def test_saturated_stream_returns_exact_finite_control_frame_without_polling(
         expected_payload = json.dumps(
             {
                 "code": "event_stream_capacity",
-                "message": (
-                    "Event streaming is temporarily at capacity; "
-                    "retry is automatic."
-                ),
+                "message": ("Event streaming is temporarily at capacity; retry is automatic."),
                 "requestId": request_id,
             },
             separators=(",", ":"),
@@ -98,9 +93,7 @@ def test_saturated_stream_returns_exact_finite_control_frame_without_polling(
         assert response.headers["x-accel-buffering"] == "no"
         assert response.headers["x-content-type-options"] == "nosniff"
         assert response.text == (
-            "retry: 5000\n"
-            "event: stream.capacity\n"
-            f"data: {expected_payload}\n\n"
+            f"retry: 5000\nevent: stream.capacity\ndata: {expected_payload}\n\n"
         )
         assert "id:" not in response.text
         assert recovery_id not in response.text
@@ -237,8 +230,7 @@ def test_oversized_cursor_does_not_start_a_stream_or_log_an_internal_error(
         assert "x-accel-buffering" not in response.headers
         assert app.state.event_stream_admission.active_count == 0
         assert not any(
-            record.getMessage().startswith("request_failed")
-            for record in caplog.records
+            record.getMessage().startswith("request_failed") for record in caplog.records
         )
 
 
@@ -261,7 +253,10 @@ def test_sqlite_max_cursor_is_accepted_and_releases_its_stream_lease(tmp_path) -
         assert app.state.event_stream_admission.active_count == 0
 
 
-def test_invalid_authorized_cursor_precedes_targeted_expiry_side_effect(tmp_path) -> None:
+def test_invalid_authorized_cursor_precedes_targeted_expiry_side_effect(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     database_path = tmp_path / "event-stream-cursor-before-expiry.sqlite3"
     store = SQLiteStore(database_path)
     app = create_app(_settings(), store=store)
@@ -277,14 +272,12 @@ def test_invalid_authorized_cursor_precedes_targeted_expiry_side_effect(tmp_path
         assert pending.status_code == 201
         recovery_id = str(pending.json()["recoveryId"])
         event_types_before = [event.type for event in store.list_events(recovery_id)]
-        with sqlite3.connect(database_path) as connection:
-            connection.execute(
-                "UPDATE remedies SET expiry = ? WHERE recovery_id = ?",
-                (
-                    (datetime.now(UTC) - timedelta(seconds=1)).isoformat(),
-                    recovery_id,
-                ),
-            )
+        expiry = datetime.fromisoformat(str(pending.json()["pendingApproval"]["expiry"]))
+        monkeypatch.setattr(
+            store,
+            "_now",
+            lambda: expiry + timedelta(seconds=1),
+        )
 
         response = client.get(
             f"/api/recoveries/{recovery_id}/events",
@@ -328,14 +321,12 @@ def test_duplicate_cursor_is_rejected_before_expiry_admission_read_or_log(
         assert pending.status_code == 201
         recovery_id = str(pending.json()["recoveryId"])
         event_types_before = [event.type for event in store.list_events(recovery_id)]
-        with sqlite3.connect(database_path) as connection:
-            connection.execute(
-                "UPDATE remedies SET expiry = ? WHERE recovery_id = ?",
-                (
-                    (datetime.now(UTC) - timedelta(seconds=1)).isoformat(),
-                    recovery_id,
-                ),
-            )
+        expiry = datetime.fromisoformat(str(pending.json()["pendingApproval"]["expiry"]))
+        monkeypatch.setattr(
+            store,
+            "_now",
+            lambda: expiry + timedelta(seconds=1),
+        )
         controller = app.state.event_stream_admission
         acquire = Mock(side_effect=AssertionError("duplicate cursor must not acquire a lease"))
         read_batch = Mock(side_effect=AssertionError("duplicate cursor must not stream events"))
@@ -364,8 +355,7 @@ def test_duplicate_cursor_is_rejected_before_expiry_admission_read_or_log(
         persisted_events, _status = original_read_batch(recovery_id)
         assert [event.type for event in persisted_events] == event_types_before
         assert not any(
-            record.getMessage().startswith("request_failed")
-            for record in caplog.records
+            record.getMessage().startswith("request_failed") for record in caplog.records
         )
 
 
@@ -397,7 +387,10 @@ def test_owner_reacquires_after_terminal_stream_and_replay_cursor_is_unchanged(
         assert all(sequence > 2 for sequence in streamed_ids)
 
 
-def test_target_expiry_is_committed_before_saturated_admission(tmp_path) -> None:
+def test_target_expiry_is_committed_before_saturated_admission(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     database_path = tmp_path / "event-stream-expiry-order.sqlite3"
     store = SQLiteStore(database_path)
     app = create_app(_settings(), store=store)
@@ -412,14 +405,12 @@ def test_target_expiry_is_committed_before_saturated_admission(tmp_path) -> None
         )
         assert pending.status_code == 201
         recovery_id = str(pending.json()["recoveryId"])
-        with sqlite3.connect(database_path) as connection:
-            connection.execute(
-                "UPDATE remedies SET expiry = ? WHERE recovery_id = ?",
-                (
-                    (datetime.now(UTC) - timedelta(seconds=1)).isoformat(),
-                    recovery_id,
-                ),
-            )
+        expiry = datetime.fromisoformat(str(pending.json()["pendingApproval"]["expiry"]))
+        monkeypatch.setattr(
+            store,
+            "_now",
+            lambda: expiry + timedelta(seconds=1),
+        )
 
         controller = app.state.event_stream_admission
         held = controller.try_acquire("other-recovery")

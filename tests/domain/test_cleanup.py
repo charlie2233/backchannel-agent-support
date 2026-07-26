@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from server.cleanup import (
     cleanup_expired_recovery_creations,
     cleanup_terminal_recoveries,
+    expire_pending_approvals,
 )
 from server.config import RuntimeSettings
 from server.main import create_app
@@ -33,12 +34,14 @@ def _start_pending_hotel(store: SQLiteStore) -> str:
     return pending.recovery.recovery_id
 
 
-def _expire_pending_hotel(database_path, recovery_id: str) -> None:
+def _expired_time_for_pending_hotel(database_path, recovery_id: str) -> datetime:
     with sqlite3.connect(database_path) as connection:
-        connection.execute(
-            "UPDATE remedies SET expiry = ? WHERE recovery_id = ?",
-            ((datetime.now(UTC) - timedelta(seconds=1)).isoformat(), recovery_id),
-        )
+        row = connection.execute(
+            "SELECT expiry FROM remedies WHERE recovery_id = ?",
+            (recovery_id,),
+        ).fetchone()
+    assert row is not None
+    return datetime.fromisoformat(str(row[0])) + timedelta(seconds=1)
 
 
 def _create_recovery(
@@ -61,14 +64,10 @@ def _create_recovery(
         ),
         sdk_version=("0.18.3" if execution_mode is ExecutionMode.SDK_STUB else None),
         protocol_version=(
-            "backchannel.approval.v1"
-            if execution_mode is ExecutionMode.SDK_STUB
-            else None
+            "backchannel.approval.v1" if execution_mode is ExecutionMode.SDK_STUB else None
         ),
         agent_graph_version=(
-            "backchannel.hotel-agent.v1"
-            if execution_mode is ExecutionMode.SDK_STUB
-            else None
+            "backchannel.hotel-agent.v1" if execution_mode is ExecutionMode.SDK_STUB else None
         ),
         definition_digest=("a" * 64 if execution_mode is ExecutionMode.SDK_STUB else None),
     )
@@ -220,12 +219,15 @@ def test_cleanup_expires_stale_in_progress_replay_but_preserves_pending_modes(
             (replay.recovery_id, "replay_fixture_start", 1, old),
         )
 
-    assert cleanup_terminal_recoveries(
-        store,
-        terminal_ttl=timedelta(days=1),
-        now=now,
-        batch_size=10,
-    ) == 1
+    assert (
+        cleanup_terminal_recoveries(
+            store,
+            terminal_ttl=timedelta(days=1),
+            now=now,
+            batch_size=10,
+        )
+        == 1
+    )
 
     with pytest.raises(RecoveryNotFoundError):
         store.get_recovery(replay.recovery_id)
@@ -317,9 +319,9 @@ def test_creation_claim_cleanup_runs_at_startup_and_on_periodic_cadence(
 
     with TestClient(create_app(settings, store=store)):
         with sqlite3.connect(database_path) as connection:
-            assert connection.execute(
-                "SELECT request_key FROM recovery_creations"
-            ).fetchall() == [("b" * 64,)]
+            assert connection.execute("SELECT request_key FROM recovery_creations").fetchall() == [
+                ("b" * 64,)
+            ]
             connection.execute(
                 "UPDATE recovery_creations SET expires_at = ?",
                 ((datetime.now(UTC) - timedelta(seconds=1)).isoformat(),),
@@ -353,11 +355,20 @@ def test_creation_claim_cleanup_wrapper_validates_bounds_and_utc(tmp_path) -> No
 
 def test_lifespan_expires_untouched_consent_at_startup_and_on_cleanup_cadence(
     tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database_path = tmp_path / "periodic-consent-expiry.sqlite3"
     store = SQLiteStore(database_path)
     startup_recovery_id = _start_pending_hotel(store)
-    _expire_pending_hotel(database_path, startup_recovery_id)
+    cleanup_now = _expired_time_for_pending_hotel(database_path, startup_recovery_id)
+    monkeypatch.setattr(
+        "server.main.expire_pending_approvals",
+        lambda store, **kwargs: expire_pending_approvals(
+            store,
+            now=cleanup_now,
+            **kwargs,
+        ),
+    )
     settings = RuntimeSettings(
         live_ready=False,
         terminal_recovery_ttl_seconds=3_600,
@@ -366,8 +377,7 @@ def test_lifespan_expires_untouched_consent_at_startup_and_on_cleanup_cadence(
 
     with TestClient(create_app(settings, store=store)) as client:
         assert (
-            store.get_recovery(startup_recovery_id).status
-            is RecoveryStatus.CLOSED_WITHOUT_ACTION
+            store.get_recovery(startup_recovery_id).status is RecoveryStatus.CLOSED_WITHOUT_ACTION
         )
         assert store.get_receipt(startup_recovery_id).status == "closed_without_action"
 
@@ -381,7 +391,10 @@ def test_lifespan_expires_untouched_consent_at_startup_and_on_cleanup_cadence(
         )
         assert response.status_code == 201
         periodic_recovery_id = str(response.json()["recoveryId"])
-        _expire_pending_hotel(database_path, periodic_recovery_id)
+        cleanup_now = _expired_time_for_pending_hotel(
+            database_path,
+            periodic_recovery_id,
+        )
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
             if (
@@ -392,14 +405,14 @@ def test_lifespan_expires_untouched_consent_at_startup_and_on_cleanup_cadence(
             time.sleep(0.05)
 
         assert (
-            store.get_recovery(periodic_recovery_id).status
-            is RecoveryStatus.CLOSED_WITHOUT_ACTION
+            store.get_recovery(periodic_recovery_id).status is RecoveryStatus.CLOSED_WITHOUT_ACTION
         )
         assert store.get_receipt(periodic_recovery_id).status == "closed_without_action"
 
 
 def test_create_runs_expiry_before_retention_without_deleting_new_terminal_evidence(
     tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database_path = tmp_path / "create-consent-expiry.sqlite3"
     store = SQLiteStore(database_path)
@@ -420,7 +433,18 @@ def test_create_runs_expiry_before_retention_without_deleting_new_terminal_evide
         )
         assert first.status_code == 201
         expired_recovery_id = str(first.json()["recoveryId"])
-        _expire_pending_hotel(database_path, expired_recovery_id)
+        expired_at = _expired_time_for_pending_hotel(
+            database_path,
+            expired_recovery_id,
+        )
+        monkeypatch.setattr(
+            "server.main.expire_pending_approvals",
+            lambda store, **kwargs: expire_pending_approvals(
+                store,
+                now=expired_at,
+                **kwargs,
+            ),
+        )
 
         second = client.post(
             "/api/recoveries",
@@ -433,8 +457,7 @@ def test_create_runs_expiry_before_retention_without_deleting_new_terminal_evide
 
         assert second.status_code == 201
         assert (
-            store.get_recovery(expired_recovery_id).status
-            is RecoveryStatus.CLOSED_WITHOUT_ACTION
+            store.get_recovery(expired_recovery_id).status is RecoveryStatus.CLOSED_WITHOUT_ACTION
         )
         assert store.get_receipt(expired_recovery_id).status == "closed_without_action"
         assert store.count_decisions(expired_recovery_id) == 0

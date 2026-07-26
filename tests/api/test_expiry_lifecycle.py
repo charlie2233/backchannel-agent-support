@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from unittest.mock import Mock
@@ -40,13 +41,32 @@ def _create_pending(client: TestClient) -> dict[str, object]:
     return snapshot
 
 
-def _expire(database_path, recovery_id: str) -> None:
-    expiry = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+def _expire(store: SQLiteStore, database_path, recovery_id: str) -> datetime:
     with sqlite3.connect(database_path) as connection:
-        connection.execute(
-            "UPDATE remedies SET expiry = ? WHERE recovery_id = ?",
-            (expiry, recovery_id),
-        )
+        row = connection.execute(
+            "SELECT expiry FROM remedies WHERE recovery_id = ?",
+            (recovery_id,),
+        ).fetchone()
+    assert row is not None
+    expired_at = datetime.fromisoformat(str(row[0])) + timedelta(seconds=1)
+    store._now = lambda: expired_at  # type: ignore[method-assign]
+    return expired_at
+
+
+def _use_expired_cleanup_clock(
+    monkeypatch: pytest.MonkeyPatch,
+    expired_at: datetime,
+) -> None:
+    from server.cleanup import expire_pending_approvals
+
+    monkeypatch.setattr(
+        "server.main.expire_pending_approvals",
+        lambda store, **kwargs: expire_pending_approvals(
+            store,
+            now=expired_at,
+            **kwargs,
+        ),
+    )
 
 
 def _promote_pending_fixture_to_live(database_path, recovery_id: str) -> None:
@@ -78,6 +98,25 @@ def _promote_pending_fixture_to_live(database_path, recovery_id: str) -> None:
                 '["gpt-5.6-luna","gpt-5.6-terra"]',
                 "trace_0123456789abcdef0123456789abcdef",
                 "backchannel.hotel-agent.live.v1",
+                recovery_id,
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE events
+            SET data_json = ?
+            WHERE recovery_id = ? AND seq = 1
+            """,
+            (
+                json.dumps(
+                    {
+                        "scenarioId": "hotel",
+                        "executionMode": "openai_live",
+                        "summary": "Recovery created for the selected execution mode.",
+                    },
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
                 recovery_id,
             ),
         )
@@ -125,12 +164,10 @@ def test_authorized_read_synchronously_expires_target_before_returning(
     database_path = tmp_path / f"sync-{first_endpoint}.sqlite3"
     store = SQLiteStore(database_path)
     provider = HotelSimulator(store=store)
-    with TestClient(
-        create_app(_settings(), store=store, hotel_provider=provider)
-    ) as client:
+    with TestClient(create_app(_settings(), store=store, hotel_provider=provider)) as client:
         pending = _create_pending(client)
         recovery_id = str(pending["recoveryId"])
-        _expire(database_path, recovery_id)
+        _expire(store, database_path, recovery_id)
 
         suffix = {
             "snapshot": "",
@@ -162,16 +199,16 @@ def test_authorized_read_synchronously_expires_target_before_returning(
 
 def test_decision_request_expires_before_claim_and_returns_stable_public_code(
     tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database_path = tmp_path / "sync-decision.sqlite3"
     store = SQLiteStore(database_path)
     provider = HotelSimulator(store=store)
-    with TestClient(
-        create_app(_settings(), store=store, hotel_provider=provider)
-    ) as client:
+    with TestClient(create_app(_settings(), store=store, hotel_provider=provider)) as client:
         pending = _create_pending(client)
         recovery_id = str(pending["recoveryId"])
-        _expire(database_path, recovery_id)
+        expired_at = _expire(store, database_path, recovery_id)
+        _use_expired_cleanup_clock(monkeypatch, expired_at)
 
         response = client.post(
             f"/api/recoveries/{recovery_id}/decisions",
@@ -214,6 +251,7 @@ def test_decision_request_expires_before_claim_and_returns_stable_public_code(
 
 def test_expired_live_decision_releases_without_lease_reacquire_or_rebilling(
     tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database_path = tmp_path / "sync-live-decision.sqlite3"
     store = SQLiteStore(database_path)
@@ -224,7 +262,8 @@ def test_expired_live_decision_releases_without_lease_reacquire_or_rebilling(
         pending = _create_pending(client)
         recovery_id = str(pending["recoveryId"])
         _promote_pending_fixture_to_live(database_path, recovery_id)
-        _expire(database_path, recovery_id)
+        expired_at = _expire(store, database_path, recovery_id)
+        _use_expired_cleanup_clock(monkeypatch, expired_at)
 
         response = client.post(
             f"/api/recoveries/{recovery_id}/decisions",
@@ -237,10 +276,13 @@ def test_expired_live_decision_releases_without_lease_reacquire_or_rebilling(
         assert store.count_decisions(recovery_id) == 0
         assert store.count_executions(recovery_id) == 0
         with sqlite3.connect(database_path) as connection:
-            assert connection.execute(
-                "SELECT released_at FROM live_admissions WHERE recovery_id = ?",
-                (recovery_id,),
-            ).fetchone()[0] is not None
+            assert (
+                connection.execute(
+                    "SELECT released_at FROM live_admissions WHERE recovery_id = ?",
+                    (recovery_id,),
+                ).fetchone()[0]
+                is not None
+            )
             assert connection.execute(
                 "SELECT category, amount FROM usage_ledger WHERE recovery_id = ?",
                 (recovery_id,),
@@ -255,7 +297,7 @@ def test_foreign_access_check_does_not_expire_an_owner_recovery(tmp_path) -> Non
         foreign.get("/health")
         pending = _create_pending(owner)
         recovery_id = str(pending["recoveryId"])
-        _expire(database_path, recovery_id)
+        _expire(store, database_path, recovery_id)
 
         denied = foreign.get(f"/api/recoveries/{recovery_id}/receipt")
 

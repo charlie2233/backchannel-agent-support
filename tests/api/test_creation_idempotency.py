@@ -22,15 +22,12 @@ from server.config import RuntimeSettings
 from server.controls import PublicDemoControls
 from server.main import create_app
 from server.models import (
-    OPENAI_LIVE_BOUNDARY,
-    SDK_STUB_BOUNDARY,
     CreateRecoveryRequest,
     ExecutionMode,
-    RecoveryReceipt,
-    RecoveryStatus,
     ScenarioId,
 )
 from server.orchestrator import RecoveryOrchestrator
+from server.providers.hotel_simulator import HotelSimulator
 from server.replay.engine import ReplayEngine, replay_recovery_id
 from server.replay.loader import ScenarioLoader
 from server.store import ResetCreationPendingError, SQLiteStore
@@ -104,7 +101,7 @@ class _RecordingOrchestrator:
         self._store = store
         self._attempts = attempts
 
-    def _persist(
+    async def _persist(
         self,
         scenario_id: str | ScenarioId,
         *,
@@ -113,80 +110,78 @@ class _RecordingOrchestrator:
         session_key: str | None,
     ) -> Any:
         selected_scenario = ScenarioId(scenario_id)
-        selected_recovery_id = recovery_id or str(uuid4())
-        sdk_version = "0.18.3"
-        protocol_version = "backchannel.approval.v1"
-        definition_digest = "d" * 64
-        if execution_mode is ExecutionMode.OPENAI_LIVE:
-            model_ids = ["gpt-5.6-luna", "gpt-5.6-terra"]
-            root_trace_id = f"trace_{uuid4().hex}"
-            agent_graph_version = "backchannel.hotel-agent.live.v1"
-            recovery = self._store.create_recovery(
-                recovery_id=selected_recovery_id,
-                scenario_id=selected_scenario,
+        orchestrator = RecoveryOrchestrator(
+            store=self._store,
+            hotel_provider=HotelSimulator(store=self._store),
+        )
+        if (
+            selected_scenario is not ScenarioId.HOTEL
+            or execution_mode is not ExecutionMode.OPENAI_LIVE
+        ):
+            return await orchestrator.start(
+                selected_scenario,
                 execution_mode=execution_mode,
-                current_step=0,
-                current_step_summary="Injected live creation attempt completed.",
-                model_ids=model_ids,
-                root_trace_id=root_trace_id,
-                model_call=True,
-                sdk_version=sdk_version,
-                protocol_version=protocol_version,
-                agent_graph_version=agent_graph_version,
-                definition_digest=definition_digest,
+                recovery_id=recovery_id,
                 session_key=session_key,
             )
-        else:
-            model_ids = []
-            root_trace_id = f"qa_trace_{uuid4().hex}"
-            agent_graph_version = "backchannel.hotel-agent.sdk.v1"
-            recovery = self._store.create_recovery(
-                recovery_id=selected_recovery_id,
-                scenario_id=selected_scenario,
-                execution_mode=execution_mode,
-                current_step=0,
-                current_step_summary="Injected SDK creation attempt completed.",
-                root_trace_id=root_trace_id,
-                sdk_version=sdk_version,
-                protocol_version=protocol_version,
-                agent_graph_version=agent_graph_version,
-                definition_digest=definition_digest,
-                session_key=session_key,
+
+        pending = await orchestrator.start(
+            selected_scenario,
+            execution_mode=ExecutionMode.SDK_STUB,
+            recovery_id=recovery_id,
+            session_key=session_key,
+        )
+        selected_recovery_id = pending.recovery.recovery_id
+        model_ids_json = '["gpt-5.6-luna","gpt-5.6-terra"]'
+        root_trace_id = f"trace_{uuid4().hex}"
+        agent_graph_version = "backchannel.hotel-agent.live.v1"
+        with sqlite3.connect(self._store._database_path) as connection:
+            connection.execute(
+                """
+                UPDATE recoveries
+                SET execution_mode = 'openai_live',
+                    model_ids_json = ?,
+                    root_trace_id = ?,
+                    model_call = 1,
+                    agent_graph_version = ?
+                WHERE id = ?
+                """,
+                (
+                    model_ids_json,
+                    root_trace_id,
+                    agent_graph_version,
+                    selected_recovery_id,
+                ),
             )
-        receipt = RecoveryReceipt(
-            recoveryId=recovery.recovery_id,
-            executionMode=execution_mode,
-            status="completed",
-            simulated=True,
-            providerExecution=True,
-            modelCall=execution_mode is ExecutionMode.OPENAI_LIVE,
-            modelIds=model_ids,
-            rootTraceId=root_trace_id,
-            sdkVersion=sdk_version,
-            protocolVersion=protocol_version,
-            agentGraphVersion=agent_graph_version,
-            definitionDigest=definition_digest,
-            boundary=(
-                OPENAI_LIVE_BOUNDARY
-                if execution_mode is ExecutionMode.OPENAI_LIVE
-                else SDK_STUB_BOUNDARY
-            ),
-            providerResult="Injected demo provider result was durably verified.",
-            authorizationSource="Injected exact approval evidence.",
-            verificationResults=["Injected terminal receipt was durably sealed."],
-            approvalCount=1,
-            approvedRemedyDigest=f"sha256:{'e' * 64}",
-        )
-        completed = self._store.record_transition(
-            recovery.recovery_id,
-            status=RecoveryStatus.COMPLETED,
-            current_step=5,
-            current_step_summary="Injected recovery completed with receipt evidence.",
-            event_type="recovery.completed",
-            event_data={"summary": "Injected terminal evidence persisted."},
-            receipt=receipt,
-        )
-        return SimpleNamespace(recovery=completed)
+            connection.execute(
+                """
+                UPDATE pending_approvals
+                SET execution_mode = 'openai_live',
+                    model_ids_json = ?,
+                    root_trace_id = ?,
+                    agent_graph_version = ?
+                WHERE recovery_id = ?
+                """,
+                (
+                    model_ids_json,
+                    root_trace_id,
+                    agent_graph_version,
+                    selected_recovery_id,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE events
+                SET data_json = ?
+                WHERE recovery_id = ? AND seq = 1
+                """,
+                (
+                    '{"executionMode":"openai_live","scenarioId":"hotel",'
+                    '"summary":"Recovery created for the selected execution mode."}',
+                    selected_recovery_id,
+                ),
+            )
+        return SimpleNamespace(recovery=self._store.get_recovery(selected_recovery_id))
 
     async def start(
         self,
@@ -197,7 +192,7 @@ class _RecordingOrchestrator:
         session_key: str | None = None,
     ) -> Any:
         self._attempts.record_orchestration()
-        return self._persist(
+        return await self._persist(
             scenario_id,
             execution_mode=execution_mode,
             recovery_id=recovery_id,
@@ -255,7 +250,7 @@ class _BlockingOrchestrator(_RecordingOrchestrator):
             self._coordinator.entered.set()
             if not self._coordinator.release.wait(timeout=5):
                 raise AssertionError("Timed out waiting to release creation owner")
-        return self._persist(
+        return await self._persist(
             scenario_id,
             execution_mode=execution_mode,
             recovery_id=recovery_id,
@@ -318,7 +313,7 @@ class _AuthoritativeThenUncertainOrchestrator(_RecordingOrchestrator):
         session_key: str | None = None,
     ) -> Any:
         self._attempts.record_orchestration()
-        self._persist(
+        await self._persist(
             scenario_id,
             execution_mode=execution_mode,
             recovery_id=recovery_id,
@@ -2334,7 +2329,7 @@ def test_post_start_error_does_not_reconcile_bare_status_flip(
     store.close()
 
 
-def test_post_start_error_reconciles_authoritative_terminal_evidence(
+def test_post_start_error_reconciles_authoritative_active_evidence(
     tmp_path: Path,
 ) -> None:
     database_path = tmp_path / "authoritative-before-error.sqlite3"
@@ -2355,7 +2350,7 @@ def test_post_start_error_reconciles_authoritative_terminal_evidence(
 
     assert [first.status_code, retry.status_code] == [201, 201]
     assert first.json()["recoveryId"] == retry.json()["recoveryId"]
-    assert first.json()["status"] == retry.json()["status"] == "completed"
+    assert first.json()["status"] == retry.json()["status"] == "pending_approval"
     assert attempts.orchestrations == 1
     store.close()
 
@@ -2587,4 +2582,113 @@ def test_exact_ready_replay_retry_revalidates_canonical_integrity(
         )
         == 1
     )
+    store.close()
+
+
+@pytest.mark.parametrize(
+    "tamper_sql",
+    [
+        "UPDATE remedies SET cost_delta_minor = cost_delta_minor + 1",
+        "UPDATE events SET type = 'provider.executed' WHERE seq = 2",
+        (
+            "INSERT INTO receipts (recovery_id, receipt_json, created_at) "
+            "SELECT id, '{}', updated_at FROM recoveries"
+        ),
+    ],
+)
+def test_exact_ready_sdk_retry_revalidates_active_hotel_integrity(
+    tmp_path: Path,
+    tamper_sql: str,
+) -> None:
+    database_path = tmp_path / f"tampered-sdk-{uuid4().hex}.sqlite3"
+    store = SQLiteStore(database_path)
+    payload = _payload(f"tampered-sdk-retry-{uuid4().hex}")
+    with TestClient(_create_test_app(_settings(), store=store)) as client:
+        first = client.post("/api/recoveries", json=payload)
+        assert first.status_code == 201
+
+        valid_retry = client.post("/api/recoveries", json=payload)
+        assert valid_retry.status_code == 201
+        assert valid_retry.json() == first.json()
+
+        with sqlite3.connect(database_path) as connection:
+            connection.execute(tamper_sql)
+        corrupt_retry = client.post("/api/recoveries", json=payload)
+
+    _assert_creation_error(corrupt_retry, code="creation_outcome_unknown")
+    assert _scalar(database_path, "SELECT COUNT(*) FROM recoveries") == 1
+    assert _scalar(database_path, "SELECT COUNT(*) FROM recovery_creations") == 1
+    assert (
+        _scalar(
+            database_path,
+            "SELECT COUNT(*) FROM recovery_creations WHERE status = 'unknown'",
+        )
+        == 1
+    )
+    store.close()
+
+
+@pytest.mark.parametrize(
+    "tamper_sql",
+    [
+        "UPDATE remedies SET cost_delta_minor = cost_delta_minor + 1",
+        "UPDATE events SET type = 'provider.executed' WHERE seq = 2",
+        """
+        UPDATE recoveries
+        SET updated_at = (
+            SELECT created_at FROM events
+            WHERE events.recovery_id = recoveries.id AND seq = 2
+        );
+        UPDATE pending_approvals
+        SET updated_at = (
+            SELECT created_at FROM events
+            WHERE events.recovery_id = pending_approvals.recovery_id AND seq = 2
+        );
+        UPDATE receipts
+        SET created_at = (
+            SELECT created_at FROM events
+            WHERE events.recovery_id = receipts.recovery_id AND seq = 2
+        );
+        UPDATE events
+        SET created_at = (
+            SELECT approval.created_at FROM events AS approval
+            WHERE approval.recovery_id = events.recovery_id AND approval.seq = 2
+        )
+        WHERE terminal = 1;
+        """,
+    ],
+)
+def test_exact_ready_sdk_retry_revalidates_expiry_source_integrity(
+    tmp_path: Path,
+    tamper_sql: str,
+) -> None:
+    database_path = tmp_path / f"tampered-sdk-expiry-{uuid4().hex}.sqlite3"
+    store = SQLiteStore(database_path)
+    payload = _payload(f"tampered-sdk-expiry-retry-{uuid4().hex}")
+    with TestClient(_create_test_app(_settings(), store=store)) as client:
+        first = client.post("/api/recoveries", json=payload)
+        assert first.status_code == 201
+        recovery_id = str(first.json()["recoveryId"])
+        with sqlite3.connect(database_path) as connection:
+            expiry_row = connection.execute(
+                "SELECT expiry FROM remedies WHERE recovery_id = ?",
+                (recovery_id,),
+            ).fetchone()
+            assert expiry_row is not None
+        expired_at = datetime.fromisoformat(str(expiry_row[0])) + timedelta(seconds=1)
+        assert (
+            store.expire_pending_approvals(
+                now=expired_at,
+                batch_size=1,
+                recovery_id=recovery_id,
+            )
+            == 1
+        )
+        with sqlite3.connect(database_path) as connection:
+            connection.executescript(tamper_sql)
+        corrupt_retry = client.post("/api/recoveries", json=payload)
+
+    _assert_creation_error(corrupt_retry, code="creation_outcome_unknown")
+    assert _scalar(database_path, "SELECT COUNT(*) FROM recoveries") == 1
+    assert _scalar(database_path, "SELECT COUNT(*) FROM recovery_creations") == 1
     store.close()

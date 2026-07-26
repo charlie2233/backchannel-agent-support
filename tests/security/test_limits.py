@@ -24,14 +24,14 @@ from server.controls import (
 )
 from server.main import create_app
 from server.models import (
-    OPENAI_LIVE_BOUNDARY,
     ApprovalDecisionResponse,
     DecisionAction,
     ExecutionMode,
-    RecoveryReceipt,
     RecoveryStatus,
     ScenarioId,
 )
+from server.orchestrator import RecoveryOrchestrator
+from server.providers.hotel_simulator import HotelSimulator
 from server.store import SQLiteStore
 
 
@@ -73,57 +73,66 @@ class RecordingLiveOrchestrator:
         assert execution_mode is ExecutionMode.OPENAI_LIVE
         assert recovery_id is not None
         self.calls.append(recovery_id)
-        model_ids = ["gpt-5.6-luna", "gpt-5.6-terra"]
-        root_trace_id = f"trace_{len(self.calls):032x}"
-        sdk_version = "0.18.3"
-        protocol_version = "backchannel.approval.v1"
-        agent_graph_version = "backchannel.hotel-agent.live.v1"
-        definition_digest = "d" * 64
-        self.store.create_recovery(
+        pending = await RecoveryOrchestrator(
+            store=self.store,
+            hotel_provider=HotelSimulator(store=self.store),
+        ).start(
+            ScenarioId.HOTEL,
+            execution_mode=ExecutionMode.SDK_STUB,
             recovery_id=recovery_id,
-            scenario_id=ScenarioId.HOTEL,
-            execution_mode=ExecutionMode.OPENAI_LIVE,
-            current_step=0,
-            current_step_summary="Live model start completed.",
-            model_ids=model_ids,
-            root_trace_id=root_trace_id,
-            model_call=True,
-            sdk_version=sdk_version,
-            protocol_version=protocol_version,
-            agent_graph_version=agent_graph_version,
-            definition_digest=definition_digest,
             session_key=session_key,
         )
-        receipt = RecoveryReceipt(
-            recoveryId=recovery_id,
-            executionMode=ExecutionMode.OPENAI_LIVE,
-            status="completed",
-            simulated=True,
-            providerExecution=True,
-            modelCall=True,
-            modelIds=model_ids,
-            rootTraceId=root_trace_id,
-            sdkVersion=sdk_version,
-            protocolVersion=protocol_version,
-            agentGraphVersion=agent_graph_version,
-            definitionDigest=definition_digest,
-            boundary=OPENAI_LIVE_BOUNDARY,
-            providerResult="Injected demo provider result was durably verified.",
-            authorizationSource="Injected exact approval evidence.",
-            verificationResults=["Injected terminal receipt was durably sealed."],
-            approvalCount=1,
-            approvedRemedyDigest=f"sha256:{'e' * 64}",
-        )
-        completed = self.store.record_transition(
-            recovery_id,
-            status=RecoveryStatus.COMPLETED,
-            current_step=5,
-            current_step_summary="Live recovery completed with receipt evidence.",
-            event_type="recovery.completed",
-            event_data={"summary": "Live terminal evidence persisted."},
-            receipt=receipt,
-        )
-        return SimpleNamespace(recovery=completed)
+        model_ids_json = '["gpt-5.6-luna","gpt-5.6-terra"]'
+        root_trace_id = f"trace_{len(self.calls):032x}"
+        agent_graph_version = "backchannel.hotel-agent.live.v1"
+        with sqlite3.connect(self.store._database_path) as connection:
+            connection.execute(
+                """
+                UPDATE recoveries
+                SET execution_mode = 'openai_live',
+                    model_ids_json = ?,
+                    root_trace_id = ?,
+                    model_call = 1,
+                    agent_graph_version = ?
+                WHERE id = ?
+                """,
+                (
+                    model_ids_json,
+                    root_trace_id,
+                    agent_graph_version,
+                    recovery_id,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE pending_approvals
+                SET execution_mode = 'openai_live',
+                    model_ids_json = ?,
+                    root_trace_id = ?,
+                    agent_graph_version = ?
+                WHERE recovery_id = ?
+                """,
+                (
+                    model_ids_json,
+                    root_trace_id,
+                    agent_graph_version,
+                    recovery_id,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE events
+                SET data_json = ?
+                WHERE recovery_id = ? AND seq = 1
+                """,
+                (
+                    '{"executionMode":"openai_live","scenarioId":"hotel",'
+                    '"summary":"Recovery created for the selected execution mode."}',
+                    recovery_id,
+                ),
+            )
+        assert pending.recovery.recovery_id == recovery_id
+        return SimpleNamespace(recovery=self.store.get_recovery(recovery_id))
 
 
 class RecordingLiveDecisionOrchestrator:
@@ -335,9 +344,7 @@ def test_creation_limits_have_bounded_defaults_and_environment_overrides(
 
 
 def test_env_example_publishes_canonical_creation_capacity_defaults() -> None:
-    example = (
-        Path(__file__).resolve().parents[2] / ".env.example"
-    ).read_text(encoding="utf-8")
+    example = (Path(__file__).resolve().parents[2] / ".env.example").read_text(encoding="utf-8")
 
     assert "BACKCHANNEL_MAX_RECOVERY_CREATIONS_PER_SESSION=32\n" in example
     assert "BACKCHANNEL_MAX_RECOVERY_CREATIONS_PER_IP=128\n" in example
@@ -743,8 +750,7 @@ def test_public_live_decision_path_guards_then_reacquires_expired_lease(tmp_path
     assert blocked.json() == {
         "code": "decision_capacity",
         "message": (
-            "Live decision processing is currently at capacity. "
-            "Retry the same decision shortly."
+            "Live decision processing is currently at capacity. Retry the same decision shortly."
         ),
         "requestId": blocked.headers["x-request-id"],
     }
@@ -795,8 +801,7 @@ def test_live_create_postcondition_failure_releases_reserved_admission(tmp_path)
     assert response.json() == {
         "code": "creation_outcome_unknown",
         "message": (
-            "The recovery start outcome could not be confirmed. "
-            "No replacement run was started."
+            "The recovery start outcome could not be confirmed. No replacement run was started."
         ),
         "requestId": response.headers["x-request-id"],
     }
@@ -1004,8 +1009,7 @@ def test_foreign_live_decision_cannot_renew_or_reacquire_owner_lease(tmp_path) -
     assert orchestrator.calls == []
     with sqlite3.connect(database_path) as connection:
         admission = connection.execute(
-            "SELECT expires_at, released_at FROM live_admissions "
-            "WHERE recovery_id = ?",
+            "SELECT expires_at, released_at FROM live_admissions WHERE recovery_id = ?",
             (recovery_id,),
         ).fetchone()
         assert admission == (expired_at, None)
@@ -1090,11 +1094,6 @@ def test_capacity_and_daily_budget_errors_do_not_expose_internal_keys(tmp_path) 
     second_app, second_orchestrator = _live_app(database_path, settings=capacity_settings)
     with TestClient(first_app, client=("198.51.100.1", 5000)) as first_client:
         assert _post_live(first_client).status_code == 201
-    second_app.state.public_demo_controls.admit_live(
-        recovery_id="capacity-holder",
-        ip_key="capacity-holder-ip",
-        session_key="capacity-holder-session",
-    )
     with TestClient(second_app, client=("198.51.100.2", 5000)) as second_client:
         capacity = _post_live(second_client)
 
@@ -1168,10 +1167,13 @@ def test_trusted_proxy_chain_stops_at_nearest_untrusted_hop(tmp_path) -> None:
     )
     app, _ = _live_app(tmp_path / "proxy-hop-safe.sqlite3", settings=settings)
     with TestClient(app, client=("10.0.0.2", 5000)) as first:
-        assert _post_live(
-            first,
-            forwarded_for="192.0.2.10, 198.51.100.77, 10.0.0.1",
-        ).status_code == 201
+        assert (
+            _post_live(
+                first,
+                forwarded_for="192.0.2.10, 198.51.100.77, 10.0.0.1",
+            ).status_code
+            == 201
+        )
     with TestClient(app, client=("10.0.0.2", 5001)) as second:
         response = _post_live(
             second,
@@ -1196,21 +1198,22 @@ def test_cookieless_health_requests_do_not_touch_durable_demo_sessions(
         client.cookies.clear()
         assert client.get("/api/scenarios").status_code == 200
         client.cookies.clear()
-        assert client.post(
-            "/api/recoveries",
-            json={
-                "scenarioId": "api-quota",
-                "executionMode": "replay_fixture",
-                "clientRequestId": uuid4().hex,
-            },
-        ).status_code == 201
+        assert (
+            client.post(
+                "/api/recoveries",
+                json={
+                    "scenarioId": "api-quota",
+                    "executionMode": "replay_fixture",
+                    "clientRequestId": uuid4().hex,
+                },
+            ).status_code
+            == 201
+        )
         client.cookies.clear()
         assert client.get("/static/missing.js").status_code == 404
 
     with sqlite3.connect(database_path) as connection:
-        session_rows = connection.execute(
-            "SELECT COUNT(*) FROM demo_sessions"
-        ).fetchone()[0]
+        session_rows = connection.execute("SELECT COUNT(*) FROM demo_sessions").fetchone()[0]
 
     assert session_rows == 0
     assert store.demo_session_reads == 0
@@ -1267,12 +1270,8 @@ def test_signed_cookie_reuse_and_invalid_cookie_replacement_are_stateless(
             },
         )
 
-    tampered_replacement = replaced_tampered.cookies[
-        settings.demo_session_cookie_name
-    ]
-    expired_replacement = replaced_expired.cookies[
-        settings.demo_session_cookie_name
-    ]
+    tampered_replacement = replaced_tampered.cookies[settings.demo_session_cookie_name]
+    expired_replacement = replaced_expired.cookies[settings.demo_session_cookie_name]
     cookie_header = first.headers["set-cookie"]
     with sqlite3.connect(database_path) as connection:
         durable_dump = "\n".join(connection.iterdump())
@@ -1386,9 +1385,7 @@ def test_store_reopen_clears_legacy_demo_sessions_but_keeps_compatibility_table(
         table_exists = connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'demo_sessions'"
         ).fetchone()
-        session_rows = connection.execute(
-            "SELECT COUNT(*) FROM demo_sessions"
-        ).fetchone()[0]
+        session_rows = connection.execute("SELECT COUNT(*) FROM demo_sessions").fetchone()[0]
 
     assert table_exists is not None
     assert session_rows == 0
@@ -1425,9 +1422,7 @@ def test_deployed_cookie_is_secure_and_has_bounded_lifetime(tmp_path) -> None:
         identity_hash_secret="deployment-identity-secret-that-is-long-enough",
         demo_session_lifetime_seconds=3_600,
     )
-    client = TestClient(
-        create_app(settings, store=SQLiteStore(tmp_path / "secure-cookie.sqlite3"))
-    )
+    client = TestClient(create_app(settings, store=SQLiteStore(tmp_path / "secure-cookie.sqlite3")))
 
     response = client.get("/health")
     cookie = response.headers["set-cookie"]

@@ -245,12 +245,28 @@ readers remain available for internal reconciliation and migration paths. Owner-
 disagreement fails through the generic sanitized 500 boundary, while unauthorized and absent
 reads remain the same 404.
 
+An active SDK/live hotel bundle is also exact rather than a status-only snapshot. It requires the
+step-three approval summary, the canonical `recovery.created` and `approval.requested` ledger, one
+pending approval and one bound remedy/consent record, plus the public view allowed by its durable
+state. An untouched run exposes only the pending approval; an ordinary claimed run exposes only
+the claimed decision. A conservatively quarantined decline may expose neither while its exact
+claim remains durable. Claimed evidence binds the action, digest, pre-expiry UTC timestamp,
+claim-specific recovery summary, and the only execution shapes that its action and envelope state
+permit. Missing, ambiguous, altered, or impossible active evidence fails before an owner snapshot,
+receipt lookup, or SSE admission; foreign access still fails at the indistinguishable 404
+boundary. Both targeted and background expiry validate the same active source before sealing it,
+and same-key creation retries cannot promote a status-only active or expired hotel row.
+
 Expiry and decision claims serialize as competing writers: an expiration that commits first
 prevents a later claim, while a claim that commits first owns continuation only until its consent
 deadline or a canonical completed result. Untouched expiry seals one `recovery.expired` event;
 claimed expiry seals one `recovery.claim_expired` event with its conservative terminal receipt.
 Both mark the pending envelope and remedy terminal and release the matching live admission with
-`COALESCE` so cooldown and aggregate usage evidence remain intact.
+`COALESCE` so cooldown and aggregate usage evidence remain intact. The recovery, receipt, terminal
+event, and pending-envelope update share one UTC seal at or after the bound consent expiry.
+Background cleanup scans a bounded keyset page before applying its requested mutation limit. Its
+SQLite cursor advances past invalid candidates and wraps after the ordered candidate set, so even
+a full corrupt page cannot permanently starve later valid expiry evidence across cleanup cycles.
 
 ## Runtime provenance and trust boundary
 

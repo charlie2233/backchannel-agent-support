@@ -15,13 +15,6 @@ from typing import Literal, TypedDict
 os.environ["OPENAI_AGENTS_DONT_LOG_MODEL_DATA"] = "1"
 os.environ["OPENAI_AGENTS_DONT_LOG_TOOL_DATA"] = "1"
 
-from openai import OpenAIError  # noqa: E402
-
-from server.models import ApprovalDecisionRequest, ExecutionMode  # noqa: E402
-from server.orchestrator import RecoveryOrchestrator  # noqa: E402
-from server.providers.hotel_simulator import HotelSimulator  # noqa: E402
-from server.store import SQLiteStore  # noqa: E402
-
 logging.disable(logging.CRITICAL)
 
 
@@ -33,9 +26,6 @@ class SmokeResult(TypedDict):
     approvalCount: int
     traceId: str | None
     errorClass: str | None
-
-
-BLOCKED_EXCEPTIONS = (OpenAIError,)
 
 
 def _result(
@@ -60,6 +50,11 @@ def _result(
 
 
 async def _run_live(database_path: Path, started: float) -> SmokeResult:
+    from server.models import ApprovalDecisionRequest, DecisionAction, ExecutionMode
+    from server.orchestrator import RecoveryOrchestrator
+    from server.providers.hotel_simulator import HotelSimulator
+    from server.store import SQLiteStore
+
     store = SQLiteStore(database_path)
     provider = HotelSimulator(store=store)
     try:
@@ -75,11 +70,15 @@ async def _run_live(database_path: Path, started: float) -> SmokeResult:
         approval = pending.recovery.pending_approval
         if approval is None:
             raise RuntimeError("Live recovery did not reach its approval boundary")
-        tool_names = [item.tool_name for item in pending.sdk_result.interruptions]
+        tool_names: list[str] = []
+        for interruption in pending.sdk_result.interruptions:
+            if interruption.tool_name is None:
+                raise RuntimeError("Live recovery interruption omitted its tool name")
+            tool_names.append(interruption.tool_name)
         decision = await orchestrator.approve_decision(
             pending.recovery.recovery_id,
             ApprovalDecisionRequest(
-                action="approve",
+                action=DecisionAction.APPROVE,
                 clientDecisionId="live-smoke-approval",
                 remedyId=approval.remedy_id,
                 remedyDigest=approval.remedy_digest,
@@ -118,11 +117,13 @@ def main() -> int:
         print(json.dumps(output, separators=(",", ":"), sort_keys=True))
         return 2
 
+    from openai import OpenAIError
+
     try:
         with TemporaryDirectory(prefix="backchannel-live-smoke-") as directory:
             database_path = Path(directory) / "live-smoke.sqlite3"
             output = asyncio.run(_run_live(database_path, started))
-    except BLOCKED_EXCEPTIONS as error:
+    except OpenAIError as error:
         output = _result(
             status="blocked",
             started=started,

@@ -238,51 +238,53 @@ class _LiveHotelOnlyOrchestrator:
         assert scenario is ScenarioId.HOTEL
         assert execution_mode is ExecutionMode.OPENAI_LIVE
         assert recovery_id is not None
-        recovery = self.store.create_recovery(
+        pending = await RecoveryOrchestrator(
+            store=self.store,
+            hotel_provider=HotelSimulator(store=self.store),
+        ).start(
+            ScenarioId.HOTEL,
+            execution_mode=ExecutionMode.SDK_STUB,
             recovery_id=recovery_id,
-            scenario_id=scenario,
-            execution_mode=execution_mode,
-            current_step=0,
-            current_step_summary="Fake live hotel recovery admitted.",
-            model_ids=["gpt-5.6-luna", "gpt-5.6-terra"],
-            root_trace_id="trace_0123456789abcdef0123456789abcdef",
-            model_call=True,
-            sdk_version="test-sdk",
-            protocol_version="test-protocol",
-            agent_graph_version="test-live-hotel",
-            definition_digest="a" * 64,
             session_key=session_key,
         )
-        receipt = RecoveryReceipt(
-            recoveryId=recovery.recovery_id,
-            executionMode=execution_mode,
-            status="completed",
-            simulated=True,
-            providerExecution=True,
-            modelCall=True,
-            modelIds=["gpt-5.6-luna", "gpt-5.6-terra"],
-            rootTraceId="trace_0123456789abcdef0123456789abcdef",
-            sdkVersion="test-sdk",
-            protocolVersion="test-protocol",
-            agentGraphVersion="test-live-hotel",
-            definitionDigest="a" * 64,
-            boundary=OPENAI_LIVE_BOUNDARY,
-            providerResult="Injected live hotel result was durably verified.",
-            authorizationSource="Injected exact live approval evidence.",
-            verificationResults=["Injected live receipt was durably sealed."],
-            approvalCount=1,
-            approvedRemedyDigest=f"sha256:{'b' * 64}",
-        )
-        completed = self.store.record_transition(
-            recovery.recovery_id,
-            status=RecoveryStatus.COMPLETED,
-            current_step=5,
-            current_step_summary="Fake live hotel recovery completed.",
-            event_type="recovery.completed",
-            event_data={"summary": "Injected terminal live evidence persisted."},
-            receipt=receipt,
-        )
-        return SimpleNamespace(recovery=completed)
+        with sqlite3.connect(self.store._database_path) as connection:
+            connection.execute(
+                """
+                UPDATE recoveries
+                SET execution_mode = 'openai_live',
+                    model_ids_json = '["gpt-5.6-luna","gpt-5.6-terra"]',
+                    root_trace_id = 'trace_0123456789abcdef0123456789abcdef',
+                    model_call = 1,
+                    agent_graph_version = 'backchannel.hotel-agent.live.v1'
+                WHERE id = ?
+                """,
+                (recovery_id,),
+            )
+            connection.execute(
+                """
+                UPDATE pending_approvals
+                SET execution_mode = 'openai_live',
+                    model_ids_json = '["gpt-5.6-luna","gpt-5.6-terra"]',
+                    root_trace_id = 'trace_0123456789abcdef0123456789abcdef',
+                    agent_graph_version = 'backchannel.hotel-agent.live.v1'
+                WHERE recovery_id = ?
+                """,
+                (recovery_id,),
+            )
+            connection.execute(
+                """
+                UPDATE events
+                SET data_json = ?
+                WHERE recovery_id = ? AND seq = 1
+                """,
+                (
+                    '{"executionMode":"openai_live","scenarioId":"hotel",'
+                    '"summary":"Recovery created for the selected execution mode."}',
+                    recovery_id,
+                ),
+            )
+        assert pending.recovery.recovery_id == recovery_id
+        return SimpleNamespace(recovery=self.store.get_recovery(recovery_id))
 
 
 def test_quota_live_is_rejected_before_capacity_cooldown_or_budget_admission(

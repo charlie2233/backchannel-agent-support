@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -14,9 +15,7 @@ from server.orchestrator import RecoveryOrchestrator
 from server.providers.hotel_simulator import HotelSimulator
 from server.store import ApprovalDecisionError, SQLiteStore
 
-EXPIRATION_SUMMARY = (
-    "Consent expired without a decision; no provider dispatch was authorized."
-)
+EXPIRATION_SUMMARY = "Consent expired without a decision; no provider dispatch was authorized."
 EXPIRATION_VERIFICATION_RESULTS = [
     "Human consent requested.",
     "Consent window expired without an approval decision.",
@@ -80,6 +79,25 @@ def _as_live_fixture(
         )
         connection.execute(
             """
+            UPDATE events
+            SET data_json = ?
+            WHERE recovery_id = ? AND seq = 1
+            """,
+            (
+                json.dumps(
+                    {
+                        "scenarioId": "hotel",
+                        "executionMode": "openai_live",
+                        "summary": "Recovery created for the selected execution mode.",
+                    },
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+                recovery_id,
+            ),
+        )
+        connection.execute(
+            """
             INSERT INTO live_admissions (
                 recovery_id, ip_key, session_key, budget_units,
                 admitted_at, expires_at, released_at
@@ -122,11 +140,14 @@ def test_expiry_sweep_seals_truthful_zero_dispatch_evidence_and_releases_live(
             expiry=approval.expiry,
         )
 
-    assert expire_pending_approvals(
-        store,
-        now=approval.expiry,
-        batch_size=10,
-    ) == 1
+    assert (
+        expire_pending_approvals(
+            store,
+            now=approval.expiry,
+            batch_size=10,
+        )
+        == 1
+    )
 
     expired = store.get_recovery(recovery_id)
     receipt = store.get_receipt(recovery_id)
@@ -143,10 +164,7 @@ def test_expiry_sweep_seals_truthful_zero_dispatch_evidence_and_releases_live(
     assert receipt.approved_remedy_digest is None
     assert receipt.approval_count == 0
     assert receipt.provider_result == "Provider dispatch did not begin."
-    assert (
-        receipt.authorization_source
-        == "Consent window expired before an approval decision."
-    )
+    assert receipt.authorization_source == "Consent window expired before an approval decision."
     assert receipt.verification_results == EXPIRATION_VERIFICATION_RESULTS
     assert len(terminal_events) == 1
     assert terminal_events[0].type == "recovery.expired"
@@ -215,16 +233,20 @@ def test_expiry_sweep_is_restart_idempotent_and_does_not_rewrite_evidence(
     store.close()
 
     restarted = SQLiteStore(database_path)
-    assert expire_pending_approvals(
-        restarted,
-        now=approval.expiry + timedelta(days=1),
-        batch_size=1,
-    ) == 0
+    assert (
+        expire_pending_approvals(
+            restarted,
+            now=approval.expiry + timedelta(days=1),
+            batch_size=1,
+        )
+        == 0
+    )
     assert restarted.get_receipt(recovery_id) == first_receipt
     assert restarted.list_events(recovery_id) == first_events
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute(
-            """
+        assert (
+            connection.execute(
+                """
             SELECT recoveries.status, recoveries.updated_at,
                    pending_approvals.status, pending_approvals.updated_at,
                    remedies.status, receipts.receipt_json
@@ -234,8 +256,67 @@ def test_expiry_sweep_is_restart_idempotent_and_does_not_rewrite_evidence(
             JOIN receipts ON receipts.recovery_id = recoveries.id
             WHERE recoveries.id = ?
             """,
-            (recovery_id,),
-        ).fetchone() == first_rows
+                (recovery_id,),
+            ).fetchone()
+            == first_rows
+        )
+
+
+def test_corrupt_oldest_untouched_approval_does_not_starve_valid_expiry(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "expiry-invalid-oldest.sqlite3"
+    store = SQLiteStore(database_path)
+    candidates = []
+    for _index in range(3):
+        snapshot, approval, _provider = _pending_sdk(store)
+        candidates.append((approval.expiry, snapshot.recovery_id))
+    candidates = sorted(
+        candidates,
+    )
+    corrupt_ids = [candidates[0][1], candidates[1][1]]
+    valid_id = candidates[2][1]
+    with sqlite3.connect(database_path) as connection:
+        for corrupt_id in corrupt_ids:
+            connection.execute(
+                """
+            UPDATE events
+            SET type = 'provider.executed'
+            WHERE recovery_id = ? AND seq = 2
+            """,
+                (corrupt_id,),
+            )
+    monkeypatch.setattr("server.store.MAX_STORE_EXPIRY_BATCH_SIZE", 1)
+    sweep_now = max(candidate[0] for candidate in candidates)
+
+    assert (
+        expire_pending_approvals(
+            store,
+            now=sweep_now,
+            batch_size=1,
+        )
+        == 0
+    )
+    assert all(
+        store.get_recovery(corrupt_id).status is RecoveryStatus.PENDING_APPROVAL
+        for corrupt_id in corrupt_ids
+    )
+    assert store.get_recovery(valid_id).status is RecoveryStatus.PENDING_APPROVAL
+
+    assert (
+        expire_pending_approvals(
+            store,
+            now=sweep_now,
+            batch_size=1,
+        )
+        == 1
+    )
+    assert all(
+        store.get_recovery(corrupt_id).status is RecoveryStatus.PENDING_APPROVAL
+        for corrupt_id in corrupt_ids
+    )
+    assert store.get_recovery(valid_id).status is RecoveryStatus.CLOSED_WITHOUT_ACTION
 
 
 def test_claim_stays_resumable_before_expiry_then_seals_at_expiry(tmp_path) -> None:

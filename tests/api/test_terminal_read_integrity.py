@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import sqlite3
 import time
@@ -14,13 +15,18 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 
+from server.cleanup import expire_pending_approvals
 from server.config import RuntimeSettings
 from server.events import stream_recovery_events
 from server.main import create_app
 from server.providers.hotel_simulator import HotelSimulator
 from server.replay.loader import ScenarioLoader
 from server.store import PublicEvidenceIntegrityError, SQLiteStore
-from tests.api.test_decisions import create_sdk_recovery, decision_payload
+from tests.api.test_decisions import (
+    claim_without_continuing,
+    create_sdk_recovery,
+    decision_payload,
+)
 from tests.security.test_session_isolation import _stable_not_found_headers
 
 IDENTITY_SECRET = "terminal-read-integrity-secret-0123456789abcdef"
@@ -163,6 +169,595 @@ def _duplicate_terminal_event(connection: sqlite3.Connection, recovery_id: str) 
         """,
         (recovery_id, recovery_id),
     )
+
+
+def _delete_pending_approval(connection: sqlite3.Connection, recovery_id: str) -> None:
+    connection.execute(
+        "DELETE FROM pending_approvals WHERE recovery_id = ?",
+        (recovery_id,),
+    )
+
+
+def _delete_pending_remedy(connection: sqlite3.Connection, recovery_id: str) -> None:
+    connection.execute(
+        "DELETE FROM remedies WHERE recovery_id = ?",
+        (recovery_id,),
+    )
+
+
+def _corrupt_pending_consent(connection: sqlite3.Connection, recovery_id: str) -> None:
+    connection.execute(
+        """
+        UPDATE remedies
+        SET cost_delta_minor = cost_delta_minor + 1
+        WHERE recovery_id = ?
+        """,
+        (recovery_id,),
+    )
+
+
+def _corrupt_pending_event(connection: sqlite3.Connection, recovery_id: str) -> None:
+    connection.execute(
+        """
+        UPDATE events
+        SET type = 'provider.executed',
+            data_json = ?
+        WHERE recovery_id = ? AND seq = 2
+        """,
+        (
+            json.dumps(
+                {
+                    "phase": "Verify & seal",
+                    "providerExecution": True,
+                    "summary": "Forged provider execution.",
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+            recovery_id,
+        ),
+    )
+
+
+def _corrupt_pending_provenance(
+    connection: sqlite3.Connection,
+    recovery_id: str,
+) -> None:
+    connection.execute(
+        """
+        UPDATE recoveries
+        SET model_call = 1
+        WHERE id = ?
+        """,
+        (recovery_id,),
+    )
+
+
+def _insert_forged_pending_execution(
+    connection: sqlite3.Connection,
+    recovery_id: str,
+) -> None:
+    now = datetime.now(UTC).isoformat()
+    connection.execute(
+        """
+        INSERT INTO executions (
+            id, recovery_id, idempotency_key, status, provider_execution,
+            request_digest, tool_call_id, remedy_digest, result_json,
+            created_at, updated_at
+        ) VALUES (?, ?, ?, 'completed', 1, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            f"forged-{recovery_id}",
+            recovery_id,
+            f"forged-key-{recovery_id}",
+            "f" * 64,
+            "forged-tool-call",
+            f"sha256:{'f' * 64}",
+            '{"provider_result":"forged"}',
+            now,
+            now,
+        ),
+    )
+
+
+def _assert_pending_unsealed(database_path: Path, recovery_id: str) -> None:
+    with sqlite3.connect(database_path) as connection:
+        recovery = connection.execute(
+            "SELECT status, current_step FROM recoveries WHERE id = ?",
+            (recovery_id,),
+        ).fetchone()
+        receipt_count = connection.execute(
+            "SELECT COUNT(*) FROM receipts WHERE recovery_id = ?",
+            (recovery_id,),
+        ).fetchone()
+        terminal_count = connection.execute(
+            """
+            SELECT COUNT(*) FROM events
+            WHERE recovery_id = ? AND terminal = 1
+            """,
+            (recovery_id,),
+        ).fetchone()
+    assert recovery == ("pending_approval", 3)
+    assert receipt_count == (0,)
+    assert terminal_count == (0,)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(_delete_pending_approval, id="missing-pending-approval"),
+        pytest.param(_delete_pending_remedy, id="missing-remedy"),
+        pytest.param(_corrupt_pending_consent, id="consent-binding"),
+        pytest.param(_corrupt_pending_event, id="approval-event"),
+        pytest.param(_corrupt_pending_provenance, id="provenance"),
+        pytest.param(_insert_forged_pending_execution, id="execution"),
+    ],
+)
+def test_public_pending_hotel_requires_complete_active_evidence(
+    terminal_clients: tuple[TestClient, TestClient, SQLiteStore, Path, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    mutate: Callable[[sqlite3.Connection, str], None],
+) -> None:
+    owner, foreign, _store, database_path, app = terminal_clients
+    recovery_id = str(create_sdk_recovery(owner)["recoveryId"])
+    absent_id = str(uuid4())
+    with sqlite3.connect(database_path) as connection:
+        mutate(connection, recovery_id)
+
+    admission = app.state.event_stream_admission
+    original_try_acquire = admission.try_acquire
+    admission_attempts: list[str] = []
+
+    def tracked_try_acquire(candidate_id: str):
+        admission_attempts.append(candidate_id)
+        return original_try_acquire(candidate_id)
+
+    async def finite_stream(*_args: Any, **_kwargs: Any):
+        yield ""
+
+    monkeypatch.setattr(admission, "try_acquire", tracked_try_acquire)
+    monkeypatch.setattr("server.main.stream_recovery_events", finite_stream)
+
+    owner_responses = _terminal_read_responses(owner, recovery_id)
+    for response in owner_responses:
+        _assert_integrity_error(response)
+    assert admission_attempts == []
+    assert admission.active_count == 0
+
+    for suffix in ("", "/receipt", "/events"):
+        corrupt = foreign.get(f"/api/recoveries/{recovery_id}{suffix}")
+        absent = foreign.get(f"/api/recoveries/{absent_id}{suffix}")
+        assert corrupt.status_code == absent.status_code == 404
+        assert corrupt.content == absent.content == b'{"detail":"Not found"}'
+        assert _stable_not_found_headers(corrupt) == _stable_not_found_headers(absent)
+    assert admission_attempts == []
+    assert admission.active_count == 0
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(_corrupt_pending_consent, id="consent-binding"),
+        pytest.param(_corrupt_pending_event, id="approval-event"),
+        pytest.param(_corrupt_pending_provenance, id="provenance"),
+        pytest.param(_insert_forged_pending_execution, id="execution"),
+    ],
+)
+@pytest.mark.parametrize("suffix", ["", "/receipt", "/events"])
+def test_expired_corrupt_active_hotel_cannot_be_laundered_by_public_sweep(
+    terminal_clients: tuple[TestClient, TestClient, SQLiteStore, Path, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    suffix: str,
+    mutate: Callable[[sqlite3.Connection, str], None],
+) -> None:
+    owner, foreign, store, database_path, app = terminal_clients
+    recovery_id = str(create_sdk_recovery(owner)["recoveryId"])
+    absent_id = str(uuid4())
+    with sqlite3.connect(database_path) as connection:
+        expiry_row = connection.execute(
+            "SELECT expiry FROM remedies WHERE recovery_id = ?",
+            (recovery_id,),
+        ).fetchone()
+        assert expiry_row is not None
+        mutate(connection, recovery_id)
+    expired_at = datetime.fromisoformat(str(expiry_row[0])) + timedelta(seconds=1)
+    monkeypatch.setattr(store, "_now", lambda: expired_at)
+
+    admission = app.state.event_stream_admission
+    original_try_acquire = admission.try_acquire
+    admission_attempts: list[str] = []
+
+    def tracked_try_acquire(candidate_id: str):
+        admission_attempts.append(candidate_id)
+        return original_try_acquire(candidate_id)
+
+    monkeypatch.setattr(admission, "try_acquire", tracked_try_acquire)
+
+    foreign_response = foreign.get(f"/api/recoveries/{recovery_id}{suffix}")
+    absent_response = foreign.get(f"/api/recoveries/{absent_id}{suffix}")
+    assert foreign_response.status_code == absent_response.status_code == 404
+    assert foreign_response.content == absent_response.content == b'{"detail":"Not found"}'
+    assert _stable_not_found_headers(foreign_response) == _stable_not_found_headers(absent_response)
+    _assert_pending_unsealed(database_path, recovery_id)
+
+    owner_response = owner.get(f"/api/recoveries/{recovery_id}{suffix}")
+
+    _assert_integrity_error(owner_response)
+    assert admission_attempts == []
+    assert admission.active_count == 0
+    _assert_pending_unsealed(database_path, recovery_id)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(_corrupt_pending_consent, id="consent-binding"),
+        pytest.param(_corrupt_pending_event, id="approval-event"),
+        pytest.param(_corrupt_pending_provenance, id="provenance"),
+        pytest.param(_insert_forged_pending_execution, id="execution"),
+    ],
+)
+def test_background_expiry_skips_corrupt_active_hotel_evidence(
+    terminal_clients: tuple[TestClient, TestClient, SQLiteStore, Path, Any],
+    mutate: Callable[[sqlite3.Connection, str], None],
+) -> None:
+    owner, foreign, store, database_path, _app = terminal_clients
+    recovery_id = str(create_sdk_recovery(owner)["recoveryId"])
+    absent_id = str(uuid4())
+    with sqlite3.connect(database_path) as connection:
+        expiry_row = connection.execute(
+            "SELECT expiry FROM remedies WHERE recovery_id = ?",
+            (recovery_id,),
+        ).fetchone()
+        assert expiry_row is not None
+        mutate(connection, recovery_id)
+    expired_at = datetime.fromisoformat(str(expiry_row[0])) + timedelta(seconds=1)
+
+    assert (
+        expire_pending_approvals(
+            store,
+            now=expired_at,
+            batch_size=1,
+            recovery_id=recovery_id,
+        )
+        == 0
+    )
+    _assert_pending_unsealed(database_path, recovery_id)
+
+    for response in _terminal_read_responses(owner, recovery_id):
+        _assert_integrity_error(response)
+    for suffix in ("", "/receipt", "/events"):
+        corrupt = foreign.get(f"/api/recoveries/{recovery_id}{suffix}")
+        absent = foreign.get(f"/api/recoveries/{absent_id}{suffix}")
+        assert corrupt.status_code == absent.status_code == 404
+        assert corrupt.content == absent.content == b'{"detail":"Not found"}'
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(_corrupt_pending_consent, id="consent-binding"),
+        pytest.param(_corrupt_pending_event, id="approval-event"),
+        pytest.param(_corrupt_pending_provenance, id="provenance"),
+        pytest.param(_insert_forged_pending_execution, id="execution"),
+    ],
+)
+def test_terminal_expiry_revalidates_its_active_source_evidence(
+    terminal_clients: tuple[TestClient, TestClient, SQLiteStore, Path, Any],
+    mutate: Callable[[sqlite3.Connection, str], None],
+) -> None:
+    owner, foreign, store, database_path, _app = terminal_clients
+    recovery_id = str(create_sdk_recovery(owner)["recoveryId"])
+    absent_id = str(uuid4())
+    with sqlite3.connect(database_path) as connection:
+        expiry_row = connection.execute(
+            "SELECT expiry FROM remedies WHERE recovery_id = ?",
+            (recovery_id,),
+        ).fetchone()
+        assert expiry_row is not None
+    expired_at = datetime.fromisoformat(str(expiry_row[0])) + timedelta(seconds=1)
+    assert (
+        expire_pending_approvals(
+            store,
+            now=expired_at,
+            batch_size=1,
+            recovery_id=recovery_id,
+        )
+        == 1
+    )
+    with sqlite3.connect(database_path) as connection:
+        mutate(connection, recovery_id)
+
+    for response in _terminal_read_responses(owner, recovery_id):
+        _assert_integrity_error(response)
+    for suffix in ("", "/receipt", "/events"):
+        corrupt = foreign.get(f"/api/recoveries/{recovery_id}{suffix}")
+        absent = foreign.get(f"/api/recoveries/{absent_id}{suffix}")
+        assert corrupt.status_code == absent.status_code == 404
+        assert corrupt.content == absent.content == b'{"detail":"Not found"}'
+
+
+@pytest.mark.parametrize("claimed", [False, True], ids=["untouched", "claimed"])
+def test_terminal_expiry_requires_a_post_consent_exact_seal(
+    terminal_clients: tuple[TestClient, TestClient, SQLiteStore, Path, Any],
+    claimed: bool,
+) -> None:
+    owner, foreign, store, database_path, _app = terminal_clients
+    pending = create_sdk_recovery(owner)
+    recovery_id = str(pending["recoveryId"])
+    if claimed:
+        claim_without_continuing(
+            store,
+            pending,
+            client_decision_id="early-terminal-seal",
+        )
+    absent_id = str(uuid4())
+    with sqlite3.connect(database_path) as connection:
+        expiry_row = connection.execute(
+            "SELECT expiry FROM remedies WHERE recovery_id = ?",
+            (recovery_id,),
+        ).fetchone()
+        assert expiry_row is not None
+    expiry = datetime.fromisoformat(str(expiry_row[0]))
+    assert (
+        expire_pending_approvals(
+            store,
+            now=expiry + timedelta(seconds=1),
+            batch_size=1,
+            recovery_id=recovery_id,
+        )
+        == 1
+    )
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            UPDATE recoveries
+            SET updated_at = (
+                SELECT created_at FROM events
+                WHERE events.recovery_id = recoveries.id AND seq = 2
+            )
+            WHERE id = ?
+            """,
+            (recovery_id,),
+        )
+        connection.execute(
+            """
+            UPDATE pending_approvals
+            SET updated_at = (
+                SELECT created_at FROM events
+                WHERE events.recovery_id = pending_approvals.recovery_id AND seq = 2
+            )
+            WHERE recovery_id = ?
+            """,
+            (recovery_id,),
+        )
+        connection.execute(
+            """
+            UPDATE receipts
+            SET created_at = (
+                SELECT created_at FROM events
+                WHERE events.recovery_id = receipts.recovery_id AND seq = 2
+            )
+            WHERE recovery_id = ?
+            """,
+            (recovery_id,),
+        )
+        connection.execute(
+            """
+            UPDATE events
+            SET created_at = (
+                SELECT approval.created_at FROM events AS approval
+                WHERE approval.recovery_id = events.recovery_id AND approval.seq = 2
+            )
+            WHERE recovery_id = ? AND terminal = 1
+            """,
+            (recovery_id,),
+        )
+
+    for response in _terminal_read_responses(owner, recovery_id):
+        _assert_integrity_error(response)
+    for suffix in ("", "/receipt", "/events"):
+        corrupt = foreign.get(f"/api/recoveries/{recovery_id}{suffix}")
+        absent = foreign.get(f"/api/recoveries/{absent_id}{suffix}")
+        assert corrupt.status_code == absent.status_code == 404
+        assert corrupt.content == absent.content == b'{"detail":"Not found"}'
+
+
+@pytest.mark.parametrize(
+    ("action", "pending_status", "expected_claimed"),
+    [
+        pytest.param("approve", "pending", True, id="approve-claimed"),
+        pytest.param("approve", "approved", True, id="approve-authorized"),
+        pytest.param("decline", "pending", True, id="decline-claimed"),
+        pytest.param("decline", "outcome_unknown", False, id="decline-quarantined"),
+    ],
+)
+def test_valid_claimed_hotel_states_remain_publicly_readable(
+    terminal_clients: tuple[TestClient, TestClient, SQLiteStore, Path, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+    pending_status: str,
+    expected_claimed: bool,
+) -> None:
+    owner, _foreign, store, _database_path, app = terminal_clients
+    pending = create_sdk_recovery(owner)
+    recovery_id = str(pending["recoveryId"])
+    payload = claim_without_continuing(
+        store,
+        pending,
+        action=action,
+        client_decision_id=f"active-integrity-{action}-{pending_status}",
+    )
+    if pending_status != "pending":
+        store.update_pending_approval_status(
+            recovery_id,
+            expected_status="pending",
+            status=pending_status,
+        )
+
+    async def finite_stream(*_args: Any, **_kwargs: Any):
+        yield ""
+
+    admission_attempts: list[str] = []
+    original_try_acquire = app.state.event_stream_admission.try_acquire
+
+    def tracked_try_acquire(candidate_id: str):
+        admission_attempts.append(candidate_id)
+        return original_try_acquire(candidate_id)
+
+    monkeypatch.setattr("server.main.stream_recovery_events", finite_stream)
+    monkeypatch.setattr(
+        app.state.event_stream_admission,
+        "try_acquire",
+        tracked_try_acquire,
+    )
+
+    snapshot = owner.get(f"/api/recoveries/{recovery_id}")
+    receipt = owner.get(f"/api/recoveries/{recovery_id}/receipt")
+    stream = owner.get(f"/api/recoveries/{recovery_id}/events")
+
+    assert snapshot.status_code == 200
+    assert snapshot.json()["status"] == "pending_approval"
+    assert snapshot.json()["pendingApproval"] is None
+    if expected_claimed:
+        assert snapshot.json()["claimedDecision"] == {
+            "action": action,
+            "remedyDigest": payload["remedyDigest"],
+            "expiry": pending["pendingApproval"]["expiry"],
+        }
+    else:
+        assert snapshot.json()["claimedDecision"] is None
+    assert receipt.status_code == 404
+    assert receipt.json() == {"detail": "Not found"}
+    assert stream.status_code == 200
+    assert admission_attempts == [recovery_id]
+    assert app.state.event_stream_admission.active_count == 0
+
+
+def test_canonical_committed_approve_result_remains_readable_before_seal(
+    terminal_clients: tuple[TestClient, TestClient, SQLiteStore, Path, Any],
+) -> None:
+    owner, _foreign, store, _database_path, _app = terminal_clients
+    pending = create_sdk_recovery(owner)
+    recovery_id = str(pending["recoveryId"])
+    payload = claim_without_continuing(
+        store,
+        pending,
+        client_decision_id="active-integrity-committed-result",
+    )
+    store.update_pending_approval_status(
+        recovery_id,
+        expected_status="pending",
+        status="approved",
+    )
+    consent = store.get_remedy_consent(recovery_id)
+    request_digest = hashlib.sha256(
+        json.dumps(
+            {
+                "recovery_id": recovery_id,
+                "remedy": consent.evidence.remedy.model_dump(mode="json"),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    store.record_completed_execution(
+        execution_id=f"execution-{recovery_id}",
+        recovery_id=recovery_id,
+        idempotency_key=(f"{recovery_id}:{payload['toolCallId']}:{payload['remedyDigest']}"),
+        request_digest=request_digest,
+        tool_call_id=payload["toolCallId"],
+        remedy_digest=payload["remedyDigest"],
+        result_json={
+            "dispatch_id": f"dispatch-{recovery_id}",
+            "status": "confirmed",
+            "simulated": True,
+            "provider_result": "Bound demo-provider result.",
+        },
+    )
+
+    snapshot = owner.get(f"/api/recoveries/{recovery_id}")
+
+    assert snapshot.status_code == 200
+    assert snapshot.json()["status"] == "pending_approval"
+    assert snapshot.json()["pendingApproval"] is None
+    assert snapshot.json()["claimedDecision"]["action"] == "approve"
+    assert store.count_executions(recovery_id) == 1
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        pytest.param("decline-execution", id="decline-execution"),
+        pytest.param("decline-approved", id="decline-approved"),
+        pytest.param("post-expiry-claim", id="post-expiry-claim"),
+    ],
+)
+def test_claimed_hotel_rejects_impossible_active_evidence(
+    terminal_clients: tuple[TestClient, TestClient, SQLiteStore, Path, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    owner, _foreign, store, database_path, app = terminal_clients
+    pending = create_sdk_recovery(owner)
+    recovery_id = str(pending["recoveryId"])
+    claim_without_continuing(
+        store,
+        pending,
+        action="decline" if mutation.startswith("decline-") else "approve",
+        client_decision_id=f"active-integrity-{mutation}",
+    )
+    with sqlite3.connect(database_path) as connection:
+        if mutation == "decline-execution":
+            _insert_forged_pending_execution(connection, recovery_id)
+        elif mutation == "decline-approved":
+            connection.execute(
+                """
+                UPDATE pending_approvals
+                SET status = 'approved', updated_at = ?
+                WHERE recovery_id = ?
+                """,
+                (datetime.now(UTC).isoformat(), recovery_id),
+            )
+        else:
+            expiry = datetime.fromisoformat(str(pending["pendingApproval"]["expiry"]))
+            monkeypatch.setattr(
+                store,
+                "_now",
+                lambda: expiry + timedelta(seconds=1),
+            )
+            connection.execute(
+                """
+                UPDATE approval_decisions
+                SET claimed_at = ?
+                WHERE recovery_id = ?
+                """,
+                (expiry.isoformat(), recovery_id),
+            )
+            connection.execute(
+                "UPDATE recoveries SET updated_at = ? WHERE id = ?",
+                (expiry.isoformat(), recovery_id),
+            )
+
+    admission_attempts: list[str] = []
+    original_try_acquire = app.state.event_stream_admission.try_acquire
+
+    def tracked_try_acquire(candidate_id: str):
+        admission_attempts.append(candidate_id)
+        return original_try_acquire(candidate_id)
+
+    monkeypatch.setattr(
+        app.state.event_stream_admission,
+        "try_acquire",
+        tracked_try_acquire,
+    )
+
+    for response in _terminal_read_responses(owner, recovery_id):
+        _assert_integrity_error(response)
+    assert admission_attempts == []
+    assert app.state.event_stream_admission.active_count == 0
+    assert store.count_decisions(recovery_id) == 1
 
 
 @pytest.mark.parametrize(
@@ -384,7 +979,7 @@ def test_public_bundle_rechecks_session_access_inside_its_read_snapshot(
     terminal_clients: tuple[TestClient, TestClient, SQLiteStore, Path, Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    owner, foreign, store, _database_path, _app = terminal_clients
+    owner, foreign, store, database_path, _app = terminal_clients
     recovery_id = str(_create_replay_quota(owner)["recoveryId"])
     monkeypatch.setattr(
         store,
@@ -407,12 +1002,8 @@ def test_stale_outer_access_cannot_expire_foreign_pending_recovery(
     owner, foreign, store, database_path, _app = terminal_clients
     pending = create_sdk_recovery(owner)
     recovery_id = str(pending["recoveryId"])
-    expired_at = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
-    with sqlite3.connect(database_path) as connection:
-        connection.execute(
-            "UPDATE remedies SET expiry = ? WHERE recovery_id = ?",
-            (expired_at, recovery_id),
-        )
+    expiry = datetime.fromisoformat(str(pending["pendingApproval"]["expiry"]))
+    monkeypatch.setattr(store, "_now", lambda: expiry + timedelta(seconds=1))
     monkeypatch.setattr(
         store,
         "recovery_is_accessible",
@@ -467,8 +1058,7 @@ def test_public_terminal_bundle_rejects_snapshot_seal_timestamp_drift(
     "mutation",
     [
         pytest.param(
-            "UPDATE recoveries SET created_at = '2000-01-01T00:00:00+00:00' "
-            "WHERE id = ?",
+            "UPDATE recoveries SET created_at = '2000-01-01T00:00:00+00:00' WHERE id = ?",
             id="recovery-created-at",
         ),
         pytest.param(
@@ -495,8 +1085,7 @@ def test_public_replay_bundle_rejects_forged_atomic_chronology(
     "mutation",
     [
         pytest.param(
-            "UPDATE recoveries SET created_at = '2000-01-01T00:00:00+00:00' "
-            "WHERE id = ?",
+            "UPDATE recoveries SET created_at = '2000-01-01T00:00:00+00:00' WHERE id = ?",
             id="snapshot-creation-drift",
         ),
         pytest.param(
@@ -532,25 +1121,26 @@ def test_public_dynamic_bundle_rejects_forged_event_chronology(
 
 def test_followup_public_event_read_stays_read_only_until_initial_admission(
     terminal_clients: tuple[TestClient, TestClient, SQLiteStore, Path, Any],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     owner, _foreign, store, database_path, _app = terminal_clients
     pending = create_sdk_recovery(owner)
     recovery_id = str(pending["recoveryId"])
-    expired_at = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
     with sqlite3.connect(database_path) as connection:
-        connection.execute(
-            "UPDATE remedies SET expiry = ? WHERE recovery_id = ?",
-            (expired_at, recovery_id),
-        )
+        expiry_row = connection.execute(
+            "SELECT expiry FROM remedies WHERE recovery_id = ?",
+            (recovery_id,),
+        ).fetchone()
+        assert expiry_row is not None
         access_row = connection.execute(
             "SELECT session_key FROM recovery_access WHERE recovery_id = ?",
             (recovery_id,),
         ).fetchone()
         assert access_row is not None
         session_key = str(access_row[0])
-    replay_scenarios = {
-        scenario.id: scenario for scenario in ScenarioLoader().list()
-    }
+    expired_at = datetime.fromisoformat(str(expiry_row[0])) + timedelta(seconds=1)
+    monkeypatch.setattr(store, "_now", lambda: expired_at)
+    replay_scenarios = {scenario.id: scenario for scenario in ScenarioLoader().list()}
 
     _events, status = store.read_public_event_batch(
         recovery_id,
@@ -572,30 +1162,55 @@ def test_followup_public_event_read_stays_read_only_until_initial_admission(
     assert admitted_events[-1].terminal is True
 
 
-def test_public_integrity_failure_rolls_back_targeted_expiry_seal(
+def test_post_expiry_validation_failure_rolls_back_targeted_seal(
     terminal_clients: tuple[TestClient, TestClient, SQLiteStore, Path, Any],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    owner, _foreign, _store, database_path, _app = terminal_clients
+    owner, _foreign, store, database_path, _app = terminal_clients
     pending = create_sdk_recovery(owner)
     recovery_id = str(pending["recoveryId"])
-    expired_at = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
-    with sqlite3.connect(database_path) as connection:
-        connection.execute(
-            "UPDATE remedies SET expiry = ? WHERE recovery_id = ?",
-            (expired_at, recovery_id),
-        )
-        connection.execute(
+    expiry = datetime.fromisoformat(str(pending["pendingApproval"]["expiry"]))
+    monkeypatch.setattr(store, "_now", lambda: expiry + timedelta(seconds=1))
+    observed_uncommitted_seal = False
+
+    def fail_after_targeted_seal(
+        connection: sqlite3.Connection,
+        *_args: Any,
+        **_kwargs: Any,
+    ) -> None:
+        nonlocal observed_uncommitted_seal
+        recovery_row = connection.execute(
+            "SELECT status, current_step FROM recoveries WHERE id = ?",
+            (recovery_id,),
+        ).fetchone()
+        receipt_count = connection.execute(
+            "SELECT COUNT(*) FROM receipts WHERE recovery_id = ?",
+            (recovery_id,),
+        ).fetchone()[0]
+        terminal_event_count = connection.execute(
             """
-            UPDATE events
-            SET data_json = '{"summary":"corrupt"}'
-            WHERE recovery_id = ? AND seq = 1
+            SELECT COUNT(*) FROM events
+            WHERE recovery_id = ? AND terminal = 1
             """,
             (recovery_id,),
-        )
+        ).fetchone()[0]
+        assert recovery_row is not None
+        assert tuple(recovery_row) == ("closed_without_action", 5)
+        assert receipt_count == 1
+        assert terminal_event_count == 1
+        observed_uncommitted_seal = True
+        raise PublicEvidenceIntegrityError("Injected post-expiry validation failure")
+
+    monkeypatch.setattr(
+        store,
+        "_validate_public_evidence_in_connection",
+        fail_after_targeted_seal,
+    )
 
     response = owner.get(f"/api/recoveries/{recovery_id}")
 
     _assert_integrity_error(response)
+    assert observed_uncommitted_seal is True
     with sqlite3.connect(database_path) as connection:
         recovery_row = connection.execute(
             "SELECT status, current_step FROM recoveries WHERE id = ?",
@@ -634,9 +1249,7 @@ def test_public_sse_revalidates_integrity_after_admission(
         ).fetchone()
         assert access_row is not None
         session_key = str(access_row[0])
-    replay_scenarios = {
-        scenario.id: scenario for scenario in ScenarioLoader().list()
-    }
+    replay_scenarios = {scenario.id: scenario for scenario in ScenarioLoader().list()}
     initial_batch = store.read_initial_public_event_batch(
         recovery_id,
         session_key=session_key,
@@ -687,8 +1300,8 @@ def test_representative_valid_terminal_bundles_remain_readable(
 
     for snapshot in (replay_quota, sdk_quota, declined_hotel):
         recovery_id = str(snapshot["recoveryId"])
-        snapshot_response, receipt_response, stream_response = (
-            _terminal_read_responses(owner, recovery_id)
+        snapshot_response, receipt_response, stream_response = _terminal_read_responses(
+            owner, recovery_id
         )
         assert snapshot_response.status_code == 200
         assert snapshot_response.json()["status"] in {
@@ -700,7 +1313,6 @@ def test_representative_valid_terminal_bundles_remain_readable(
         terminal_events = [
             json.loads(line.removeprefix("data: "))
             for line in stream_response.text.splitlines()
-            if line.startswith("data: ")
-            and json.loads(line.removeprefix("data: "))["terminal"]
+            if line.startswith("data: ") and json.loads(line.removeprefix("data: "))["terminal"]
         ]
         assert len(terminal_events) == 1

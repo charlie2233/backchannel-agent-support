@@ -206,6 +206,7 @@ _READY_SCHEMA_COLUMNS = {
             "expires_at",
         }
     ),
+    "expiry_scan_state": frozenset({"candidate_kind", "last_expiry", "last_recovery_id"}),
     "readiness_probe": frozenset({"id", "generation"}),
 }
 _READY_PROBE_COLUMNS = [

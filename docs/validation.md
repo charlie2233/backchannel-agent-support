@@ -186,6 +186,18 @@ event chronology bounded by the snapshot update. It also binds recovery, receipt
 provenance plus their UTC seal timestamp, and binds canonical replay creation, every replay
 event, and the receipt to one atomic UTC chronology. Raw internal store readers intentionally
 remain outside this public integrity fence for reconciliation and migration compatibility.
+Active SDK/live hotel coverage deletes the pending envelope or consent record, alters a
+digest-bound consent fact, drifts provenance, forges the `approval.requested` event, and injects
+impossible execution evidence. Owner snapshot, receipt, and initial SSE reads all fail with the
+sanitized integrity response before stream admission, while a foreign session retains
+absent-recovery 404 parity. Targeted and background expiry skip corrupt active evidence rather
+than laundering it into a terminal bundle, and terminal expiry reads revalidate the exact active
+source. Valid unclaimed, approve/decline claimed, conservatively quarantined decline, committed
+approve-result, and clock-advanced expiry flows remain readable or seal normally. Same-key
+creation retries revalidate both active and expired hotel evidence before returning 201.
+Expiry regressions also reject a coherently backdated terminal seal before consent expiry, bind
+the pending-envelope update to the exact seal, and prove a corrupt oldest untouched candidate
+cannot starve the next valid recovery across one-row keyset pages when the mutation batch is one.
 The explicit-live suites prove zero live POSTs on initial mount and authorized restore,
 synchronous one-POST activation coalescing under StrictMode, UUID-only storage with exception
 safety, valid consent/receipt restoration, terminal invalid-hint clearing, truthful snapshotless

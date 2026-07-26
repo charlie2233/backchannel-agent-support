@@ -68,6 +68,53 @@ def test_missing_key_live_smoke_emits_only_one_redacted_blocked_record() -> None
     _assert_redacted_blocked_record(records[0])
 
 
+def test_missing_key_live_smoke_does_not_import_runtime_stack(tmp_path: Path) -> None:
+    import_blocker = tmp_path / "sitecustomize.py"
+    import_blocker.write_text(
+        """
+import builtins
+
+_original_import = builtins.__import__
+
+
+def _block_runtime_stack(name, *args, **kwargs):
+    if (
+        name == "openai"
+        or name.startswith("openai.")
+        or name == "server"
+        or name.startswith("server.")
+    ):
+        raise RuntimeError(f"blocked eager runtime import: {name}")
+    return _original_import(name, *args, **kwargs)
+
+
+builtins.__import__ = _block_runtime_stack
+""".lstrip(),
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment.pop("OPENAI_API_KEY", None)
+    environment["PYTHONPATH"] = os.pathsep.join(
+        filter(None, (str(tmp_path), environment.get("PYTHONPATH")))
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "smoke_live.py")],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert result.stderr == ""
+    records = _parse_records(result.stdout)
+    assert len(records) == 1
+    _assert_redacted_blocked_record(records[0])
+
+
 def test_three_run_smoke_emits_exactly_three_independent_blocked_records() -> None:
     result = _run("smoke_live_three.py")
 
@@ -92,16 +139,10 @@ def test_three_run_child_rejects_status_exit_mismatch(
         "approvalCount": 1 if status == "passed" else 0,
         "elapsedMs": 1,
         "errorClass": None if status == "passed" else "RuntimeError",
-        "modelIds": (
-            ["gpt-5.6-luna", "gpt-5.6-terra"] if status == "passed" else []
-        ),
+        "modelIds": (["gpt-5.6-luna", "gpt-5.6-terra"] if status == "passed" else []),
         "orderedToolNames": ["commit_remedy"] if status == "passed" else [],
         "status": status,
-        "traceId": (
-            "trace_0123456789abcdef0123456789abcdef"
-            if status == "passed"
-            else None
-        ),
+        "traceId": ("trace_0123456789abcdef0123456789abcdef" if status == "passed" else None),
     }
     monkeypatch.setattr(
         smoke_live_three.subprocess,
@@ -220,9 +261,7 @@ def test_three_run_child_accepts_only_complete_live_pass_evidence(monkeypatch) -
         ),
     )
 
-    assert smoke_live_three._run_child(
-        ROOT / "scripts" / "smoke_live.py"
-    ) == payload
+    assert smoke_live_three._run_child(ROOT / "scripts" / "smoke_live.py") == payload
 
 
 def test_three_run_main_rejects_duplicate_pass_trace_ids(monkeypatch, capsys) -> None:
