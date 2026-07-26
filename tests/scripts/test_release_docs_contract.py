@@ -39,9 +39,16 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
 
     assert manifest["sourceCommit"] in current_evidence
     current_activation = "cca97a8e75d52a26889d3bbb66740756041d9caf"
-    current_failed_run = "30206582233"
-    current_failed_jobs = ("89805619343", "89805788728")
+    current_hosted_sha = "e188202a4b0612a66503fda2b6ee1a3c89ec7b65"
+    current_run = "30208188300"
+    current_jobs = ("89809811619", "89809998273")
+    superseded_failed_attempt = (
+        "30206582233",
+        "89805619343",
+        "89805788728",
+    )
     assert current_activation in current_evidence
+    assert current_hosted_sha in current_evidence
     assert runtime_input["digest"] in current_evidence
     for current_identifier in (
         manifest["sourceCommit"],
@@ -50,8 +57,10 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
         "cca97a8…",
         runtime_input["digest"],
         "a1e0eca…",
-        current_failed_run,
-        *current_failed_jobs,
+        current_hosted_sha,
+        "e188202…",
+        current_run,
+        *current_jobs,
     ):
         assert current_identifier not in historical_evidence
     assert f"{len(runtime_input['paths'])} runtime paths" in current_evidence
@@ -76,48 +85,79 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     )
     for observed_current_fact in (
         "two consecutive focused Task29 matrices passed 133 tests",
+        "29 capture contracts",
+        "`capture_manifest_valid`",
         "19 web test files / 292 tests",
         "Ruff",
         "strict MyPy over 35 source files",
         "622 Python tests with 1 warning",
+        "638 Python tests with 1 warning",
         "Stub",
         "single-process production smokes",
+        "deterministic stub smoke",
         "OpenAPI freshness",
+        "OpenAPI check",
         "history-aware secret scan",
         "diff checks",
+        "packaged Docker image",
+        "`10001:10001`",
+        "network-none",
+        "`deterministic-qa`",
+        "`deployed-readonly`",
     ):
         assert observed_current_fact in normalized_current_evidence
-    for absent_current_claim in (
-        "No green current Task29 GitHub Actions run or job has been observed.",
-        "No current Task29 packaged container smoke was executed.",
+    for current_identifier in (
+        current_hosted_sha,
+        current_run,
+        *current_jobs,
     ):
-        assert absent_current_claim in current_evidence
-    for observed_failed_ci_fact in (
-        current_failed_run,
-        *current_failed_jobs,
+        assert current_identifier in current_evidence
+    assert "Both job annotation APIs returned `[]`" in current_evidence
+    actions_base = (
+        "https://github.com/charlie2233/backchannel-agent-support/actions/runs"
+    )
+    current_run_url = f"{actions_base}/{current_run}"
+    current_job_urls = tuple(
+        f"{current_run_url}/job/{job_id}" for job_id in current_jobs
+    )
+    assert current_evidence.count(f"[run {current_run}]({current_run_url})") == 1
+    for job_id, job_url in zip(current_jobs, current_job_urls, strict=True):
+        assert current_evidence.count(f"[job {job_id}]({job_url})") == 1
+    observed_action_urls = re.findall(
+        r"https://github\.com/[^)\s]+/actions/runs/\d+(?:/job/\d+)?",
+        current_evidence,
+    )
+    assert set(observed_action_urls) == {
+        current_run_url,
+        *current_job_urls,
+    }
+    assert len(observed_action_urls) == 3
+    assert set(re.findall(r"/actions/runs/(\d+)", current_evidence)) == {current_run}
+    assert set(re.findall(r"/job/(\d+)", current_evidence)) == set(current_jobs)
+    hosted_successor_matches = re.findall(
+        r"Hosted validation successor:\s+`([0-9a-f]{40})`",
+        current_evidence,
+    )
+    assert hosted_successor_matches == [current_hosted_sha]
+    pass_block_pattern = (
+        rf"Result: `verify`\s+\(\[job {current_jobs[0]}\]"
+        rf"\({re.escape(current_job_urls[0])}\)\)\s+reported `PASS`; "
+        rf"`container-smoke`\s+\(\[job {current_jobs[1]}\]"
+        rf"\({re.escape(current_job_urls[1])}\)\)\s+reported `PASS`\."
+    )
+    assert re.search(pass_block_pattern, current_evidence)
+    for forbidden_current_claim in (
         "reported `FAILURE`",
         "reported `SKIPPED`",
-        "`1 failed, 621 passed`",
-    ):
-        assert observed_failed_ci_fact in current_evidence
-    assert set(re.findall(r"/actions/runs/(\d+)", current_evidence)) == {
-        current_failed_run
-    }
-    assert set(re.findall(r"/job/(\d+)", current_evidence)) == set(
-        current_failed_jobs
-    )
-    for forbidden_current_claim in (
-        "Hosted validation successor:",
-        "reported `PASS`",
-        "Both job annotation APIs returned `[]`",
-        "Hosted `verify`",
-        "Hosted `container-smoke`",
-        "**Verified in hosted CI**",
-        "**Verified** on successor",
+        "No green current Task29 GitHub Actions run or job has been observed.",
+        "No current Task29 packaged container smoke was executed.",
+        "**Unverified** for this source/capture checkpoint",
     ):
         assert forbidden_current_claim not in current_evidence
+    for superseded_identifier in superseded_failed_attempt:
+        assert superseded_identifier not in current_evidence
     for unproved_current_boundary in (
-        "do not prove local Docker",
+        "does not prove local Docker",
         "public deployment or browser URL",
         "live OpenAI",
         "real provider execution",
@@ -239,6 +279,9 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
         "30182741263",
         "89742014836",
         "89742159778",
+        "30206582233",
+        "89805619343",
+        "89805788728",
         "742e3caf2af5a9cce3cd8de242cf113424e8528f",
         "742e3ca…",
         "4a317e563c8d45bc45f676e465b01780b2b0be78",
@@ -287,6 +330,11 @@ def test_validation_rejects_superseded_provenance_in_current_evidence(
         "cca97a8…",
         "a1e0ecaf69926044419e29c7359102188c80550834ddb9351021aae411705054",
         "a1e0eca…",
+        "e188202a4b0612a66503fda2b6ee1a3c89ec7b65",
+        "e188202…",
+        "30208188300",
+        "89809811619",
+        "89809998273",
     ),
 )
 def test_validation_rejects_current_capture_provenance_in_historical_evidence(
@@ -305,29 +353,54 @@ def test_validation_rejects_current_capture_provenance_in_historical_evidence(
 
 
 @pytest.mark.parametrize(
-    "contradictory_current_claim",
+    "unexpected_current_claim",
     (
         "- Hosted validation successor:\n  `deadbeefdeadbeefdeadbeefdeadbeefdeadbeef`",
         (
             "- GitHub Actions:\n"
             "  [run 999999](https://github.com/example/repo/actions/runs/999999)"
         ),
-        "- Result: `verify` reported `PASS`; `container-smoke` reported `PASS`.",
         (
-            "| GitHub CI/container | Run 999999 | **Verified** on successor "
-            "`deadbee…` |"
+            "- Result: `verify`\n"
+            "  ([job 999998](https://github.com/example/repo/actions/runs/"
+            "30208188300/job/999998)) reported `PASS`."
         ),
+        (
+            "- GitHub Actions:\n"
+            "  [run 30208188300]"
+            "(https://github.com/example/repo/actions/runs/30208188300)"
+        ),
+        (
+            "- Result: `verify`\n"
+            "  ([job 89809811619](https://github.com/example/repo/actions/runs/"
+            "30208188300/job/89809811619)) reported `PASS`."
+        ),
+        "- Result: `verify` reported `FAILURE`; `container-smoke` reported `SKIPPED`.",
     ),
 )
-def test_validation_rejects_hosted_success_claims_while_current_ci_is_unverified(
-    contradictory_current_claim: str,
+def test_validation_rejects_unexpected_current_hosted_provenance(
+    unexpected_current_claim: str,
 ) -> None:
     validation = _read("docs/validation.md")
     historical_heading = "## Superseded historical hosted baseline"
     polluted_validation = validation.replace(
         historical_heading,
-        f"{contradictory_current_claim}\n\n{historical_heading}",
+        f"{unexpected_current_claim}\n\n{historical_heading}",
         1,
+    )
+
+    with pytest.raises(AssertionError):
+        _assert_validation_matches_current_capture(polluted_validation)
+
+
+@pytest.mark.parametrize("non_pass_status", ("CANCELLED", "PENDING"))
+def test_validation_requires_both_current_jobs_to_report_pass(
+    non_pass_status: str,
+) -> None:
+    validation = _read("docs/validation.md")
+    polluted_validation = validation.replace(
+        "reported `PASS`",
+        f"reported `{non_pass_status}`",
     )
 
     with pytest.raises(AssertionError):

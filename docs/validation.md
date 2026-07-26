@@ -22,39 +22,43 @@ results from any sibling branch.
   35 source files, and 622 Python tests with 1 warning. Stub and local
   single-process production smokes, OpenAPI freshness, the history-aware secret
   scan, and diff checks also passed.
-- Activation GitHub Actions:
-  [run 30206582233](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30206582233).
-  `verify`
-  ([job 89805619343](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30206582233/job/89805619343))
-  reported `FAILURE`: capture contracts, manifest verification, the 292 web tests,
-  Vite build, Ruff, and strict MyPy passed before the stale validation-provenance
-  contract produced the only Python failure (`1 failed, 621 passed`).
-  `container-smoke`
-  ([job 89805788728](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30206582233/job/89805788728))
-  reported `SKIPPED`.
-- No green current Task29 GitHub Actions run or job has been observed.
-- No current Task29 packaged container smoke was executed.
+- Hosted validation successor:
+  `e188202a4b0612a66503fda2b6ee1a3c89ec7b65`
+- GitHub Actions:
+  [run 30208188300](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30208188300)
+- Result: `verify`
+  ([job 89809811619](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30208188300/job/89809811619))
+  reported `PASS`; `container-smoke`
+  ([job 89809998273](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30208188300/job/89809998273))
+  reported `PASS`. Both job annotation APIs returned `[]`.
+- Hosted `verify` ran 29 capture contracts, `capture_manifest_valid`, 19 web test
+  files / 292 tests, Ruff, strict MyPy over 35 source files, and 638 Python tests
+  with 1 warning. It also passed the deterministic stub smoke, OpenAPI check, and
+  history-aware secret scan.
+- Hosted `container-smoke` built the packaged Docker image, confirmed runtime user
+  `10001:10001`, and passed the offline network-none `deterministic-qa` and
+  `deployed-readonly` profiles.
 
 ## Per-SHA proof matrix
 
 | Lane | Exact evidence | Status and boundary |
 | --- | --- | --- |
-| Local source and tests | Source gates and `capture:judge` result above | **Verified locally** on source `8d0a896…`; not hosted CI, browser deployment, live OpenAI, or release proof |
+| Local source and tests | Source gates and `capture:judge` result above; hosted canonical gate on successor `e188202…` | **Verified locally** on source `8d0a896…` and **Verified in hosted CI** on successor `e188202…`; not browser deployment, live OpenAI, or release proof |
 | Local final-build captures | [`docs/assets/final/manifest.json`](assets/final/manifest.json); six provenance-checked PNGs under [`docs/assets/final`](assets/final) | **Verified locally** on capture source `8d0a896…` in Google Chrome at 1440×1024 and 390×844; not container, deployment, live OpenAI, or release proof |
 | Live OpenAI | [`live-validation.md`](live-validation.md) records only a redacted invalid-key result | **Blocked / Unverified**; no valid `OPENAI_API_KEY`, one-run trace, or three consecutive successes |
 | Local Docker | No Docker-family runtime is installed on this Mac | **Unverified locally** |
-| GitHub CI/container | Run 30206582233: `verify` **FAILURE**; `container-smoke` **SKIPPED** | **Unverified** for this source/capture checkpoint |
+| GitHub CI/container | Run 30208188300; `verify` and packaged `container-smoke` | **Verified** on successor `e188202…`; both jobs passed with empty annotations, but this is not local Docker, browser capture, public deployment, or release proof |
 | Public deployment | No public application origin | **Blocked / Unverified** |
 | Tag/release | No release tag or GitHub release | **Blocked / Unverified** |
 
 ## Hosted container evidence boundary
 
-The current Task29 `container-smoke` job was skipped, so no packaged image or
-container profile ran for this checkpoint. Historical container results below do not
-transfer to it. They also do not prove local Docker, public deployment or browser URL,
-live OpenAI, real provider execution, container replacement or restart, long-lived
-`/data` volume persistence, target-host durability/networking, abrupt host-loss or
-backup, concurrent multi-container SQLite, tag or release.
+The current hosted container job proves a packaged Docker image build, runtime user
+`10001:10001`, and the offline network-none `deterministic-qa` and
+`deployed-readonly` profiles. It does not prove local Docker, public deployment or
+browser URL, live OpenAI, real provider execution, container replacement or restart,
+long-lived `/data` volume persistence, target-host durability/networking, abrupt
+host-loss or backup, concurrent multi-container SQLite, tag or release.
 
 ## Capture contract
 
