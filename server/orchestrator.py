@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
 from asyncio import timeout as application_timeout
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from threading import Event as ThreadEvent
+from threading import Lock
 from typing import Any, NoReturn
 from uuid import uuid4
 
@@ -31,7 +34,7 @@ from server.agents.live_factory import (
     build_live_hotel_agents,
     live_broker_prompt,
 )
-from server.agents.live_models import ResponseMetadataRecorder
+from server.agents.live_models import ModelResponseMetadata, ResponseMetadataRecorder
 from server.agents.quota_stub import (
     QUOTA_START_PROMPT,
     QuotaAgentContext,
@@ -63,6 +66,7 @@ from server.agents.versioning import (
     new_qa_trace_id,
     remedy_action_digest,
 )
+from server.async_store import AsyncSQLiteStore, AsyncStoreOverloadedError
 from server.config import QUOTA_AGENT_GRAPH_VERSION, QUOTA_PROTOCOL_VERSION
 from server.digest import remedy_consent_digest
 from server.logging import safe_recovery_log_id
@@ -99,6 +103,7 @@ from server.store import (
     RecoveryNotFoundError,
     RemedyConsentRecord,
     SQLiteStore,
+    SQLiteStoreContentionError,
     non_replay_receipt_boundary,
 )
 
@@ -147,6 +152,7 @@ ReconciliationClock = Callable[[], datetime]
 ReconciliationSleep = Callable[[float], Awaitable[None]]
 RECONCILIATION_FAILURE_BACKOFF_INITIAL_SECONDS = 0.1
 RECONCILIATION_FAILURE_BACKOFF_MAX_SECONDS = 5.0
+CANCELLED_LEASE_RELEASE_ATTEMPTS = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +160,14 @@ class PendingSdkApproval:
     recovery: RecoverySnapshot
     sdk_result: RunResult
     original_root_agent: Agent[HotelAgentContext]
+
+
+@dataclass(frozen=True, slots=True)
+class _ResumeLeaseAcquisitionResult:
+    lease: DecisionResumeLease
+    cleanup_attempted: bool = False
+    cleanup_complete: bool = False
+    cleanup_error: Exception | None = None
 
 
 class RecoveryOrchestrator:
@@ -172,8 +186,17 @@ class RecoveryOrchestrator:
         decision_wait_interval: float = 0.02,
         reconciliation_clock: ReconciliationClock | None = None,
         reconciliation_sleep: ReconciliationSleep = asyncio.sleep,
+        store_io: AsyncSQLiteStore | None = None,
     ) -> None:
         self._store = store
+        canonical_store_io = AsyncSQLiteStore.for_store(store)
+        if store_io is not None and (
+            store_io is not canonical_store_io or not store_io.is_bound_to(store)
+        ):
+            raise ValueError(
+                "RecoveryOrchestrator store and async SQLite adapter must match"
+            )
+        self._store_io = canonical_store_io
         self._hotel_provider = hotel_provider
         self._hotel_provider.bind_store(store)
         self._quota_provider = quota_provider or QuotaSimulator()
@@ -201,6 +224,23 @@ class RecoveryOrchestrator:
         self._reconciliation_sleep = reconciliation_sleep
         self._reconciliation_task: asyncio.Task[None] | None = None
         self._startup_retry_at: datetime | None = None
+        self._lifecycle_lock = Lock()
+        self._lifecycle_loop: asyncio.AbstractEventLoop | None = None
+        self._lifecycle_owners: set[object] = set()
+        self._default_lifecycle_owner = object()
+        self._lifecycle_closing = False
+
+    @property
+    def store_io(self) -> AsyncSQLiteStore:
+        """The lifecycle-owned async lane shared by routes, SSE, and orchestration."""
+
+        return self._store_io
+
+    @property
+    def store(self) -> SQLiteStore:
+        """The synchronous store bound to this orchestrator."""
+
+        return self._store
 
     @staticmethod
     def _openai_trace(*, trace_id: str, group_id: str) -> AbstractContextManager[Any]:
@@ -455,7 +495,9 @@ class RecoveryOrchestrator:
                 )
                 await self._reconciliation_sleep(delay)
             try:
-                retry_at = self._reconcile_startup_once()
+                retry_at = await self._store_io.control(
+                    self._reconcile_startup_once,
+                )
             except Exception:
                 logger.error(
                     "Failed deferred startup reconciliation; retrying in %.2f seconds",
@@ -478,14 +520,36 @@ class RecoveryOrchestrator:
             if retry_at is None:
                 return
 
-    async def startup(self) -> None:
+    async def startup(self, owner: object | None = None) -> None:
         """Attach deferred reconciliation to the active application event loop."""
 
-        task = self._reconciliation_task
-        if task is not None and not task.done():
+        lifecycle_owner = (
+            self._default_lifecycle_owner if owner is None else owner
+        )
+        loop = asyncio.get_running_loop()
+        with self._lifecycle_lock:
+            if self._lifecycle_closing:
+                raise RuntimeError("RecoveryOrchestrator lifecycle is shutting down")
+            if self._lifecycle_owners and self._lifecycle_loop is not loop:
+                raise RuntimeError(
+                    "RecoveryOrchestrator cannot span concurrent event loops"
+                )
+            if lifecycle_owner in self._lifecycle_owners:
+                raise RuntimeError("RecoveryOrchestrator lifecycle owner already started")
+            first_owner = not self._lifecycle_owners
+            if first_owner:
+                self._lifecycle_loop = loop
+            self._lifecycle_owners.add(lifecycle_owner)
+        if not first_owner:
             return
-        self._startup_retry_at = None
-        self._schedule_startup_reconciliation()
+        try:
+            self._startup_retry_at = None
+            self._schedule_startup_reconciliation()
+        except BaseException:
+            with self._lifecycle_lock:
+                self._lifecycle_owners.remove(lifecycle_owner)
+                self._lifecycle_loop = None
+            raise
 
     async def wait_for_startup_reconciliation(self) -> None:
         """Wait for the currently scheduled startup repair, when one exists."""
@@ -494,19 +558,40 @@ class RecoveryOrchestrator:
         if task is not None:
             await asyncio.shield(task)
 
-    async def shutdown(self) -> None:
+    async def shutdown(self, owner: object | None = None) -> None:
         """Cancel and join the lifecycle-owned reconciliation retry."""
 
-        task = self._reconciliation_task
-        self._reconciliation_task = None
-        if task is None:
-            return
-        if not task.done():
-            task.cancel()
+        lifecycle_owner = (
+            self._default_lifecycle_owner if owner is None else owner
+        )
+        loop = asyncio.get_running_loop()
+        with self._lifecycle_lock:
+            if not self._lifecycle_owners:
+                return
+            if self._lifecycle_loop is not loop:
+                raise RuntimeError(
+                    "RecoveryOrchestrator must shut down on its active event loop"
+                )
+            if lifecycle_owner not in self._lifecycle_owners:
+                raise RuntimeError("RecoveryOrchestrator lifecycle owner is not active")
+            self._lifecycle_owners.remove(lifecycle_owner)
+            if self._lifecycle_owners:
+                return
+            self._lifecycle_closing = True
+            task = self._reconciliation_task
+            self._reconciliation_task = None
         try:
-            await task
-        except asyncio.CancelledError:
-            pass
+            if task is not None:
+                if not task.done():
+                    task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        finally:
+            with self._lifecycle_lock:
+                self._lifecycle_loop = None
+                self._lifecycle_closing = False
 
     @staticmethod
     def _raise_incompatible(recovery_id: str, marker: str) -> NoReturn:
@@ -617,7 +702,8 @@ class RecoveryOrchestrator:
             remedy_digest=None,
             result_json=dispatch.model_dump(mode="json"),
         )
-        return self._store.create_completed_quota_recovery(
+        return await self._store_io.mutate(
+            self._store.create_completed_quota_recovery,
             recovery_id=recovery_id,
             execution=execution,
             receipt=receipt,
@@ -652,7 +738,8 @@ class RecoveryOrchestrator:
             )
 
         recovery_id = str(uuid4())
-        self._store.create_recovery(
+        await self._store_io.mutate(
+            self._store.create_recovery,
             recovery_id=recovery_id,
             scenario_id=approved_scenario,
             execution_mode=execution_mode,
@@ -740,7 +827,8 @@ class RecoveryOrchestrator:
             evidence=arguments,
         )
 
-        recovery = self._store.record_transition(
+        recovery = await self._store_io.mutate(
+            self._store.record_transition,
             recovery_id,
             status=RecoveryStatus.PENDING_APPROVAL,
             current_step=3,
@@ -925,7 +1013,8 @@ class RecoveryOrchestrator:
                 ),
                 evidence=arguments,
             )
-            recovery = self._store.create_pending_recovery(
+            recovery = await self._store_io.mutate(
+                self._store.create_pending_recovery,
                 recovery_id=recovery_id,
                 scenario_id=ScenarioId.HOTEL,
                 execution_mode=ExecutionMode.OPENAI_LIVE,
@@ -955,14 +1044,161 @@ class RecoveryOrchestrator:
     ) -> DecisionResumeLease:
         owner_id = f"resume-{uuid4()}"
         while True:
-            lease = self._store.acquire_decision_resume(
-                claim,
-                resume_owner_id=owner_id,
-                lease_duration=self._decision_lease_duration,
+            cancellation_requested = ThreadEvent()
+            acquisition = asyncio.create_task(
+                self._store_io.control(
+                    self._acquire_resume_lease_once,
+                    claim,
+                    cancellation_requested=cancellation_requested,
+                    resume_owner_id=owner_id,
+                )
             )
+            try:
+                acquisition_result = await asyncio.shield(acquisition)
+            except asyncio.CancelledError as cancellation:
+                cancellation_requested.set()
+                while True:
+                    try:
+                        acquisition_result = await asyncio.shield(acquisition)
+                    except asyncio.CancelledError:
+                        continue
+                    except BaseException:
+                        raise cancellation from None
+                    break
+                lease = acquisition_result.lease
+                if lease.disposition == "owner" and not (
+                    acquisition_result.cleanup_attempted
+                    and acquisition_result.cleanup_complete
+                ):
+                    release_attempts = CANCELLED_LEASE_RELEASE_ATTEMPTS
+                    if acquisition_result.cleanup_attempted:
+                        release_attempts -= 1
+                        cleanup_error = acquisition_result.cleanup_error
+                        if cleanup_error is not None and not (
+                            self._is_transient_lease_release_error(cleanup_error)
+                        ):
+                            logger.error(
+                                "Cancelled lease acquisition cleanup failed "
+                                "for recovery_id=%s",
+                                safe_recovery_log_id(claim.recovery_id),
+                            )
+                            raise cleanup_error from cancellation
+                    cleanup = asyncio.create_task(
+                        self._release_cancelled_resume_lease(
+                            lease,
+                            resume_owner_id=owner_id,
+                            attempts=release_attempts,
+                        )
+                    )
+                    while not cleanup.done():
+                        try:
+                            await asyncio.shield(cleanup)
+                        except asyncio.CancelledError:
+                            continue
+                        except BaseException:
+                            break
+                    try:
+                        cleanup.result()
+                    except Exception as release_error:
+                        logger.error(
+                            "Cancelled lease acquisition cleanup ultimately failed "
+                            "for recovery_id=%s",
+                            safe_recovery_log_id(claim.recovery_id),
+                        )
+                        raise release_error from cancellation
+                raise cancellation
+            lease = acquisition_result.lease
+            if acquisition_result.cleanup_attempted:
+                raise RuntimeError("Uncancelled lease acquisition released its ownership")
             if lease.disposition != "wait":
                 return lease
             await asyncio.sleep(self._decision_wait_interval)
+
+    async def _release_cancelled_resume_lease(
+        self,
+        lease: DecisionResumeLease,
+        *,
+        resume_owner_id: str,
+        attempts: int,
+    ) -> None:
+        """Retry bounded cleanup; the final release failure remains observable."""
+
+        if attempts < 1:
+            raise ValueError("Cancelled lease cleanup needs at least one attempt")
+        last_error: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                await self._store_io.control(
+                    self._store.release_decision_resume,
+                    lease.claim,
+                    resume_owner_id=resume_owner_id,
+                    resume_generation=lease.resume_generation,
+                )
+            except Exception as error:
+                last_error = error
+                if (
+                    attempt + 1 < attempts
+                    and self._is_transient_lease_release_error(error)
+                ):
+                    await asyncio.sleep(self._decision_wait_interval)
+                    continue
+                raise
+            return
+        if last_error is None:
+            raise RuntimeError("Cancelled lease cleanup exhausted without a result")
+        raise last_error
+
+    @staticmethod
+    def _is_transient_lease_release_error(error: Exception) -> bool:
+        if isinstance(
+            error,
+            (AsyncStoreOverloadedError, SQLiteStoreContentionError),
+        ):
+            return True
+        if not isinstance(error, sqlite3.OperationalError):
+            return False
+        code = getattr(error, "sqlite_errorcode", None)
+        if isinstance(code, int) and (code & 0xFF) in {
+            sqlite3.SQLITE_BUSY,
+            sqlite3.SQLITE_LOCKED,
+        }:
+            return True
+        message = str(error).lower()
+        return "database is locked" in message or "database is busy" in message
+
+    def _acquire_resume_lease_once(
+        self,
+        claim: ApprovalDecisionClaim,
+        *,
+        cancellation_requested: ThreadEvent,
+        resume_owner_id: str,
+    ) -> _ResumeLeaseAcquisitionResult:
+        """Acquire once and release on-worker if cancellation arrives while blocked."""
+
+        lease = self._store.acquire_decision_resume(
+            claim,
+            resume_owner_id=resume_owner_id,
+            lease_duration=self._decision_lease_duration,
+        )
+        if cancellation_requested.is_set() and lease.disposition == "owner":
+            try:
+                self._store.release_decision_resume(
+                    claim,
+                    resume_owner_id=resume_owner_id,
+                    resume_generation=lease.resume_generation,
+                )
+            except Exception as error:
+                return _ResumeLeaseAcquisitionResult(
+                    lease=lease,
+                    cleanup_attempted=True,
+                    cleanup_error=error,
+                )
+            return _ResumeLeaseAcquisitionResult(
+                lease=lease,
+                cleanup_attempted=True,
+                cleanup_complete=True,
+            )
+        return _ResumeLeaseAcquisitionResult(lease=lease)
 
     async def _heartbeat_resume_lease(
         self,
@@ -974,7 +1210,8 @@ class RecoveryOrchestrator:
         interval = self._decision_lease_duration.total_seconds() / 3
         while True:
             await asyncio.sleep(interval)
-            if not self._store.renew_decision_resume(
+            if not await self._store_io.control(
+                self._store.renew_decision_resume,
                 claim,
                 resume_owner_id=resume_owner_id,
                 resume_generation=resume_generation,
@@ -985,10 +1222,111 @@ class RecoveryOrchestrator:
     @staticmethod
     async def _cancel_heartbeat(task: asyncio.Task[None]) -> None:
         task.cancel()
+        caller_cancellation: asyncio.CancelledError | None = None
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as error:
+                current = asyncio.current_task()
+                if current is not None and current.cancelling() > 0:
+                    if caller_cancellation is None:
+                        caller_cancellation = error
+                    continue
+                break
+            except BaseException:
+                if caller_cancellation is not None:
+                    raise caller_cancellation from None
+                raise
+        if task.cancelled():
+            if caller_cancellation is not None:
+                raise caller_cancellation
+            return
         try:
-            await task
-        except asyncio.CancelledError:
-            pass
+            task.result()
+        except BaseException:
+            if caller_cancellation is not None:
+                raise caller_cancellation from None
+            raise
+        if caller_cancellation is not None:
+            raise caller_cancellation
+
+    async def _stop_heartbeat_and_release(
+        self,
+        task: asyncio.Task[None],
+        claim: ApprovalDecisionClaim,
+        *,
+        resume_owner_id: str,
+        resume_generation: int,
+    ) -> None:
+        """Always attempt lease release; a release failure wins a double failure."""
+
+        heartbeat_error: BaseException | None = None
+        caller_cancellation: asyncio.CancelledError | None = None
+        try:
+            await self._cancel_heartbeat(task)
+        except BaseException as error:
+            if isinstance(error, asyncio.CancelledError):
+                caller_cancellation = error
+            else:
+                heartbeat_error = error
+
+        release_task = asyncio.create_task(
+            self._store_io.control(
+                self._store.release_decision_resume,
+                claim,
+                resume_owner_id=resume_owner_id,
+                resume_generation=resume_generation,
+            )
+        )
+        release_cancellation: asyncio.CancelledError | None = None
+        while not release_task.done():
+            try:
+                await asyncio.shield(release_task)
+            except asyncio.CancelledError as error:
+                current = asyncio.current_task()
+                if current is not None and current.cancelling() > 0:
+                    if (
+                        caller_cancellation is None
+                        and release_cancellation is None
+                    ):
+                        release_cancellation = error
+                    continue
+                break
+            except BaseException:
+                break
+
+        release_error: BaseException | None = None
+        try:
+            release_task.result()
+        except BaseException as error:
+            release_error = error
+
+        if caller_cancellation is None:
+            caller_cancellation = release_cancellation
+
+        if heartbeat_error is not None and release_error is not None:
+            logger.error(
+                "Heartbeat join and lease release both failed for recovery_id=%s; "
+                "lease release failure takes precedence",
+                safe_recovery_log_id(claim.recovery_id),
+            )
+            raise release_error from heartbeat_error
+        if release_error is not None:
+            logger.error(
+                "Lease release failed for recovery_id=%s",
+                safe_recovery_log_id(claim.recovery_id),
+            )
+            if caller_cancellation is not None:
+                raise release_error from caller_cancellation
+            raise release_error
+        if heartbeat_error is not None:
+            logger.error(
+                "Heartbeat join failed for recovery_id=%s",
+                safe_recovery_log_id(claim.recovery_id),
+            )
+            raise heartbeat_error
+        if caller_cancellation is not None:
+            raise caller_cancellation
 
     def _complete_committed_claim(
         self,
@@ -1011,6 +1349,26 @@ class RecoveryOrchestrator:
             resume_generation=resume_generation,
         )
 
+    def _load_resume_evidence(
+        self,
+        claim: ApprovalDecisionClaim,
+        *,
+        resume_owner_id: str,
+        resume_generation: int,
+    ) -> tuple[RecoverySnapshot, PendingApprovalEnvelope, RemedyConsentRecord]:
+        """Read the exact resume bundle on the serialized SQLite worker."""
+
+        self._store.validate_claimed_decision(
+            claim,
+            resume_owner_id=resume_owner_id,
+            resume_generation=resume_generation,
+        )
+        return (
+            self._store.get_recovery(claim.recovery_id),
+            self._store.get_pending_approval(claim.recovery_id),
+            self._store.get_remedy_consent(claim.recovery_id),
+        )
+
     async def approve_decision(
         self,
         recovery_id: str,
@@ -1031,15 +1389,19 @@ class RecoveryOrchestrator:
                 raise ValueError("Preclaimed decision does not match the request")
             claim = claimed_decision
         else:
-            claim = (
-                self._store.claim_decision(recovery_id, request)
-                if session_hash is None
-                else self._store.claim_decision_for_session(
+            if session_hash is None:
+                claim = await self._store_io.mutate(
+                    self._store.claim_decision,
+                    recovery_id,
+                    request,
+                )
+            else:
+                claim = await self._store_io.mutate(
+                    self._store.claim_decision_for_session,
                     recovery_id,
                     request,
                     session_hash=session_hash,
                 )
-            )
         if claim.response is not None:
             if not isinstance(claim.response, ApprovalDecisionResponse):
                 raise TypeError("Approval request replayed a decline response")
@@ -1061,9 +1423,13 @@ class RecoveryOrchestrator:
             )
         )
         try:
-            execution = self._store.get_completed_execution(recovery_id)
+            execution = await self._store_io.read(
+                self._store.get_completed_execution,
+                recovery_id,
+            )
             if execution is not None:
-                return self._complete_committed_claim(
+                return await self._store_io.control(
+                    self._complete_committed_claim,
                     claim,
                     execution,
                     resume_owner_id=resume_owner_id,
@@ -1076,10 +1442,14 @@ class RecoveryOrchestrator:
                     resume_generation=resume_generation,
                 )
             except ApprovalDecisionError:
-                execution = self._store.get_completed_execution(recovery_id)
+                execution = await self._store_io.read(
+                    self._store.get_completed_execution,
+                    recovery_id,
+                )
                 if execution is None:
                     raise
-                return self._complete_committed_claim(
+                return await self._store_io.control(
+                    self._complete_committed_claim,
                     claim,
                     execution,
                     resume_owner_id=resume_owner_id,
@@ -1087,13 +1457,20 @@ class RecoveryOrchestrator:
                 )
             except UserError as sdk_error:
                 try:
-                    self._store.get_receipt(recovery_id)
+                    await self._store_io.read(
+                        self._store.get_receipt,
+                        recovery_id,
+                    )
                 except RecoveryNotFoundError:
                     raise sdk_error
-                execution = self._store.get_completed_execution(recovery_id)
+                execution = await self._store_io.read(
+                    self._store.get_completed_execution,
+                    recovery_id,
+                )
                 if execution is None:
                     raise
-                return self._complete_committed_claim(
+                return await self._store_io.control(
+                    self._complete_committed_claim,
                     claim,
                     execution,
                     resume_owner_id=resume_owner_id,
@@ -1103,18 +1480,22 @@ class RecoveryOrchestrator:
                 raise ApprovalDecisionError(
                     "resume_owner_lost", recovery_id, status_code=409
                 )
-            execution = self._store.get_completed_execution(recovery_id)
+            execution = await self._store_io.read(
+                self._store.get_completed_execution,
+                recovery_id,
+            )
             if execution is None:
                 raise RuntimeError("Approved SDK run completed without a durable execution")
-            return self._complete_committed_claim(
+            return await self._store_io.control(
+                self._complete_committed_claim,
                 claim,
                 execution,
                 resume_owner_id=resume_owner_id,
                 resume_generation=resume_generation,
             )
         finally:
-            await self._cancel_heartbeat(heartbeat)
-            self._store.release_decision_resume(
+            await self._stop_heartbeat_and_release(
+                heartbeat,
                 claim,
                 resume_owner_id=resume_owner_id,
                 resume_generation=resume_generation,
@@ -1140,15 +1521,19 @@ class RecoveryOrchestrator:
                 raise ValueError("Preclaimed decision does not match the request")
             claim = claimed_decision
         else:
-            claim = (
-                self._store.claim_decision(recovery_id, request)
-                if session_hash is None
-                else self._store.claim_decision_for_session(
+            if session_hash is None:
+                claim = await self._store_io.mutate(
+                    self._store.claim_decision,
+                    recovery_id,
+                    request,
+                )
+            else:
+                claim = await self._store_io.mutate(
+                    self._store.claim_decision_for_session,
                     recovery_id,
                     request,
                     session_hash=session_hash,
                 )
-            )
         if claim.response is not None:
             if not isinstance(claim.response, DeclineDecisionResponse):
                 raise TypeError("Decline request replayed an approval response")
@@ -1170,22 +1555,26 @@ class RecoveryOrchestrator:
             )
         )
         try:
-            pending = self._store.get_pending_approval(recovery_id)
+            pending = await self._store_io.read(
+                self._store.get_pending_approval,
+                recovery_id,
+            )
             if pending.status != "rejected":
                 await self._resume_claimed_decline(
                     claim,
                     resume_owner_id=resume_owner_id,
                     resume_generation=resume_generation,
                 )
-            return self._store.finalize_declined_decision(
+            return await self._store_io.control(
+                self._store.finalize_declined_decision,
                 claim,
                 exact_interruption_rejected=True,
                 resume_owner_id=resume_owner_id,
                 resume_generation=resume_generation,
             )
         finally:
-            await self._cancel_heartbeat(heartbeat)
-            self._store.release_decision_resume(
+            await self._stop_heartbeat_and_release(
+                heartbeat,
                 claim,
                 resume_owner_id=resume_owner_id,
                 resume_generation=resume_generation,
@@ -1261,15 +1650,13 @@ class RecoveryOrchestrator:
         expected_decision = "approve" if approve else "decline"
         if claim.request.decision != expected_decision:
             raise ValueError("Decision claim action does not match resume path")
-        self._store.validate_claimed_decision(
-            claim,
-            resume_owner_id=resume_owner_id,
-            resume_generation=resume_generation,
-        )
         try:
-            recovery = self._store.get_recovery(recovery_id)
-            envelope = self._store.get_pending_approval(recovery_id)
-            consent = self._store.get_remedy_consent(recovery_id)
+            recovery, envelope, consent = await self._store_io.control(
+                self._load_resume_evidence,
+                claim,
+                resume_owner_id=resume_owner_id,
+                resume_generation=resume_generation,
+            )
         except (RecoveryNotFoundError, ValueError, TypeError):
             self._raise_incompatible(recovery_id, "envelope")
 
@@ -1279,14 +1666,21 @@ class RecoveryOrchestrator:
         if envelope.execution_mode is ExecutionMode.OPENAI_LIVE:
             if not self._live_ready or self._live_model_provider_factory is None:
                 raise LiveUnavailableError
-            recorder = ResponseMetadataRecorder(
-                envelope.model_metadata,
-                on_record=lambda metadata: self._store.update_pending_model_metadata(
+
+            async def persist_metadata(
+                metadata: tuple[ModelResponseMetadata, ...],
+            ) -> None:
+                await self._store_io.control(
+                    self._store.update_pending_model_metadata,
                     recovery_id,
                     metadata,
                     resume_owner_id=resume_owner_id,
                     resume_generation=resume_generation,
-                ),
+                )
+
+            recorder = ResponseMetadataRecorder(
+                envelope.model_metadata,
+                on_record=persist_metadata,
             )
             model_provider = self._live_model_provider_factory(recorder)
             live_graph = build_live_hotel_agents()
@@ -1476,14 +1870,18 @@ class RecoveryOrchestrator:
         if restored_consent_digest != envelope.consent_digest:
             self._raise_incompatible(recovery_id, "restored_consent_digest")
 
-        validated_claim = self._store.validate_claimed_decision(
+        validated_claim = await self._store_io.control(
+            self._store.validate_claimed_decision,
             claim,
             resume_owner_id=resume_owner_id,
             resume_generation=resume_generation,
         )
         if validated_claim.response is not None:
             return None
-        execution_count_before = self._store.count_executions(recovery_id)
+        execution_count_before = await self._store_io.read(
+            self._store.count_executions,
+            recovery_id,
+        )
         if approve:
             state.approve(interruption)
         else:
@@ -1517,7 +1915,11 @@ class RecoveryOrchestrator:
                 run_config=run_config,
             )
         if not approve:
-            if self._store.count_executions(recovery_id) != execution_count_before:
+            execution_count_after = await self._store_io.read(
+                self._store.count_executions,
+                recovery_id,
+            )
+            if execution_count_after != execution_count_before:
                 raise RuntimeError("SDK rejection unexpectedly changed execution evidence")
             if envelope.execution_mode is ExecutionMode.OPENAI_LIVE:
                 if not isinstance(completed.final_output, BrokerOutcome) or (
@@ -1526,7 +1928,8 @@ class RecoveryOrchestrator:
                     raise RuntimeError("Live rejection did not close without action")
             elif completed.final_output != CLOSED_WITHOUT_ACTION_MESSAGE:
                 raise RuntimeError("Deterministic rejection did not close without action")
-            self._store.record_exact_interruption_rejected(
+            await self._store_io.control(
+                self._store.record_exact_interruption_rejected,
                 claim,
                 resume_owner_id=resume_owner_id,
                 resume_generation=resume_generation,

@@ -208,6 +208,36 @@ def test_generated_schema_matches_the_implemented_public_http_contract() -> None
     decision_responses = paths["/api/recoveries/{recovery_id}/decisions"]["post"][
         "responses"
     ]
+    snapshot_responses = paths["/api/recoveries/{recovery_id}"]["get"]["responses"]
+    receipt_responses = paths["/api/recoveries/{recovery_id}/receipt"]["get"][
+        "responses"
+    ]
+    reset_responses = paths["/api/demo/reset"]["post"]["responses"]
+    retryable_store_response = {
+        "description": "Retry delay in seconds for bounded SQLite access or draining.",
+        "schema": {
+            "maximum": 1,
+            "minimum": 1,
+            "type": "integer",
+        },
+    }
+    for response in (
+        creation_responses["503"],
+        decision_responses["503"],
+        event_responses["503"],
+        snapshot_responses["503"],
+        receipt_responses["503"],
+        reset_responses["503"],
+    ):
+        assert response["content"]["application/json"]["schema"] == {
+            "$ref": "#/components/schemas/PublicErrorResponse"
+        }
+        assert response["headers"]["Retry-After"] == retryable_store_response
+    readiness_unavailable = paths["/readyz"]["get"]["responses"]["503"]
+    assert readiness_unavailable["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/PublicErrorResponse"
+    }
+    assert "Retry-After" not in readiness_unavailable.get("headers", {})
     for response in (creation_responses["504"], decision_responses["504"]):
         assert response["content"]["application/json"]["schema"] == {
             "$ref": "#/components/schemas/PublicErrorResponse"

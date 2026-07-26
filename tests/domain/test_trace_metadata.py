@@ -25,6 +25,7 @@ from server.agents.live_models import (
     SafeOpenAIResponsesProvider,
 )
 from server.agents.tracing import configure_openai_live_tracing
+from server.async_store import AsyncStoreOverloadedError
 
 
 class _ScriptedResponses:
@@ -223,6 +224,120 @@ def test_pinned_response_subclass_records_only_safe_returned_identifiers() -> No
     serialized = json.dumps(recorder.public_summary())
     assert "safe test input" not in serialized
     assert "output" not in serialized.lower()
+
+
+def test_pinned_response_waits_for_durable_metadata_callback() -> None:
+    raw_response = _response(
+        model="gpt-5.6-luna-2026-07-15",
+        response_id="resp_durable_consumer",
+    )
+    scripted = _ScriptedResponses(raw_response)
+    client = AsyncOpenAI(api_key="test-only-not-a-live-key")
+    client.responses = scripted  # type: ignore[assignment]
+    callback_entered = asyncio.Event()
+    callback_release = asyncio.Event()
+    persisted: list[tuple[ModelResponseMetadata, ...]] = []
+
+    async def persist(metadata: tuple[ModelResponseMetadata, ...]) -> None:
+        callback_entered.set()
+        await callback_release.wait()
+        persisted.append(metadata)
+
+    recorder = ResponseMetadataRecorder(on_record=persist)
+    model = SafeOpenAIResponsesModel(
+        "gpt-5.6-luna",
+        client,
+        recorder=recorder,
+    )
+
+    async def exercise() -> None:
+        response_task = asyncio.create_task(
+            model._fetch_response(  # noqa: SLF001 - pinned seam under test
+                system_instructions=None,
+                input="safe test input",
+                model_settings=ModelSettings(),
+                tools=[],
+                output_schema=None,
+                handoffs=[],
+                stream=False,
+            )
+        )
+        await callback_entered.wait()
+        assert not response_task.done()
+        assert persisted == []
+        callback_release.set()
+        assert await response_task is raw_response
+
+    asyncio.run(exercise())
+    assert len(persisted) == 1
+    assert persisted[0] == recorder.snapshot()
+
+
+def test_metadata_is_not_published_in_memory_when_durable_callback_fails() -> None:
+    expected = RuntimeError("durable-metadata-write-failed")
+
+    async def fail_persistence(
+        _metadata: tuple[ModelResponseMetadata, ...],
+    ) -> None:
+        raise expected
+
+    recorder = ResponseMetadataRecorder(on_record=fail_persistence)
+    metadata = ModelResponseMetadata(
+        requested_model="gpt-5.6-luna",
+        returned_model="gpt-5.6-luna-2026-07-15",
+        response_id="resp_failed_persistence",
+        request_id="req_failed_persistence",
+    )
+
+    async def exercise() -> None:
+        with pytest.raises(RuntimeError) as raised:
+            await recorder.record(metadata)
+        assert raised.value is expected
+
+    asyncio.run(exercise())
+    assert recorder.snapshot() == ()
+
+
+def test_live_model_seam_preserves_retryable_store_error_identity(caplog) -> None:
+    raw_response = _response(
+        model="gpt-5.6-luna-2026-07-15",
+        response_id="resp_retryable_store_failure",
+    )
+    scripted = _ScriptedResponses(raw_response)
+    client = AsyncOpenAI(api_key="test-only-not-a-live-key")
+    client.responses = scripted  # type: ignore[assignment]
+    expected = AsyncStoreOverloadedError("retryable-store-prompt-canary")
+
+    async def fail_persistence(
+        _metadata: tuple[ModelResponseMetadata, ...],
+    ) -> None:
+        raise expected
+
+    model = SafeOpenAIResponsesModel(
+        "gpt-5.6-luna",
+        client,
+        recorder=ResponseMetadataRecorder(on_record=fail_persistence),
+    )
+
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(AsyncStoreOverloadedError) as raised:
+            asyncio.run(
+                model.get_response(
+                    system_instructions=None,
+                    input="retryable-store-input-canary",
+                    model_settings=ModelSettings(),
+                    tools=[],
+                    output_schema=None,
+                    handoffs=[],
+                    tracing=ModelTracing.ENABLED_WITHOUT_DATA,
+                )
+            )
+    asyncio.run(client.close())
+
+    assert raised.value is expected
+    assert "retryable-store-prompt-canary" not in caplog.text
+    assert "retryable-store-input-canary" not in caplog.text
+    assert "LiveModelRequestError" not in caplog.text
 
 
 def test_pinned_response_failure_logs_only_safe_class_and_code(caplog) -> None:

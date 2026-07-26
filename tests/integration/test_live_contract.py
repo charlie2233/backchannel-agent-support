@@ -6,7 +6,8 @@ import sqlite3
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
+from threading import current_thread
 from typing import Any
 
 import pytest
@@ -21,6 +22,7 @@ from agents.tracing import Span, Trace, TracingProcessor
 from agents.tracing import setup as tracing_setup
 from agents.tracing.provider import DefaultTraceProvider
 from agents.usage import Usage
+from fastapi.testclient import TestClient
 from openai import AsyncOpenAI
 from openai.types.responses import (
     Response,
@@ -43,7 +45,16 @@ from server.agents.schemas import (
 )
 from server.agents.stub_model import DECLINE_MESSAGE
 from server.agents.tracing import configure_openai_live_tracing
-from server.models import ApprovalDecisionRequest, ExecutionMode, RecoveryStatus
+from server.async_store import AsyncStoreOverloadedError
+from server.config import RuntimeSettings
+from server.controls import PublicIdentityHasher
+from server.main import create_app
+from server.models import (
+    ApprovalDecisionRequest,
+    ExecutionMode,
+    RecoveryStatus,
+    ScenarioId,
+)
 from server.orchestrator import (
     LiveOperationTimeoutError,
     LiveUnavailableError,
@@ -57,6 +68,7 @@ RETURNED_MODELS = (
     "gpt-5.6-luna-2026-07-15-provider",
     "gpt-5.6-terra-2026-07-15-broker",
 )
+_TEST_IDENTITY_SECRET = "test-identity-secret-that-is-at-least-32-bytes"
 
 
 class _ScriptedLiveModel(Model):
@@ -128,7 +140,7 @@ class _ScriptedLiveModel(Model):
         )
         self._owner.strict_output_types.append(output_name)
         returned_model = self._owner.returned_model_for_call(self._owner.call_count)
-        self._recorder.record(
+        await self._recorder.record(
             ModelResponseMetadata(
                 requested_model=self._requested_model,
                 returned_model=returned_model,
@@ -324,6 +336,174 @@ def _decision(pending, action: str, client_id: str) -> ApprovalDecisionRequest:
         remedyDigest=approval.remedy_digest,
         toolCallId=approval.tool_call_id,
     )
+
+
+def test_live_create_store_failure_after_three_models_is_retryable_route_503(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    store = SQLiteStore(tmp_path / "live-create-store-failure.sqlite3")
+    hotel = HotelSimulator(store=store)
+    model_provider = ScriptedLiveModelProvider(returned_models=RETURNED_MODELS)
+    orchestrator = RecoveryOrchestrator(
+        store=store,
+        hotel_provider=hotel,
+        live_ready=True,
+        live_model_provider_factory=model_provider.bind,
+        live_trace_factory=_TraceRecorder().root,
+    )
+    create_attempts: list[dict[str, object]] = []
+    create_thread_names: list[str] = []
+
+    def fail_create_pending_recovery(
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        assert args == ()
+        assert kwargs["execution_mode"] is ExecutionMode.OPENAI_LIVE
+        assert isinstance(kwargs["session_hash"], str)
+        create_attempts.append(kwargs)
+        create_thread_names.append(current_thread().name)
+        raise AsyncStoreOverloadedError("live-create-store-canary")
+
+    monkeypatch.setattr(
+        store,
+        "create_pending_recovery",
+        fail_create_pending_recovery,
+    )
+    app = create_app(
+        RuntimeSettings(
+            live_ready=True,
+            identity_hmac_secret=_TEST_IDENTITY_SECRET,
+            live_cooldown=timedelta(0),
+            cleanup_interval=timedelta(hours=1),
+        ),
+        store=store,
+        orchestrator=orchestrator,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/recoveries",
+            json={"scenarioId": "hotel", "executionMode": "openai_live"},
+        )
+
+    assert model_provider.call_count == 3
+    assert model_provider.strict_output_types == [
+        "ConsumerProof",
+        "ProviderProof",
+        "BrokerOutcome",
+    ]
+    assert len(create_attempts) == 1
+    assert len(create_thread_names) == 1
+    assert create_thread_names[0].startswith("backchannel-sqlite")
+    assert store.count_recoveries() == 0
+    assert hotel.dispatch_count == 0
+    assert response.status_code == 503
+    assert response.headers["Retry-After"] == "1"
+    assert response.headers["Cache-Control"] == "no-store"
+    assert "set-cookie" not in response.headers
+    error = response.json()["error"]
+    assert error["code"] == "internal_error"
+    assert error["retryAfterSeconds"] == 1
+    assert error["recoveryId"] is None
+    assert error["requestId"] == response.headers["x-request-id"]
+    assert error["code"] != "live_unavailable"
+    assert "live-create-store-canary" not in response.text
+
+
+def test_live_approval_metadata_store_failure_stays_retryable_route_503(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    store = SQLiteStore(tmp_path / "live-decision-metadata-store-failure.sqlite3")
+    hasher = PublicIdentityHasher(_TEST_IDENTITY_SECRET)
+    signed_cookie, credential = hasher.demo_session_cookie_codec(
+        lifetime_seconds=3600
+    ).mint(now=datetime.now(UTC))
+    session_hash = hasher.session(credential.nonce)
+    model_provider = ScriptedLiveModelProvider(returned_models=RETURNED_MODELS)
+    orchestrator = RecoveryOrchestrator(
+        store=store,
+        hotel_provider=HotelSimulator(store=store),
+        live_ready=True,
+        live_model_provider_factory=model_provider.bind,
+        live_trace_factory=_TraceRecorder().root,
+    )
+    pending = asyncio.run(
+        orchestrator.start(
+            ScenarioId.HOTEL,
+            execution_mode=ExecutionMode.OPENAI_LIVE,
+            session_hash=session_hash,
+        )
+    )
+    request = _decision(
+        pending,
+        "approve",
+        "live-decision-metadata-store-failure",
+    )
+    metadata_attempts: list[tuple[str, tuple[ModelResponseMetadata, ...]]] = []
+
+    def fail_metadata_persistence(
+        recovery_id: str,
+        metadata: tuple[ModelResponseMetadata, ...],
+        *,
+        resume_owner_id: str,
+        resume_generation: int,
+    ) -> None:
+        assert resume_owner_id
+        assert resume_generation >= 1
+        metadata_attempts.append((recovery_id, metadata))
+        raise AsyncStoreOverloadedError("live-decision-metadata-store-canary")
+
+    monkeypatch.setattr(
+        store,
+        "update_pending_model_metadata",
+        fail_metadata_persistence,
+    )
+    app = create_app(
+        RuntimeSettings(
+            live_ready=True,
+            identity_hmac_secret=_TEST_IDENTITY_SECRET,
+            live_cooldown=timedelta(0),
+            cleanup_interval=timedelta(hours=1),
+        ),
+        store=store,
+        orchestrator=orchestrator,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            (
+                f"/api/recoveries/{pending.recovery.recovery_id}"
+                "/decisions"
+            ),
+            json=request.model_dump(by_alias=True, mode="json"),
+            headers={"Cookie": f"backchannel_demo_session={signed_cookie}"},
+        )
+
+    durable_claim = store.claim_decision_for_session(
+        pending.recovery.recovery_id,
+        request,
+        session_hash=session_hash,
+    )
+    assert durable_claim.request == request
+    assert durable_claim.response is None
+    assert model_provider.call_count == 4
+    assert len(metadata_attempts) == 1
+    assert metadata_attempts[0][0] == pending.recovery.recovery_id
+    assert len(metadata_attempts[0][1]) == 4
+    assert response.status_code == 503
+    assert response.headers["Retry-After"] == "1"
+    assert response.headers["Cache-Control"] == "no-store"
+    assert response.json()["error"]["code"] == "internal_error"
+    assert response.json()["error"]["retryAfterSeconds"] == 1
+    assert (
+        response.json()["error"]["recoveryId"]
+        == pending.recovery.recovery_id
+    )
+    assert response.json()["error"]["code"] != "live_unavailable"
+    assert "live-decision-metadata-store-canary" not in response.text
 
 
 def test_live_key_gate_fails_before_recovery_model_or_provider_activity(tmp_path) -> None:
@@ -978,6 +1158,11 @@ def test_actual_live_trace_spans_omit_model_tool_and_state_payloads(
     monkeypatch,
     caplog,
 ) -> None:
+    previous_trace_provider = tracing_setup.GLOBAL_TRACE_PROVIDER
+    if previous_trace_provider is not None:
+        previous_trace_provider.force_flush()
+    # Drain prior SDK batch-export logs so assertions cover this test's trace.
+    caplog.clear()
     capture = _EndedSpanCapture()
     trace_provider = DefaultTraceProvider()
     trace_provider.register_processor(capture)

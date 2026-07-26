@@ -2,6 +2,7 @@ import asyncio
 import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
+from threading import Event
 
 import pytest
 from agents.exceptions import UserError
@@ -182,11 +183,14 @@ def test_startup_retries_committed_execution_after_foreign_lease_expires(
     monkeypatch,
 ) -> None:
     async def exercise() -> None:
+        allow_finalization = Event()
+        winner_finalized = asyncio.Event()
+
         class FakeClock:
             def __init__(self) -> None:
                 self.current = datetime.now(UTC)
                 self.sleep_delays: list[float] = []
-                self._wake_reconcilers = asyncio.Event()
+                self._initial_waiters = asyncio.Event()
 
             def now(self) -> datetime:
                 return self.current
@@ -195,8 +199,14 @@ def test_startup_retries_committed_execution_after_foreign_lease_expires(
                 self.sleep_delays.append(delay)
                 if len(self.sleep_delays) == 2:
                     self.current += timedelta(seconds=max(self.sleep_delays))
-                    self._wake_reconcilers.set()
-                await self._wake_reconcilers.wait()
+                    self._initial_waiters.set()
+                if len(self.sleep_delays) <= 2:
+                    await self._initial_waiters.wait()
+                    return
+                if len(self.sleep_delays) != 3:
+                    raise AssertionError("Unexpected extra reconciliation retry")
+                allow_finalization.set()
+                await winner_finalized.wait()
 
         clock = FakeClock()
         database_path = tmp_path / "restart-unexpired-lease.sqlite3"
@@ -261,6 +271,30 @@ def test_startup_retries_committed_execution_after_foreign_lease_expires(
             reconciliation_clock=clock.now,
             reconciliation_sleep=clock.sleep,
         )
+        loop = asyncio.get_running_loop()
+        for candidate in (restarted_store, competing_store):
+            original_finalize = candidate.finalize_completed_execution
+            original_complete = candidate.complete_approval_decision
+
+            def controlled_finalize(*args, _original=original_finalize, **kwargs):
+                assert allow_finalization.wait(timeout=2)
+                return _original(*args, **kwargs)
+
+            def controlled_complete(*args, _original=original_complete, **kwargs):
+                result = _original(*args, **kwargs)
+                loop.call_soon_threadsafe(winner_finalized.set)
+                return result
+
+            monkeypatch.setattr(
+                candidate,
+                "finalize_completed_execution",
+                controlled_finalize,
+            )
+            monkeypatch.setattr(
+                candidate,
+                "complete_approval_decision",
+                controlled_complete,
+            )
         assert restarted_orchestrator._reconciliation_task is None
         assert competing_orchestrator._reconciliation_task is None
         assert restarted_store.get_recovery(recovery_id).status is (
@@ -274,10 +308,10 @@ def test_startup_retries_committed_execution_after_foreign_lease_expires(
                 restarted_orchestrator.wait_for_startup_reconciliation(),
                 competing_orchestrator.wait_for_startup_reconciliation(),
             ),
-            timeout=0.5,
+            timeout=5,
         )
 
-        assert len(clock.sleep_delays) == 2
+        assert len(clock.sleep_delays) == 3
         assert all(delay == pytest.approx(0.5, abs=0.05) for delay in clock.sleep_delays)
         assert restarted_provider.dispatch_count == 0
         assert competing_provider.dispatch_count == 0
@@ -299,7 +333,7 @@ def test_startup_retries_committed_execution_after_foreign_lease_expires(
         restarted_store.close()
         competing_store.close()
 
-    asyncio.run(asyncio.wait_for(exercise(), timeout=1))
+    asyncio.run(asyncio.wait_for(exercise(), timeout=10))
 
 
 def test_startup_releases_owned_lease_after_partial_approval_completion_failure(

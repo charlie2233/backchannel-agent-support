@@ -7,6 +7,7 @@ import logging
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
+from server.async_store import AsyncSQLiteStore
 from server.store import SQLiteStore
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,7 @@ class RecoveryCleanupService:
         batch_size: int,
         creation_usage_retention: timedelta = timedelta(days=8),
         clock: CleanupClock | None = None,
+        store_io: AsyncSQLiteStore | None = None,
     ) -> None:
         if ttl <= timedelta(0):
             raise ValueError("Cleanup TTL must be positive")
@@ -40,6 +42,7 @@ class RecoveryCleanupService:
         self._batch_size = batch_size
         self._creation_usage_retention = creation_usage_retention
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._store_io = store_io
         self._stop = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
 
@@ -80,7 +83,10 @@ class RecoveryCleanupService:
     async def _run(self) -> None:
         while not self._stop.is_set():
             try:
-                deleted = await asyncio.to_thread(self.run_once)
+                if self._store_io is None:
+                    deleted = await asyncio.to_thread(self.run_once)
+                else:
+                    deleted = await self._store_io.maintenance(self.run_once)
                 if deleted:
                     logger.info("Durable cleanup completed count=%d", deleted)
             except Exception:

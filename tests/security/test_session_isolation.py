@@ -34,6 +34,22 @@ def _cookie_value(response) -> str:
     return parsed["backchannel_demo_session"].value
 
 
+def _distinct_session_cookie_headers(
+    settings: RuntimeSettings,
+) -> tuple[dict[str, str], dict[str, str]]:
+    codec = PublicIdentityHasher(_SECRET).demo_session_cookie_codec(
+        lifetime_seconds=int(settings.demo_session_ttl.total_seconds())
+    )
+    now = datetime.now(UTC)
+    owner_cookie, _owner_credential = codec.mint(now=now)
+    foreign_cookie, _foreign_credential = codec.mint(now=now)
+    assert owner_cookie != foreign_cookie
+    return (
+        {"Cookie": f"backchannel_demo_session={owner_cookie}"},
+        {"Cookie": f"backchannel_demo_session={foreign_cookie}"},
+    )
+
+
 def _decision_payload(
     snapshot: dict[str, object], *, decision: str = "approve"
 ) -> dict[str, str]:
@@ -293,43 +309,77 @@ def test_public_endpoint_matrix_is_owner_scoped_and_cursor_has_no_oracle(
     store = SQLiteStore(tmp_path / "endpoint-matrix.sqlite3")
     settings = _settings()
     app = create_app(settings, store=store)
-    with TestClient(app) as owner, TestClient(app) as foreign:
-        terminal = owner.post("/api/recoveries", json=_CREATE)
+    owner_headers, foreign_headers = _distinct_session_cookie_headers(settings)
+    with TestClient(app) as client:
+        terminal = client.post(
+            "/api/recoveries",
+            json=_CREATE,
+            headers=owner_headers,
+        )
         terminal_id = terminal.json()["recoveryId"]
-        pending = owner.post(
+        pending = client.post(
             "/api/recoveries",
             json={"scenarioId": "hotel", "executionMode": "sdk_stub"},
+            headers=owner_headers,
         )
         pending_snapshot = pending.json()
         pending_id = pending_snapshot["recoveryId"]
-        foreign.post("/api/recoveries", json=_CREATE)
+        foreign_created = client.post(
+            "/api/recoveries",
+            json=_CREATE,
+            headers=foreign_headers,
+        )
 
         owner_responses = (
-            owner.get(f"/api/recoveries/{terminal_id}"),
-            owner.get(f"/api/recoveries/{terminal_id}/receipt"),
-            owner.get(f"/api/recoveries/{terminal_id}/events"),
+            client.get(f"/api/recoveries/{terminal_id}", headers=owner_headers),
+            client.get(
+                f"/api/recoveries/{terminal_id}/receipt",
+                headers=owner_headers,
+            ),
+            client.get(
+                f"/api/recoveries/{terminal_id}/events",
+                headers=owner_headers,
+            ),
         )
         foreign_responses = (
-            foreign.get(f"/api/recoveries/{terminal_id}"),
-            foreign.get(f"/api/recoveries/{terminal_id}/receipt"),
-            foreign.get(f"/api/recoveries/{terminal_id}/events"),
-            foreign.get(
-                f"/api/recoveries/{terminal_id}/events",
-                headers={"Last-Event-ID": "not-an-integer"},
+            client.get(f"/api/recoveries/{terminal_id}", headers=foreign_headers),
+            client.get(
+                f"/api/recoveries/{terminal_id}/receipt",
+                headers=foreign_headers,
             ),
-            foreign.post(
+            client.get(
+                f"/api/recoveries/{terminal_id}/events",
+                headers=foreign_headers,
+            ),
+            client.get(
+                f"/api/recoveries/{terminal_id}/events",
+                headers={
+                    **foreign_headers,
+                    "Last-Event-ID": "not-an-integer",
+                },
+            ),
+            client.post(
                 f"/api/recoveries/{pending_id}/decisions",
                 json=_decision_payload(pending_snapshot),
+                headers=foreign_headers,
             ),
         )
 
-        owner_bad_cursor = owner.get(
+        owner_bad_cursor = client.get(
             f"/api/recoveries/{terminal_id}/events",
-            headers={"Last-Event-ID": "not-an-integer"},
+            headers={
+                **owner_headers,
+                "Last-Event-ID": "not-an-integer",
+            },
         )
         missing_id = uuid4()
-        unknown = owner.get(f"/api/recoveries/{missing_id}")
+        unknown = client.get(
+            f"/api/recoveries/{missing_id}",
+            headers=owner_headers,
+        )
 
+    assert foreign_created.status_code == 201
+    assert "set-cookie" not in foreign_created.headers
     assert all(response.status_code == 200 for response in owner_responses)
     assert all(response.status_code == 404 for response in foreign_responses)
     assert all(response.json()["error"]["code"] == "not_found" for response in foreign_responses)
@@ -343,12 +393,28 @@ def test_foreign_and_nonexistent_recoveries_have_equivalent_not_found_bodies(
     tmp_path,
 ) -> None:
     store = SQLiteStore(tmp_path / "no-oracle-body.sqlite3")
-    app = create_app(_settings(), store=store)
-    with TestClient(app) as owner, TestClient(app) as foreign:
-        recovery_id = owner.post("/api/recoveries", json=_CREATE).json()["recoveryId"]
-        foreign.post("/api/recoveries", json=_CREATE)
-        foreign_known = foreign.get(f"/api/recoveries/{recovery_id}")
-        nonexistent = foreign.get(f"/api/recoveries/{uuid4()}")
+    settings = _settings()
+    app = create_app(settings, store=store)
+    owner_headers, foreign_headers = _distinct_session_cookie_headers(settings)
+    with TestClient(app) as client:
+        recovery_id = client.post(
+            "/api/recoveries",
+            json=_CREATE,
+            headers=owner_headers,
+        ).json()["recoveryId"]
+        foreign_created = client.post(
+            "/api/recoveries",
+            json=_CREATE,
+            headers=foreign_headers,
+        )
+        foreign_known = client.get(
+            f"/api/recoveries/{recovery_id}",
+            headers=foreign_headers,
+        )
+        nonexistent = client.get(
+            f"/api/recoveries/{uuid4()}",
+            headers=foreign_headers,
+        )
 
     def normalized(response) -> dict[str, object]:
         body = response.json()
@@ -356,7 +422,11 @@ def test_foreign_and_nonexistent_recoveries_have_equivalent_not_found_bodies(
         body["error"]["recoveryId"] = "normalized"
         return body
 
+    assert foreign_created.status_code == 201
+    assert "set-cookie" not in foreign_created.headers
     assert foreign_known.status_code == nonexistent.status_code == 404
+    assert "set-cookie" not in foreign_known.headers
+    assert "set-cookie" not in nonexistent.headers
     assert normalized(foreign_known) == normalized(nonexistent)
 
 
@@ -421,9 +491,18 @@ def test_scoped_reset_is_constant_bind_and_preserves_aggregate_history(tmp_path)
     settings = _settings(demo_reset_enabled=True)
     store = SQLiteStore(database_path)
     app = create_app(settings, store=store)
-    with TestClient(app) as owner, TestClient(app) as foreign:
-        owner_created = owner.post("/api/recoveries", json=_CREATE).json()
-        foreign_created = foreign.post("/api/recoveries", json=_CREATE).json()
+    owner_headers, foreign_headers = _distinct_session_cookie_headers(settings)
+    with TestClient(app) as client:
+        owner_created = client.post(
+            "/api/recoveries",
+            json=_CREATE,
+            headers=owner_headers,
+        ).json()
+        foreign_created = client.post(
+            "/api/recoveries",
+            json=_CREATE,
+            headers=foreign_headers,
+        ).json()
         with sqlite3.connect(database_path) as connection:
             owner_hash = connection.execute(
                 "SELECT session_hash FROM recovery_access WHERE recovery_id = ?",
@@ -474,7 +553,11 @@ def test_scoped_reset_is_constant_bind_and_preserves_aggregate_history(tmp_path)
             session_expires_at=datetime.now(UTC) + timedelta(hours=1),
         )
         before_usage = store.count_public_live_usage_rows()
-        reset = owner.post("/api/demo/reset", json={})
+        reset = client.post(
+            "/api/demo/reset",
+            json={},
+            headers=owner_headers,
+        )
 
     assert reset.status_code == 200
     assert reset.json() == {"reset": True}

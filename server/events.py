@@ -8,6 +8,10 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
 from time import monotonic
 
+from server.async_store import (
+    AsyncSQLiteStore,
+    RetryableStoreAccessError,
+)
 from server.models import RecoveryEvent, RecoveryStatus
 from server.store import RecoveryNotFoundError, SQLiteStore
 
@@ -39,6 +43,7 @@ async def stream_recovery_events(
     is_disconnected: Callable[[], Awaitable[bool]],
     heartbeat_seconds: float = HEARTBEAT_SECONDS,
     poll_interval_seconds: float = POLL_INTERVAL_SECONDS,
+    store_io: AsyncSQLiteStore,
     session_hash: str | None = None,
     session_expires_at: datetime | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -52,19 +57,26 @@ async def stream_recovery_events(
             return
         try:
             if session_hash is None:
-                persisted, recovery_status = store.read_event_batch(
-                    recovery_id, after_seq=cursor
+                persisted, recovery_status = await store_io.stream(
+                    store.read_event_batch,
+                    recovery_id,
+                    after_seq=cursor,
                 )
             else:
-                persisted, recovery_status = store.read_event_batch_for_session(
+                persisted, recovery_status = await store_io.stream(
+                    store.read_event_batch_for_session,
                     recovery_id,
                     session_hash=session_hash,
                     after_seq=cursor,
                 )
+        except RetryableStoreAccessError:
+            return
         except RecoveryNotFoundError:
             if session_hash is not None:
                 return
             raise
+        if session_expires_at is not None and now() >= session_expires_at:
+            return
         for event in persisted:
             yield encode_sse_event(event)
             cursor = event.seq

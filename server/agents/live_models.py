@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Literal, cast, overload
 
@@ -31,6 +31,8 @@ from openai import (
 )
 from openai.types.responses import Response, ResponseStreamEvent
 from openai.types.responses.response_prompt_param import ResponsePromptParam
+
+from server.async_store import RetryableStoreAccessError
 
 LIVE_CONSUMER_MODEL = "gpt-5.6-luna"
 LIVE_PROVIDER_MODEL = "gpt-5.6-luna"
@@ -167,15 +169,18 @@ class ResponseMetadataRecorder:
         self,
         initial: tuple[ModelResponseMetadata, ...] = (),
         *,
-        on_record: Callable[[tuple[ModelResponseMetadata, ...]], None] | None = None,
+        on_record: (
+            Callable[[tuple[ModelResponseMetadata, ...]], Awaitable[None]] | None
+        ) = None,
     ) -> None:
         self._records = list(initial)
         self._on_record = on_record
 
-    def record(self, metadata: ModelResponseMetadata) -> None:
-        self._records.append(metadata)
+    async def record(self, metadata: ModelResponseMetadata) -> None:
+        candidate = (*self._records, metadata)
         if self._on_record is not None:
-            self._on_record(self.snapshot())
+            await self._on_record(candidate)
+        self._records.append(metadata)
 
     def snapshot(self) -> tuple[ModelResponseMetadata, ...]:
         return tuple(self._records)
@@ -239,6 +244,20 @@ class SafeOpenAIResponsesModel(OpenAIResponsesModel):
                 if response.usage:
                     span_response.span_data.usage = model_usage_to_span_usage(usage)
                 _SAFE_LOGGER.debug("OpenAI model response completed")
+            except RetryableStoreAccessError:
+                span_response.set_error(
+                    SpanError(
+                        message="Retryable store access failed",
+                        data={
+                            "errorClass": "RetryableStoreAccessError",
+                            "errorCode": "store_unavailable",
+                        },
+                    )
+                )
+                _SAFE_LOGGER.error(
+                    "OpenAI response interrupted by retryable store access failure"
+                )
+                raise
             except Exception as error:
                 error_code = _live_model_error_code(error)
                 span_response.set_error(
@@ -334,7 +353,7 @@ class SafeOpenAIResponsesModel(OpenAIResponsesModel):
         )
         if returned_model is None or response_id is None:
             raise RuntimeError("OpenAI live response identifiers are missing")
-        self._metadata_recorder.record(
+        await self._metadata_recorder.record(
             ModelResponseMetadata(
                 requested_model=requested_model,
                 returned_model=returned_model,

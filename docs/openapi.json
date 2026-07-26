@@ -1031,6 +1031,26 @@
               }
             },
             "description": "The request was rejected with a public error envelope."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "SQLite access is unavailable or draining.",
+            "headers": {
+              "Retry-After": {
+                "description": "Retry delay in seconds for bounded SQLite access or draining.",
+                "schema": {
+                  "maximum": 1.0,
+                  "minimum": 1.0,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "Reset Demo"
@@ -1100,6 +1120,26 @@
               }
             }
           },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "The bounded SQLite lane is unavailable or draining.",
+            "headers": {
+              "Retry-After": {
+                "description": "Retry delay in seconds for bounded SQLite access or draining.",
+                "schema": {
+                  "maximum": 1.0,
+                  "minimum": 1.0,
+                  "type": "integer"
+                }
+              }
+            }
+          },
           "504": {
             "content": {
               "application/json": {
@@ -1160,6 +1200,26 @@
               }
             },
             "description": "The request was rejected with a public error envelope."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "SQLite access is unavailable or draining.",
+            "headers": {
+              "Retry-After": {
+                "description": "Retry delay in seconds for bounded SQLite access or draining.",
+                "schema": {
+                  "maximum": 1,
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "Get Recovery"
@@ -1229,6 +1289,26 @@
               }
             },
             "description": "The request was rejected with a public error envelope."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "The bounded SQLite lane is unavailable or draining.",
+            "headers": {
+              "Retry-After": {
+                "description": "Retry delay in seconds for bounded SQLite access or draining.",
+                "schema": {
+                  "maximum": 1,
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
           },
           "504": {
             "content": {
@@ -1342,6 +1422,26 @@
                 }
               }
             }
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "The bounded SQLite lane is unavailable or draining.",
+            "headers": {
+              "Retry-After": {
+                "description": "Retry delay in seconds for bounded SQLite access or draining.",
+                "schema": {
+                  "maximum": 1,
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "Recovery Events"
@@ -1393,6 +1493,26 @@
               }
             },
             "description": "The request was rejected with a public error envelope."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "SQLite access is unavailable or draining.",
+            "headers": {
+              "Retry-After": {
+                "description": "Retry delay in seconds for bounded SQLite access or draining.",
+                "schema": {
+                  "maximum": 1,
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "Get Receipt"
@@ -1503,6 +1623,16 @@
               }
             },
             "description": "The request was rejected with a public error envelope."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicErrorResponse"
+                }
+              }
+            },
+            "description": "The service is not currently ready."
           }
         },
         "summary": "Ready"

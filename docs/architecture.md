@@ -68,6 +68,39 @@ day. Any value may be zero as an operator kill switch. Rows are retained for eig
 days by the bounded cleanup service; demo reset, recovery deletion, and process
 restart do not erase the current counters.
 
+## Async SQLite lane and shutdown
+
+SQLite work originating on the application event loop uses one lifecycle-owned
+priority lane per `SQLiteStore`, shared by every app and orchestrator bound to that
+store and backed by a dedicated single-worker executor. Admission is bounded to 64
+active or queued calls; at most 48 non-control calls may consume that capacity,
+reserving 16 slots for decision leases, finalization, and other control work.
+Control and ordinary mutations run ahead of reads, SSE polling is lower priority,
+and periodic cleanup is lowest. Synchronous FastAPI routes and the Agents SDK's
+synchronous tool seam are already executed off the event loop.
+
+Outside final draining, an admitted call runs exactly once. Caller cancellation
+shield-joins an active or queued call before propagating. A cancelled lease
+acquisition makes bounded, exact-owner cleanup attempts before cancellation is
+reported. If those attempts ultimately fail, the cleanup error is surfaced with the
+cancellation chained and the lease remains generation-fenced until expiry or safe
+takeover. Final application shutdown instead rejects admitted work that has not
+started, joins the one active SQLite call, and leaves an injected `SQLiteStore` open
+for its owner.
+Each process-local reentrant store-lock wait is capped at 1 second and the first
+SQLite busy wait is capped at 3 seconds, leaving nominal headroom beneath the
+packaged server's 5-second request-task drain window. Lifespan shutdown and the
+worker join remain cooperative and are not bounded by that setting because Python
+threads cannot be killed safely; the outer host or smoke-test stop is the final
+process bound.
+
+Before a response starts, bounded-lane saturation, process-lock contention, or
+draining returns the generic HTTP `503` `internal_error` envelope with
+`Retry-After: 1`. `/readyz` instead folds contention into its ordinary readiness
+`503` without a retry header. A stream that encounters the bounded access boundary
+after its HTTP response has started closes cleanly so the browser can reconnect
+from its last durable event ID.
+
 ## Long-lived single-host container recipe
 
 This is an operator recipe, not deployment evidence. Build the exact source tree,

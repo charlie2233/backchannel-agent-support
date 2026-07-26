@@ -64,7 +64,11 @@ enforces global, signed-session, and recovery caps; saturation returns the gener
 `stream_capacity_reached` public `429` with a one-second retry hint. The defaults are
 32 global, 4 per session, and 2 per recovery, configurable through the documented
 `BACKCHANNEL_SSE_MAX_*` environment values. Heartbeats do not advance the durable
-cursor.
+cursor. SSE polling uses the lowest request-time SQLite priority and rechecks signed
+session expiry after every awaited database read before yielding any persisted row.
+If the bounded SQLite lane becomes unavailable after the stream has started, the
+stream closes without inventing an event so a reconnect can resume from its last
+durable cursor.
 
 ## Public creation admission
 
@@ -83,6 +87,24 @@ read deadline. `BACKCHANNEL_REQUEST_BODY_READ_TIMEOUT_SECONDS` is an integer fro
 through 30, with a default of 5. Deadline expiry returns the generic HTTP `408`
 `invalid_request` envelope before downstream routing, session identity issuance, or
 admission work begins.
+
+Event-loop SQLite work has one bounded single-worker priority lane per
+`SQLiteStore`, shared by its apps and orchestrators. It admits at most 64 active or
+queued calls and limits all non-control work to 48 calls so 16 slots remain
+reserved for control work. Each process-local reentrant lock wait is capped at 1
+second and the first SQLite busy wait at 3 seconds, leaving nominal headroom under
+the server's 5-second request-task drain window. Lifespan shutdown and worker join
+remain cooperative and are not bounded by that setting; the outer host or smoke
+stop is the final process bound. Outside final draining, cancellation joins admitted
+work before it is reported. Cancelled decision-lease acquisition uses bounded,
+exact-owner release attempts; an ultimate release failure is surfaced over the
+chained cancellation and remains generation-fenced until expiry or safe takeover.
+Final shutdown instead rejects admitted calls that have not started and joins the
+one active call. Saturation, process-lock contention, or draining before a response
+starts returns the generic HTTP `503` `internal_error` envelope with
+`Retry-After: 1`; this response is declared for recovery creation, decision,
+snapshot, receipt, SSE preflight, and local reset. Readiness folds the same
+contention into its ordinary `503` without a retry header.
 
 The independent session, IP, and global counters use UTC calendar days. Exhaustion
 returns HTTP `429`, code `creation_daily_budget_exceeded`, the generic message

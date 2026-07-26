@@ -11,12 +11,14 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from threading import RLock
-from typing import Any, Literal, cast
+from types import TracebackType
+from typing import Any, Literal, Self, cast
 
 from pydantic import JsonValue
 
 from server.agents.live_models import ModelResponseMetadata
 from server.agents.schemas import CommitRemedyArguments
+from server.async_store import RetryableStoreAccessError
 from server.controls import (
     HASH_PREFIX,
     PublicCreationAdmissionError,
@@ -45,6 +47,8 @@ from server.policy import (
 )
 from server.providers.quota_simulator import QuotaGrantResult
 
+SQLITE_BUSY_TIMEOUT_SECONDS = 3.0
+SQLITE_PROCESS_LOCK_TIMEOUT_SECONDS = 1.0
 SDK_STUB_RECEIPT_BOUNDARY = (
     "Deterministic Agents SDK model and demo hotel adapter only; "
     "no OpenAI model call, real booking, or payment change."
@@ -75,6 +79,52 @@ QUOTA_PROTOCOL_PHASES = (
 QUOTA_TERMINAL_SUMMARY = (
     "The grant was verified, runtime permission revoked, and receipt sealed."
 )
+
+
+class SQLiteStoreContentionError(RetryableStoreAccessError):
+    """Raised when the process-local reentrant store lock cannot be acquired."""
+
+
+class _BoundedRLock:
+    """Reentrant process lock whose context-manager entry has a finite deadline."""
+
+    def __init__(self, timeout_seconds: float) -> None:
+        self._lock = RLock()
+        self._timeout_seconds = timeout_seconds
+
+    def acquire(
+        self,
+        blocking: bool = True,
+        timeout: float | None = None,
+    ) -> bool:
+        if not blocking:
+            return self._lock.acquire(blocking=False)
+        wait_seconds = (
+            self._timeout_seconds
+            if timeout is None or timeout < 0
+            else min(timeout, self._timeout_seconds)
+        )
+        return self._lock.acquire(timeout=wait_seconds)
+
+    def release(self) -> None:
+        self._lock.release()
+
+    def __enter__(self) -> Self:
+        if not self.acquire():
+            raise SQLiteStoreContentionError(
+                "SQLiteStore process lock acquisition timed out"
+            )
+        return self
+
+    def __exit__(
+        self,
+        _exc_type: type[BaseException] | None,
+        _exc_value: BaseException | None,
+        _traceback: TracebackType | None,
+    ) -> None:
+        self.release()
+
+
 PUBLIC_CREATION_USAGE_TABLE_SQL = """
 CREATE TABLE public_creation_usage (
     identity_kind TEXT NOT NULL CHECK (
@@ -465,7 +515,7 @@ class SQLiteStore:
 
     def __init__(self, database_path: str | Path) -> None:
         self._database_path = Path(database_path)
-        self._lock = RLock()
+        self._lock = _BoundedRLock(SQLITE_PROCESS_LOCK_TIMEOUT_SECONDS)
         self._closed = False
         self._database_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
@@ -2242,7 +2292,10 @@ class SQLiteStore:
     def _connect(self) -> sqlite3.Connection:
         if self._closed:
             raise RuntimeError("SQLiteStore is closed")
-        connection = sqlite3.connect(self._database_path, timeout=10)
+        connection = sqlite3.connect(
+            self._database_path,
+            timeout=SQLITE_BUSY_TIMEOUT_SECONDS,
+        )
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         return connection

@@ -6,6 +6,7 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 
+from server.async_store import AsyncSQLiteStore
 from server.config import RuntimeSettings
 from server.events import stream_recovery_events
 from server.main import create_app
@@ -307,7 +308,8 @@ def test_terminal_transition_after_event_read_is_emitted_before_stream_end(
         return False
 
     async def collect() -> list[str]:
-        return [
+        store_io = AsyncSQLiteStore.for_store(store)
+        chunks = [
             chunk
             async for chunk in stream_recovery_events(
                 store,
@@ -315,8 +317,11 @@ def test_terminal_transition_after_event_read_is_emitted_before_stream_end(
                 after_seq=cursor,
                 is_disconnected=connected,
                 poll_interval_seconds=0,
+                store_io=store_io,
             )
         ]
+        await store_io.shutdown()
+        return chunks
 
     chunks = asyncio.run(collect())
     assert len(chunks) == 1
@@ -352,7 +357,8 @@ def test_event_stream_closes_for_every_terminal_recovery_status(
         return False
 
     async def collect() -> list[str]:
-        return [
+        store_io = AsyncSQLiteStore.for_store(store)
+        chunks = [
             chunk
             async for chunk in stream_recovery_events(
                 store,
@@ -360,8 +366,11 @@ def test_event_stream_closes_for_every_terminal_recovery_status(
                 after_seq=0,
                 is_disconnected=connected,
                 poll_interval_seconds=0,
+                store_io=store_io,
             )
         ]
+        await store_io.shutdown()
+        return chunks
 
     chunks = asyncio.run(asyncio.wait_for(collect(), timeout=0.1))
 

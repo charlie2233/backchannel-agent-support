@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from datetime import UTC, datetime, timedelta
+from threading import Event
 
 import pytest
 
+from server.async_store import AsyncSQLiteStore
 from server.events import stream_recovery_events
 from server.models import ExecutionMode, RecoveryStatus, ScenarioId
-from server.store import SQLiteStore
+from server.store import SQLiteStore, SQLiteStoreContentionError
 
 _SESSION_HASH = "hmac-sha256:" + "a" * 64
 
@@ -37,6 +39,7 @@ def test_stream_stops_before_later_event_or_heartbeat_after_access_detach(
     _create_in_progress(store, recovery_id)
 
     async def exercise() -> None:
+        store_io = AsyncSQLiteStore.for_store(store)
         stream = stream_recovery_events(
             store,
             recovery_id,
@@ -44,6 +47,7 @@ def test_stream_stops_before_later_event_or_heartbeat_after_access_detach(
             is_disconnected=_never_disconnected,
             heartbeat_seconds=0.01,
             poll_interval_seconds=0.001,
+            store_io=store_io,
             session_hash=_SESSION_HASH,
             session_expires_at=datetime.now(UTC) + timedelta(minutes=5),
         )
@@ -64,6 +68,7 @@ def test_stream_stops_before_later_event_or_heartbeat_after_access_detach(
         )
         with pytest.raises(StopAsyncIteration):
             await asyncio.wait_for(anext(stream), timeout=1)
+        await store_io.shutdown()
 
     asyncio.run(exercise())
 
@@ -78,6 +83,7 @@ def test_stream_stops_before_later_event_or_heartbeat_after_cookie_expiry(
     clock = [expiry - timedelta(seconds=1)]
 
     async def exercise() -> None:
+        store_io = AsyncSQLiteStore.for_store(store)
         stream = stream_recovery_events(
             store,
             recovery_id,
@@ -85,6 +91,7 @@ def test_stream_stops_before_later_event_or_heartbeat_after_cookie_expiry(
             is_disconnected=_never_disconnected,
             heartbeat_seconds=0.01,
             poll_interval_seconds=0.001,
+            store_io=store_io,
             session_hash=_SESSION_HASH,
             session_expires_at=expiry,
             now=lambda: clock[0],
@@ -102,5 +109,94 @@ def test_stream_stops_before_later_event_or_heartbeat_after_cookie_expiry(
         )
         with pytest.raises(StopAsyncIteration):
             await asyncio.wait_for(anext(stream), timeout=1)
+        await store_io.shutdown()
+
+    asyncio.run(exercise())
+
+
+def test_stream_rechecks_cookie_expiry_after_a_blocked_sqlite_read(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    store = SQLiteStore(tmp_path / "sse-blocked-expiry.sqlite3")
+    recovery_id = "sse-blocked-expiry"
+    _create_in_progress(store, recovery_id)
+    expiry = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
+    clock = [expiry - timedelta(seconds=1)]
+    read_entered = Event()
+    read_release = Event()
+    original_read = store.read_event_batch_for_session
+
+    def blocked_read(*args, **kwargs):
+        read_entered.set()
+        assert read_release.wait(timeout=2)
+        return original_read(*args, **kwargs)
+
+    monkeypatch.setattr(store, "read_event_batch_for_session", blocked_read)
+
+    async def exercise() -> None:
+        store_io = AsyncSQLiteStore.for_store(store)
+        stream = stream_recovery_events(
+            store,
+            recovery_id,
+            after_seq=0,
+            is_disconnected=_never_disconnected,
+            store_io=store_io,
+            session_hash=_SESSION_HASH,
+            session_expires_at=expiry,
+            now=lambda: clock[0],
+        )
+        next_event = asyncio.create_task(anext(stream))
+        while not read_entered.is_set():
+            await asyncio.sleep(0)
+        clock[0] = expiry
+        read_release.set()
+        with pytest.raises(StopAsyncIteration):
+            await next_event
+        await store_io.shutdown()
+
+    asyncio.run(exercise())
+
+
+def test_stream_closes_cursor_safe_after_post_start_store_contention(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    store = SQLiteStore(tmp_path / "sse-post-start-contention.sqlite3")
+    recovery_id = "sse-post-start-contention"
+    _create_in_progress(store, recovery_id)
+    existing_events = store.list_events(recovery_id)
+    assert existing_events
+    contended_cursors: list[int] = []
+
+    async def exercise() -> None:
+        store_io = AsyncSQLiteStore.for_store(store)
+        stream = stream_recovery_events(
+            store,
+            recovery_id,
+            after_seq=0,
+            is_disconnected=_never_disconnected,
+            heartbeat_seconds=3600,
+            poll_interval_seconds=0,
+            store_io=store_io,
+            session_hash=_SESSION_HASH,
+            session_expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        )
+        emitted = [await anext(stream) for _event in existing_events]
+        assert emitted[0].startswith("id: 1\n")
+
+        def contended_read(*_args, **kwargs):
+            contended_cursors.append(kwargs["after_seq"])
+            raise SQLiteStoreContentionError("test-only contention")
+
+        monkeypatch.setattr(
+            store,
+            "read_event_batch_for_session",
+            contended_read,
+        )
+        with pytest.raises(StopAsyncIteration):
+            await anext(stream)
+        assert contended_cursors == [existing_events[-1].seq]
+        await store_io.shutdown()
 
     asyncio.run(exercise())

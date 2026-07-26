@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from threading import Lock
 from typing import Annotated, Any, NoReturn
 from uuid import UUID
 
@@ -18,6 +20,10 @@ from server.agents.live_models import (
     LiveModelRequestError,
     ResponseMetadataRecorder,
     SafeOpenAIResponsesProvider,
+)
+from server.async_store import (
+    AsyncSQLiteStore,
+    RetryableStoreAccessError,
 )
 from server.cleanup import RecoveryCleanupService
 from server.config import RuntimeSettings
@@ -72,7 +78,11 @@ from server.sse_admission import (
     StreamCapacityReachedError,
 )
 from server.static import FrontendBundle
-from server.store import ApprovalDecisionError, RecoveryNotFoundError, SQLiteStore
+from server.store import (
+    ApprovalDecisionError,
+    RecoveryNotFoundError,
+    SQLiteStore,
+)
 
 
 def _owner_scoped_success_response(description: str) -> dict[str, Any]:
@@ -109,6 +119,55 @@ def _operational_status_success_response(description: str) -> dict[str, Any]:
             }
         },
     }
+
+
+def _async_store_unavailable_response(description: str) -> dict[str, Any]:
+    return {
+        "model": PublicErrorResponse,
+        "description": description,
+        "headers": {
+            "Retry-After": {
+                "description": (
+                    "Retry delay in seconds for bounded SQLite access or draining."
+                ),
+                "schema": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1,
+                },
+            }
+        },
+    }
+
+
+async def _close_live_client_cancellation_safe(client: AsyncOpenAI) -> None:
+    """Close one owned client exactly once before propagating caller cancellation."""
+
+    close_task = asyncio.create_task(
+        client.close(),
+        name="backchannel-live-client-close",
+    )
+    caller_cancellation: asyncio.CancelledError | None = None
+    while not close_task.done():
+        try:
+            await asyncio.shield(close_task)
+        except asyncio.CancelledError as error:
+            current = asyncio.current_task()
+            if current is None or current.cancelling() == 0:
+                break
+            if caller_cancellation is None:
+                caller_cancellation = error
+            continue
+        except BaseException:
+            break
+    try:
+        close_task.result()
+    except BaseException as close_error:
+        if caller_cancellation is not None:
+            raise close_error from caller_cancellation
+        raise
+    if caller_cancellation is not None:
+        raise caller_cancellation
 
 
 def _raise_public(
@@ -223,16 +282,9 @@ def create_app(
     )
     recovery_orchestrator = orchestrator
     live_client: AsyncOpenAI | None = None
+    owns_live_client = recovery_orchestrator is None and runtime_settings.live_ready
     if recovery_orchestrator is None:
         provider = hotel_provider or HotelSimulator(store=recovery_store)
-        live_client = (
-            AsyncOpenAI(
-                timeout=runtime_settings.live_operation_timeout.total_seconds(),
-                max_retries=0,
-            )
-            if runtime_settings.live_ready
-            else None
-        )
 
         def live_provider_factory(
             recorder: ResponseMetadataRecorder,
@@ -254,19 +306,57 @@ def create_app(
             ),
             live_operation_timeout=runtime_settings.live_operation_timeout,
         )
+    if isinstance(recovery_orchestrator, RecoveryOrchestrator):
+        if recovery_orchestrator.store is not recovery_store:
+            raise ValueError("RecoveryOrchestrator is bound to a different SQLiteStore")
+        store_io = recovery_orchestrator.store_io
+        if (
+            not store_io.is_bound_to(recovery_store)
+            or AsyncSQLiteStore.for_store(recovery_store) is not store_io
+        ):
+            raise ValueError(
+                "RecoveryOrchestrator has a mismatched async SQLite adapter"
+            )
+    else:
+        store_io = AsyncSQLiteStore.for_store(recovery_store)
+    app_lifecycle_lock = Lock()
+    active_cleanup_services: dict[object, RecoveryCleanupService] = {}
+    shared_resources_closing = False
 
     @asynccontextmanager
     async def lifespan(_application: FastAPI) -> AsyncIterator[None]:
+        nonlocal live_client, shared_resources_closing
+        lifecycle_owner = object()
         cleanup_service = RecoveryCleanupService(
             store=recovery_store,
             ttl=runtime_settings.recovery_ttl,
             interval=runtime_settings.cleanup_interval,
             batch_size=runtime_settings.cleanup_batch_size,
             creation_usage_retention=runtime_settings.creation_usage_retention,
+            store_io=store_io,
         )
-        _application.state.cleanup_service = cleanup_service
+        with app_lifecycle_lock:
+            if shared_resources_closing:
+                raise RuntimeError("Application shared resources are shutting down")
+            if not active_cleanup_services and owns_live_client:
+                live_client = AsyncOpenAI(
+                    timeout=runtime_settings.live_operation_timeout.total_seconds(),
+                    max_retries=0,
+                )
+            active_cleanup_services[lifecycle_owner] = cleanup_service
+            _application.state.cleanup_service = cleanup_service
+        store_started = False
+        real_orchestrator_started = False
+        fake_orchestrator_start_attempted = False
         try:
-            await recovery_orchestrator.startup()
+            await store_io.startup(lifecycle_owner)
+            store_started = True
+            if isinstance(recovery_orchestrator, RecoveryOrchestrator):
+                await recovery_orchestrator.startup(lifecycle_owner)
+                real_orchestrator_started = True
+            else:
+                fake_orchestrator_start_attempted = True
+                await recovery_orchestrator.startup()
             await cleanup_service.startup()
             yield
         finally:
@@ -274,10 +364,40 @@ def create_app(
                 await cleanup_service.shutdown()
             finally:
                 try:
-                    await recovery_orchestrator.shutdown()
+                    if isinstance(recovery_orchestrator, RecoveryOrchestrator):
+                        if real_orchestrator_started:
+                            await recovery_orchestrator.shutdown(lifecycle_owner)
+                    elif fake_orchestrator_start_attempted:
+                        await recovery_orchestrator.shutdown()
                 finally:
-                    if live_client is not None:
-                        await live_client.close()
+                    try:
+                        if store_started:
+                            await store_io.shutdown(lifecycle_owner)
+                    finally:
+                        close_shared_resources = False
+                        client_to_close: AsyncOpenAI | None = None
+                        with app_lifecycle_lock:
+                            active_cleanup_services.pop(lifecycle_owner, None)
+                            if active_cleanup_services:
+                                _application.state.cleanup_service = next(
+                                    reversed(active_cleanup_services.values())
+                                )
+                            else:
+                                _application.state.cleanup_service = cleanup_service
+                                if live_client is not None:
+                                    shared_resources_closing = True
+                                    close_shared_resources = True
+                                    client_to_close = live_client
+                                    live_client = None
+                        if close_shared_resources:
+                            try:
+                                assert client_to_close is not None
+                                await _close_live_client_cancellation_safe(
+                                    client_to_close
+                                )
+                            finally:
+                                with app_lifecycle_lock:
+                                    shared_resources_closing = False
 
     application = FastAPI(
         title="Backchannel API",
@@ -294,6 +414,7 @@ def create_app(
     )
     application.state.recovery_store = recovery_store
     application.state.recovery_orchestrator = recovery_orchestrator
+    application.state.store_io = store_io
     application.state.live_gate = live_gate
     application.state.sse_gate = sse_gate
     application.state.frontend_bundle = frontend_bundle
@@ -329,6 +450,18 @@ def create_app(
             recovery_id=error.recovery_id,
             retry_after_seconds=error.retry_after_seconds,
             replay_offer=error.replay_offer,
+        )
+
+    @application.exception_handler(RetryableStoreAccessError)
+    async def async_store_exception_handler(
+        request: Request,
+        _error: RetryableStoreAccessError,
+    ) -> JSONResponse:
+        return _public_error_response(
+            request,
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            code="internal_error",
+            retry_after_seconds=1,
         )
 
     @application.exception_handler(RequestValidationError)
@@ -396,7 +529,11 @@ def create_app(
         responses={
             200: _operational_status_success_response(
                 "Current public service readiness status."
-            )
+            ),
+            503: {
+                "model": PublicErrorResponse,
+                "description": "The service is not currently ready.",
+            },
         },
     )
     def ready() -> ReadinessResponse:
@@ -451,6 +588,9 @@ def create_app(
                     }
                 },
             },
+            503: _async_store_unavailable_response(
+                "The bounded SQLite lane is unavailable or draining."
+            ),
             504: {
                 "model": PublicErrorResponse,
                 "description": (
@@ -492,7 +632,8 @@ def create_app(
                     replay_offer=True,
                 )
         try:
-            recovery_store.claim_public_creation_admission(
+            await store_io.mutate(
+                recovery_store.claim_public_creation_admission,
                 session_hash=identity.session_hash,
                 ip_hash=identity.ip_hash,
                 session_daily_budget=(
@@ -509,7 +650,8 @@ def create_app(
             )
         if payload.execution_mode is ExecutionMode.REPLAY_FIXTURE:
             try:
-                return replay_engine.start(
+                return await store_io.mutate(
+                    replay_engine.start,
                     payload.scenario_id,
                     execution_mode=payload.execution_mode,
                     session_hash=identity.session_hash,
@@ -529,7 +671,8 @@ def create_app(
         if payload.execution_mode is ExecutionMode.OPENAI_LIVE:
             try:
                 async with live_gate.slot():
-                    recovery_store.claim_public_live_admission(
+                    await store_io.mutate(
+                        recovery_store.claim_public_live_admission,
                         session_hash=identity.session_hash,
                         ip_hash=identity.ip_hash,
                         cooldown=runtime_settings.live_cooldown,
@@ -586,6 +729,9 @@ def create_app(
         response_model=DecisionResponse,
         responses={
             200: _owner_scoped_success_response("Owner-scoped decision result."),
+            503: _async_store_unavailable_response(
+                "The bounded SQLite lane is unavailable or draining."
+            ),
             504: {
                 "model": PublicErrorResponse,
                 "description": (
@@ -608,7 +754,8 @@ def create_app(
                 recovery_id=recovery_key,
             )
         try:
-            claim = recovery_store.claim_decision_for_session(
+            claim = await store_io.mutate(
+                recovery_store.claim_decision_for_session,
                 recovery_key,
                 payload,
                 session_hash=identity.session_hash,
@@ -633,7 +780,10 @@ def create_app(
                     session_hash=identity.session_hash,
                     claimed_decision=claim,
                 )
-            snapshot = recovery_store.get_recovery(recovery_key)
+            snapshot = await store_io.read(
+                recovery_store.get_recovery,
+                recovery_key,
+            )
             if snapshot.execution_mode is ExecutionMode.OPENAI_LIVE:
                 async with live_gate.slot():
                     return await recovery_orchestrator.decide(
@@ -685,6 +835,9 @@ def create_app(
         response_model=RecoverySnapshot,
         responses={
             200: _owner_scoped_success_response("Owner-scoped recovery snapshot."),
+            503: _async_store_unavailable_response(
+                "SQLite access is unavailable or draining."
+            ),
         },
     )
     def get_recovery(recovery_id: UUID, request: Request) -> RecoverySnapshot:
@@ -723,6 +876,9 @@ def create_app(
             },
             400: public_error_response,
             404: public_error_response,
+            503: _async_store_unavailable_response(
+                "The bounded SQLite lane is unavailable or draining."
+            ),
             429: {
                 **public_error_response,
                 "headers": {
@@ -754,7 +910,8 @@ def create_app(
                 recovery_id=recovery_key,
             )
         try:
-            recovery_store.get_recovery_for_session(
+            await store_io.read(
+                recovery_store.get_recovery_for_session,
                 recovery_key,
                 identity.session_hash,
             )
@@ -793,6 +950,7 @@ def create_app(
                     recovery_key,
                     after_seq=cursor,
                     is_disconnected=request.is_disconnected,
+                    store_io=store_io,
                     session_hash=identity.session_hash,
                     session_expires_at=identity.session_expires_at,
                 ),
@@ -812,6 +970,9 @@ def create_app(
         response_model=RecoveryReceipt,
         responses={
             200: _owner_scoped_success_response("Owner-scoped recovery receipt."),
+            503: _async_store_unavailable_response(
+                "SQLite access is unavailable or draining."
+            ),
         },
     )
     def get_receipt(recovery_id: UUID, request: Request) -> RecoveryReceipt:
@@ -835,7 +996,15 @@ def create_app(
                 recovery_id=recovery_key,
             )
 
-    @application.post("/api/demo/reset", response_model=DemoResetResponse)
+    @application.post(
+        "/api/demo/reset",
+        response_model=DemoResetResponse,
+        responses={
+            503: _async_store_unavailable_response(
+                "SQLite access is unavailable or draining."
+            ),
+        },
+    )
     def reset_demo(request: Request) -> DemoResetResponse:
         if not runtime_settings.demo_reset_enabled:
             _raise_public(
