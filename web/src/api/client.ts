@@ -26,6 +26,9 @@ export const LIVE_ADMISSION_MESSAGES = {
 export const DECISION_CAPACITY_MESSAGE =
   "Live decision processing is currently at capacity. Retry the same decision shortly.";
 
+export const DECISION_CONFLICT_REFRESH_MESSAGE =
+  "Decision state changed or could not be safely continued. Refreshing authoritative recovery evidence.";
+
 export const RECOVERY_CREATION_MESSAGES = {
   idempotency_conflict:
     "This recovery start no longer matches its original request. No additional run was started.",
@@ -39,6 +42,27 @@ export const RECOVERY_CREATION_MESSAGES = {
 
 export type LiveAdmissionCode = keyof typeof LIVE_ADMISSION_MESSAGES;
 export type RecoveryCreationCode = keyof typeof RECOVERY_CREATION_MESSAGES;
+export type DecisionConflictCode =
+  | "already_decided"
+  | "decision_id_conflict"
+  | "decision_resume_unavailable"
+  | "decision_unavailable"
+  | "resume_incompatible";
+
+const DECISION_SUBMIT_CONFLICT_CODES: ReadonlyArray<DecisionConflictCode> = [
+  "already_decided",
+  "decision_id_conflict",
+  "decision_resume_unavailable",
+  "decision_unavailable",
+  "resume_incompatible",
+];
+
+const DECISION_RESUME_CONFLICT_CODES: ReadonlyArray<DecisionConflictCode> = [
+  "decision_id_conflict",
+  "decision_resume_unavailable",
+  "decision_unavailable",
+  "resume_incompatible",
+];
 
 export class LiveAdmissionError extends Error {
   readonly name = "LiveAdmissionError";
@@ -67,6 +91,17 @@ export class DecisionExpiredError extends Error {
 
   constructor(readonly recoveryId: string) {
     super("Consent expired. Refresh authoritative recovery evidence.");
+  }
+}
+
+export class DecisionConflictError extends Error {
+  readonly name = "DecisionConflictError";
+
+  constructor(
+    readonly code: DecisionConflictCode,
+    readonly recoveryId: string,
+  ) {
+    super(DECISION_CONFLICT_REFRESH_MESSAGE);
   }
 }
 
@@ -280,6 +315,30 @@ function readDecisionExpiredError(
     return null;
   }
   return new DecisionExpiredError(recoveryId);
+}
+
+function readDecisionConflictError(
+  value: unknown,
+  status: number,
+  recoveryId: string,
+  allowedCodes: ReadonlyArray<DecisionConflictCode>,
+): DecisionConflictError | null {
+  if (
+    status !== 409 ||
+    !isRecord(value) ||
+    !hasExactKeys(value, ["detail"]) ||
+    !isRecord(value.detail) ||
+    !hasExactKeys(value.detail, ["code", "recoveryId"]) ||
+    typeof value.detail.code !== "string" ||
+    !allowedCodes.includes(value.detail.code as DecisionConflictCode) ||
+    value.detail.recoveryId !== recoveryId
+  ) {
+    return null;
+  }
+  return new DecisionConflictError(
+    value.detail.code as DecisionConflictCode,
+    recoveryId,
+  );
 }
 
 function isRecoveryCreationCode(
@@ -747,6 +806,15 @@ export async function postDecision(
     if (expiredError !== null) {
       throw expiredError;
     }
+    const conflictError = readDecisionConflictError(
+      body,
+      response.status,
+      recoveryId,
+      DECISION_SUBMIT_CONFLICT_CODES,
+    );
+    if (conflictError !== null) {
+      throw conflictError;
+    }
     const capacityError = readDecisionCapacityError(body, response.status);
     if (capacityError !== null) {
       throw capacityError;
@@ -832,6 +900,13 @@ export async function postDecisionResume(
       recoveryId,
     );
     if (expiredError !== null) throw expiredError;
+    const conflictError = readDecisionConflictError(
+      body,
+      response.status,
+      recoveryId,
+      DECISION_RESUME_CONFLICT_CODES,
+    );
+    if (conflictError !== null) throw conflictError;
     const capacityError = readDecisionCapacityError(body, response.status);
     if (capacityError !== null) throw capacityError;
     throw new Error(`Decision resume failed with status ${response.status}`);

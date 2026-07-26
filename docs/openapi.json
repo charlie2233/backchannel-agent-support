@@ -1212,6 +1212,80 @@
           "404": {
             "description": "Recovery not found."
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "detail": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "enum": [
+                            "already_decided",
+                            "decision_id_conflict",
+                            "decision_resume_unavailable",
+                            "decision_unavailable",
+                            "resume_incompatible"
+                          ],
+                          "type": "string"
+                        },
+                        "recoveryId": {
+                          "format": "uuid",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "recoveryId"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "detail"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The authenticated decision conflicts with authoritative recovery state."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "code": {
+                      "enum": [
+                        "request_too_large"
+                      ],
+                      "type": "string"
+                    },
+                    "message": {
+                      "enum": [
+                        "The request body is too large."
+                      ],
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "pattern": "^[0-9a-f]{32}$",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "requestId"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The bounded public request body is too large."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -1284,6 +1358,40 @@
               }
             },
             "description": "The authenticated decision body or consent is invalid, or the recovery path is not a valid UUID."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "code": {
+                      "enum": [
+                        "decision_capacity"
+                      ],
+                      "type": "string"
+                    },
+                    "message": {
+                      "enum": [
+                        "Live decision processing is currently at capacity. Retry the same decision shortly."
+                      ],
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "pattern": "^[0-9a-f]{32}$",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "requestId"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Live decision processing is currently at capacity."
           }
         },
         "summary": "Approve Recovery"
@@ -1332,6 +1440,79 @@
           "404": {
             "description": "Recovery not found."
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "detail": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "enum": [
+                            "decision_id_conflict",
+                            "decision_resume_unavailable",
+                            "decision_unavailable",
+                            "resume_incompatible"
+                          ],
+                          "type": "string"
+                        },
+                        "recoveryId": {
+                          "format": "uuid",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "recoveryId"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "detail"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The authenticated resume conflicts with authoritative recovery state."
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "code": {
+                      "enum": [
+                        "request_too_large"
+                      ],
+                      "type": "string"
+                    },
+                    "message": {
+                      "enum": [
+                        "The request body is too large."
+                      ],
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "pattern": "^[0-9a-f]{32}$",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "requestId"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The bounded public request body is too large."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -1345,8 +1526,13 @@
                           "properties": {
                             "code": {
                               "enum": [
+                                "authority_denied",
+                                "constraint_denied",
                                 "decision_resume_body_invalid",
-                                "remedy_expired"
+                                "remedy_digest_mismatch",
+                                "remedy_expired",
+                                "remedy_mismatch",
+                                "tool_call_mismatch"
                               ],
                               "type": "string"
                             },
@@ -1398,7 +1584,41 @@
                 }
               }
             },
-            "description": "The authenticated resume body is invalid, the exact claim expired, or the recovery path is not a valid UUID."
+            "description": "The authenticated resume body, stored decision claim, or consent is invalid; the exact claim may also be expired, or the recovery path may not be a valid UUID."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "code": {
+                      "enum": [
+                        "decision_capacity"
+                      ],
+                      "type": "string"
+                    },
+                    "message": {
+                      "enum": [
+                        "Live decision processing is currently at capacity. Retry the same decision shortly."
+                      ],
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "pattern": "^[0-9a-f]{32}$",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "requestId"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Live decision processing is currently at capacity."
           }
         },
         "summary": "Resume Recovery Decision"

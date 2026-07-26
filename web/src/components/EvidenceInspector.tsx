@@ -9,6 +9,7 @@ import {
 
 import {
   DecisionCapacityError,
+  DecisionConflictError,
   DecisionExpiredError,
   postDecision,
   postDecisionResume,
@@ -155,10 +156,12 @@ export function EvidenceInspector({
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [decisionAccepted, setDecisionAccepted] = useState(false);
   const [expiredContextKey, setExpiredContextKey] = useState<string | null>(null);
+  const [staleDecisionContextKey, setStaleDecisionContextKey] = useState<string | null>(null);
   const decisionIds = useRef<Partial<Record<DecisionAction, string>>>({});
   const decisionRequestInFlight = useRef<DecisionRequestAttempt | null>(null);
   const decisionActionLock = useRef<DecisionActionLock | null>(null);
   const acceptedDecisionContext = useRef<AcceptedDecisionContext | null>(null);
+  const conflictedDecisionContexts = useRef(new Set<string>());
   const serverRefreshes = useRef(new Set<string>());
   const fallbackReturnFocusRef = useRef<HTMLElement | null>(null);
   const rawApproval = snapshot?.pendingApproval ?? null;
@@ -284,6 +287,11 @@ export function EvidenceInspector({
     setSubmittingAction(null);
     setDecisionAccepted(false);
     setExpiredContextKey(null);
+    setStaleDecisionContextKey(
+      conflictedDecisionContexts.current.has(nextContext.key)
+        ? nextContext.key
+        : null,
+    );
   }, [decisionContextKey]);
 
   const decisionExpiry = approval?.expiry ?? claimedDecision?.expiry ?? null;
@@ -292,6 +300,7 @@ export function EvidenceInspector({
     decisionExpiry !== null &&
     (expiredContextKey === decisionContextKey ||
       (Number.isFinite(expiryMilliseconds) && Date.now() >= expiryMilliseconds));
+  const decisionConflictBlocked = staleDecisionContextKey === decisionContextKey;
 
   useEffect(() => {
     if (decisionExpiry === null || !Number.isFinite(expiryMilliseconds)) return;
@@ -379,6 +388,32 @@ export function EvidenceInspector({
     }
   };
 
+  const refreshConflictedDecisionEvidence = async (
+    request: DecisionRequestAttempt,
+    submittedGeneration: number,
+    message: string,
+  ) => {
+    conflictedDecisionContexts.current.add(request.key);
+    setStaleDecisionContextKey(request.key);
+    setError(null);
+    setStatusMessage(message);
+    if (serverRefreshes.current.has(request.key)) return;
+    serverRefreshes.current.add(request.key);
+    try {
+      await onServerSuccess?.();
+    } catch {
+      if (
+        decisionContextRef.current.generation !== submittedGeneration ||
+        decisionContextRef.current.key !== request.key
+      ) {
+        return;
+      }
+      setError(
+        "Decision state changed, but refreshed recovery evidence is unavailable.",
+      );
+    }
+  };
+
   const copyDigest = async () => {
     if (approval === null) return;
     const submittedGeneration = decisionContextRef.current.generation;
@@ -409,6 +444,7 @@ export function EvidenceInspector({
       (acceptedContext !== null &&
         acceptedContext.key === decisionContextKey &&
         acceptedContext.generation === submittedContext.generation) ||
+      conflictedDecisionContexts.current.has(decisionContextKey) ||
       matchingActiveRequest ||
       (actionLock !== null &&
         actionLock.key === decisionContextKey &&
@@ -484,6 +520,14 @@ export function EvidenceInspector({
         );
         return;
       }
+      if (caught instanceof DecisionConflictError) {
+        await refreshConflictedDecisionEvidence(
+          inFlight,
+          submittedGeneration,
+          caught.message,
+        );
+        return;
+      }
       setError(
         caught instanceof DecisionCapacityError
           ? caught.message
@@ -507,6 +551,7 @@ export function EvidenceInspector({
       (acceptedContext !== null &&
         acceptedContext.key === decisionContextKey &&
         acceptedContext.generation === submittedContext.generation) ||
+      conflictedDecisionContexts.current.has(decisionContextKey) ||
       matchingActiveRequest ||
       decisionExpired ||
       Date.now() >= Date.parse(claimedDecision.expiry)
@@ -561,6 +606,14 @@ export function EvidenceInspector({
         await refreshExpiredDecisionEvidence(
           inFlight,
           submittedGeneration,
+        );
+        return;
+      }
+      if (caught instanceof DecisionConflictError) {
+        await refreshConflictedDecisionEvidence(
+          inFlight,
+          submittedGeneration,
+          caught.message,
         );
         return;
       }
@@ -630,12 +683,16 @@ export function EvidenceInspector({
         </div>
         <div className="execution-boundary" aria-live="polite">
           <strong>
-            {decisionExpired
+            {decisionConflictBlocked
+              ? "Decision state changed — checking authoritative recovery evidence"
+              : decisionExpired
               ? "Consent deadline reached — checking the authoritative outcome"
               : "Execution has not begun."}
           </strong>
           <p>
-            {decisionExpired
+            {decisionConflictBlocked
+              ? "Decision controls are disabled until refreshed server evidence replaces this stale context."
+              : decisionExpired
               ? "Decision controls are disabled while the server confirms whether a decision claim won."
               : "The server will recheck this exact consent immediately before dispatch."}
           </p>
@@ -670,6 +727,7 @@ export function EvidenceInspector({
           value="decline"
           disabled={
             contextSubmittingAction !== null ||
+            decisionConflictBlocked ||
             decisionExpired ||
             (lockedDecisionAction !== null && lockedDecisionAction !== "decline")
           }
@@ -682,6 +740,7 @@ export function EvidenceInspector({
           value="approve"
           disabled={
             contextSubmittingAction !== null ||
+            decisionConflictBlocked ||
             decisionExpired ||
             (lockedDecisionAction !== null && lockedDecisionAction !== "approve")
           }
@@ -706,12 +765,16 @@ export function EvidenceInspector({
         </dl>
         <div className="execution-boundary" aria-live="polite">
           <strong>
-            {decisionExpired
+            {decisionConflictBlocked
+              ? "Decision state changed — checking authoritative recovery evidence"
+              : decisionExpired
               ? "Decision deadline reached — checking the authoritative outcome"
               : "A durable exact decision is ready to resume."}
           </strong>
           <p>
-            {decisionExpired
+            {decisionConflictBlocked
+              ? "Resume is disabled until refreshed server evidence replaces this stale context."
+              : decisionExpired
               ? "Resume is disabled while the server refreshes claim evidence."
               : "Only the server-authored claimed action can continue; no new consent can be created here."}
           </p>
@@ -734,7 +797,11 @@ export function EvidenceInspector({
         <button
           className={`consent-action consent-action--${claimedDecision.action}`}
           type="submit"
-          disabled={contextSubmittingAction !== null || decisionExpired}
+          disabled={
+            contextSubmittingAction !== null ||
+            decisionConflictBlocked ||
+            decisionExpired
+          }
         >
           {contextSubmittingAction === claimedDecision.action ? "Resuming exact decision…" : resumeLabel}
         </button>

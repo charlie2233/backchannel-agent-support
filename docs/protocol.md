@@ -282,6 +282,13 @@ stored result; a different loser receives `409 already_decided`. These controls 
 establish an at-most-one durable dispatch record for this demo adapter, not exactly-once execution
 at an external provider. An unrelated session cannot participate in that race: it receives 404
 before a decision claim and cannot win, renew a live lease, or trigger provider dispatch.
+The browser accepts a decision conflict only when the 409 body has the exact documented shape,
+contains an endpoint-specific allowlisted code, and names the recovery being displayed. It
+disables the stale action context and requests one authoritative snapshot refresh; it does not
+infer the winner, mark the losing action accepted, create a replacement decision ID, retry, or
+automatically resume. The exact stale context stays blocked if the inspector switches away and
+later revisits the same unchanged evidence. A malformed, unknown, or cross-recovery conflict
+remains an ambiguous generic failure under the existing exact-action retry fence.
 
 ### Explicit durable-claim resume
 
@@ -299,6 +306,15 @@ session therefore keeps the generic 404 boundary; an authorized recovery without
 full-request fingerprint, performs consent/expiry/version preflight before live capacity, and
 repeats those checks immediately inside the shared continuation pipeline. A completed claim
 returns a minimal stored result without acquiring live capacity or rerunning model/provider work.
+Submit conflicts document `already_decided`, `decision_id_conflict`,
+`decision_resume_unavailable`, `decision_unavailable`, and `resume_incompatible`; the shared
+continuation can surface the resume-unavailable code if its just-claimed row disappears before a
+concurrent completion reload. Resume conflicts document `decision_resume_unavailable`,
+`decision_id_conflict`, `decision_unavailable`, and `resume_incompatible`. Both endpoints
+document the exact no-fallback `decision_capacity` 429 envelope and the shared bounded-body 413
+envelope emitted before route parsing. Resume 422 documentation includes every
+consent-validation code the stored claim can reach, in addition to invalid body, expiry, and
+malformed-path responses.
 
 This is a signed-session capability, not proof of the original tab: another tab with the same
 HttpOnly session and recovery UUID may explicitly continue the already-fixed claim. Concurrent

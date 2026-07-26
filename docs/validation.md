@@ -119,7 +119,14 @@ requests, stored approve/decline continuation, zero-dispatch declines, completed
 expiry before live capacity or dispatch, and post-expiry replay of the sole already-committed
 provider result without capacity or redispatch. Browser coverage proves StrictMode/reload
 performs no resume POST, rapid explicit activation coalesces, response action/digest mismatches
-fail closed, and only the server-authored action remains available. The proof is signed-session
+fail closed, and only the server-authored action remains available. Exact same-recovery,
+endpoint-specific decision 409s latch the stale controls before one authoritative refresh without
+claiming acceptance, selecting a winner, creating a replacement ID, or automatically resuming;
+malformed, foreign, unknown, wrong-status, and wrong-endpoint envelopes remain generic. A failed
+refresh keeps the stale context disabled, including after an A-to-B-to-A inspector revisit.
+OpenAPI tests bind both decision endpoints to the exact
+`200/404/409/413/422/429` set, route-specific conflict enums, the complete reachable resume 422
+enum, and the shared bounded-body and no-fallback capacity envelopes. The proof is signed-session
 scoped and establishes at most one demo-adapter dispatch, not original-tab ownership,
 cross-process live-model serialization, deployment, or provider execution outside the demo
 adapter.

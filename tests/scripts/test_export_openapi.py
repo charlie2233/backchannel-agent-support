@@ -451,6 +451,103 @@ def test_decision_422_documents_both_stable_public_error_shapes() -> None:
     }
 
 
+def test_decision_documents_exact_conflict_and_capacity_responses() -> None:
+    schema = json.loads(_exporter().render_openapi())
+
+    responses = schema["paths"]["/api/recoveries/{recovery_id}/decisions"]["post"][
+        "responses"
+    ]
+
+    assert set(responses) == {"200", "404", "409", "413", "422", "429"}
+    conflict = responses["409"]
+    assert conflict["description"] == (
+        "The authenticated decision conflicts with authoritative recovery state."
+    )
+    assert conflict["content"]["application/json"]["schema"] == {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["detail"],
+        "properties": {
+            "detail": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["code", "recoveryId"],
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "enum": [
+                            "already_decided",
+                            "decision_id_conflict",
+                            "decision_resume_unavailable",
+                            "decision_unavailable",
+                            "resume_incompatible",
+                        ],
+                    },
+                    "recoveryId": {
+                        "type": "string",
+                        "format": "uuid",
+                    },
+                },
+            }
+        },
+    }
+    assert responses["429"] == {
+        "description": "Live decision processing is currently at capacity.",
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["code", "message", "requestId"],
+                    "properties": {
+                        "code": {
+                            "type": "string",
+                            "enum": ["decision_capacity"],
+                        },
+                        "message": {
+                            "type": "string",
+                            "enum": [
+                                "Live decision processing is currently at capacity. "
+                                "Retry the same decision shortly."
+                            ],
+                        },
+                        "requestId": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{32}$",
+                        },
+                    },
+                }
+            }
+        },
+    }
+    assert responses["413"] == {
+        "description": "The bounded public request body is too large.",
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["code", "message", "requestId"],
+                    "properties": {
+                        "code": {
+                            "type": "string",
+                            "enum": ["request_too_large"],
+                        },
+                        "message": {
+                            "type": "string",
+                            "enum": ["The request body is too large."],
+                        },
+                        "requestId": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{32}$",
+                        },
+                    },
+                }
+            }
+        },
+    }
+
+
 def test_decision_resume_422_documents_body_and_expiry_errors() -> None:
     schema = json.loads(_exporter().render_openapi())
 
@@ -460,14 +557,51 @@ def test_decision_resume_422_documents_body_and_expiry_errors() -> None:
     variants = response["content"]["application/json"]["schema"]["oneOf"]
 
     assert response["description"] == (
-        "The authenticated resume body is invalid, the exact claim expired, "
-        "or the recovery path is not a valid UUID."
+        "The authenticated resume body, stored decision claim, or consent is "
+        "invalid; the exact claim may also be expired, or the recovery path "
+        "may not be a valid UUID."
     )
     assert variants[0]["properties"]["detail"]["properties"]["code"]["enum"] == [
+        "authority_denied",
+        "constraint_denied",
         "decision_resume_body_invalid",
+        "remedy_digest_mismatch",
         "remedy_expired",
+        "remedy_mismatch",
+        "tool_call_mismatch",
     ]
     assert variants[1]["properties"]["code"]["enum"] == ["invalid_request"]
+
+
+def test_decision_resume_documents_exact_conflict_and_capacity_responses() -> None:
+    schema = json.loads(_exporter().render_openapi())
+
+    responses = schema["paths"][
+        "/api/recoveries/{recovery_id}/decisions/resume"
+    ]["post"]["responses"]
+
+    assert set(responses) == {"200", "404", "409", "413", "422", "429"}
+    conflict = responses["409"]
+    assert conflict["description"] == (
+        "The authenticated resume conflicts with authoritative recovery state."
+    )
+    assert conflict["content"]["application/json"]["schema"]["properties"][
+        "detail"
+    ]["properties"]["code"]["enum"] == [
+        "decision_id_conflict",
+        "decision_resume_unavailable",
+        "decision_unavailable",
+        "resume_incompatible",
+    ]
+    assert conflict["content"]["application/json"]["schema"][
+        "additionalProperties"
+    ] is False
+    assert responses["429"] == schema["paths"][
+        "/api/recoveries/{recovery_id}/decisions"
+    ]["post"]["responses"]["429"]
+    assert responses["413"] == schema["paths"][
+        "/api/recoveries/{recovery_id}/decisions"
+    ]["post"]["responses"]["413"]
 
 
 def test_demo_reset_documents_unresolved_creation_conflict() -> None:

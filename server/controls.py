@@ -80,6 +80,7 @@ DECISION_CAPACITY_MESSAGE = (
     "Live decision processing is currently at capacity. "
     "Retry the same decision shortly."
 )
+REQUEST_BODY_TOO_LARGE_MESSAGE = "The request body is too large."
 
 
 class LiveAdmissionError(RuntimeError):
@@ -516,7 +517,7 @@ class PublicBoundaryMiddleware:
             payload = json.dumps(
                 {
                     "code": "request_too_large",
-                    "message": "The request body is too large.",
+                    "message": REQUEST_BODY_TOO_LARGE_MESSAGE,
                     "requestId": request_id,
                 },
                 separators=(",", ":"),

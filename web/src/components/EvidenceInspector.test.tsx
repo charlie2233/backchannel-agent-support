@@ -337,6 +337,53 @@ describe("EvidenceInspector exact consent", () => {
     ).toBeDisabled();
   });
 
+  it("blocks a stale resume and refreshes once on an exact state conflict", async () => {
+    const recoveryId = "11111111-2222-4333-8444-555555555555";
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          detail: {
+            code: "decision_resume_unavailable",
+            recoveryId,
+          },
+        }),
+        { status: 409, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    let resolveRefresh: (() => void) | undefined;
+    const onServerSuccess = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveRefresh = resolve;
+        }),
+    );
+    render(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={claimedSnapshot("approve")}
+        onServerSuccess={onServerSuccess}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Resume exact approval" }));
+
+    await waitFor(() => expect(onServerSuccess).toHaveBeenCalledTimes(1));
+    const resume = screen.getByRole("button", { name: "Resume exact approval" });
+    expect(resume).toBeDisabled();
+    expect(
+      screen.getByText(
+        "Decision state changed or could not be safely continued. Refreshing authoritative recovery evidence.",
+      ),
+    ).toBeVisible();
+    expect(screen.queryByText(/could not be resumed/i)).not.toBeInTheDocument();
+    fireEvent.click(resume);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(onServerSuccess).toHaveBeenCalledTimes(1);
+
+    resolveRefresh?.();
+  });
+
   it("disables an expired claimed decision and refreshes evidence without posting", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-01T18:45:31.000Z"));
@@ -1228,6 +1275,307 @@ describe("EvidenceInspector exact consent", () => {
     expect(screen.queryByText(/could not be recorded/i)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Approve remedy" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Decline" })).toBeDisabled();
+  });
+
+  it("blocks both stale actions and refreshes once when another tab wins", async () => {
+    const recoveryId = "11111111-2222-4333-8444-555555555555";
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          detail: {
+            code: "already_decided",
+            recoveryId,
+          },
+        }),
+        { status: 409, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    let rejectRefresh: ((reason: Error) => void) | undefined;
+    const onServerSuccess = vi.fn(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectRefresh = reject;
+        }),
+    );
+    render(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={pendingSnapshot()}
+        clientDecisionIdFactory={() => "decision-race-loser-742"}
+        onServerSuccess={onServerSuccess}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Approve remedy" }));
+
+    await waitFor(() => expect(onServerSuccess).toHaveBeenCalledTimes(1));
+    const approve = screen.getByRole("button", { name: "Approve remedy" });
+    const decline = screen.getByRole("button", { name: "Decline" });
+    expect(approve).toBeDisabled();
+    expect(decline).toBeDisabled();
+    expect(
+      screen.getByText(
+        "Decision state changed or could not be safely continued. Refreshing authoritative recovery evidence.",
+      ),
+    ).toBeVisible();
+    expect(screen.queryByText(/accepted by the server/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/try again with the same decision/i)).not.toBeInTheDocument();
+    fireEvent.click(approve);
+    fireEvent.click(decline);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(onServerSuccess).toHaveBeenCalledTimes(1);
+
+    rejectRefresh?.(new Error("snapshot unavailable"));
+    expect(
+      await screen.findByText(
+        "Decision state changed, but refreshed recovery evidence is unavailable.",
+      ),
+    ).toBeVisible();
+    expect(approve).toBeDisabled();
+    expect(decline).toBeDisabled();
+  });
+
+  it("deduplicates a conflict refresh against the consent-expiry timer", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T18:45:29.999Z"));
+    const recoveryId = "11111111-2222-4333-8444-555555555555";
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          detail: {
+            code: "already_decided",
+            recoveryId,
+          },
+        }),
+        { status: 409, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const onServerSuccess = vi.fn(() => new Promise<void>(() => {}));
+    render(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={pendingSnapshot()}
+        clientDecisionIdFactory={() => "decision-race-expiry-742"}
+        onServerSuccess={onServerSuccess}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Approve remedy" }));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(onServerSuccess).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      vi.advanceTimersByTime(2);
+      await Promise.resolve();
+    });
+    expect(onServerSuccess).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Approve remedy" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Decline" })).toBeDisabled();
+  });
+
+  it("renders only the refreshed server-authored resume action after a race conflict", async () => {
+    const recoveryId = "11111111-2222-4333-8444-555555555555";
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          detail: {
+            code: "already_decided",
+            recoveryId,
+          },
+        }),
+        { status: 409, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    let rerenderInspector: ReturnType<typeof render>["rerender"] | null = null;
+    const onServerSuccess = vi.fn(() => {
+      if (rerenderInspector === null) throw new Error("Inspector was not rendered");
+      rerenderInspector(
+        <EvidenceInspector
+          scenario={recoveryScenarios[0]}
+          snapshot={claimedSnapshot("decline")}
+          onServerSuccess={() => {}}
+        />,
+      );
+    });
+    const rendered = render(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={pendingSnapshot()}
+        clientDecisionIdFactory={() => "decision-race-refresh-742"}
+        onServerSuccess={onServerSuccess}
+      />,
+    );
+    rerenderInspector = rendered.rerender;
+
+    fireEvent.click(screen.getByRole("button", { name: "Approve remedy" }));
+
+    await waitFor(() => expect(onServerSuccess).toHaveBeenCalledTimes(1));
+    expect(
+      screen.getByRole("button", { name: "Resume exact decline" }),
+    ).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Resume exact approval" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve remedy" })).not.toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears the conflict latch for a new context and ignores the old refresh rejection", async () => {
+    const recoveryId = "11111111-2222-4333-8444-555555555555";
+    const originalSnapshot = pendingSnapshot();
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          detail: {
+            code: "already_decided",
+            recoveryId,
+          },
+        }),
+        { status: 409, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    let rejectRefresh: ((reason: Error) => void) | undefined;
+    const onServerSuccess = vi.fn(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectRefresh = reject;
+        }),
+    );
+    const rendered = render(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={originalSnapshot}
+        clientDecisionIdFactory={() => "decision-old-context-742"}
+        onServerSuccess={onServerSuccess}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Approve remedy" }));
+    await waitFor(() => expect(onServerSuccess).toHaveBeenCalledTimes(1));
+
+    const nextSnapshot = {
+      ...pendingSnapshot(),
+      recoveryId: "22222222-3333-4444-8555-666666666666",
+      pendingApproval: {
+        ...pendingSnapshot().pendingApproval!,
+        remedyId: "remedy-next-context-742",
+        remedyDigest: `sha256:${"b".repeat(64)}` as `sha256:${string}`,
+        toolCallId: "call-next-context-742",
+      },
+    };
+    rendered.rerender(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={nextSnapshot}
+        clientDecisionIdFactory={() => "decision-new-context-742"}
+        onServerSuccess={onServerSuccess}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Approve remedy" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Decline" })).toBeEnabled();
+    rejectRefresh?.(new Error("old refresh failed"));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(
+      screen.queryByText(
+        "Decision state changed, but refreshed recovery evidence is unavailable.",
+      ),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Approve remedy" })).toBeEnabled();
+
+    rendered.rerender(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={originalSnapshot}
+        clientDecisionIdFactory={() => "decision-old-context-revisited-742"}
+        onServerSuccess={onServerSuccess}
+      />,
+    );
+    const revisitedApprove = screen.getByRole("button", { name: "Approve remedy" });
+    expect(revisitedApprove).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Decline" })).toBeDisabled();
+    fireEvent.click(revisitedApprove);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(onServerSuccess).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores a late conflict response after expiry already retired its request", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T18:45:29.999Z"));
+    const recoveryId = "11111111-2222-4333-8444-555555555555";
+    let resolveFetch: ((response: Response) => void) | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveFetch = resolve;
+          }),
+      ),
+    );
+    const onServerSuccess = vi.fn().mockRejectedValue(
+      new Error("expiry refresh failed"),
+    );
+    render(
+      <EvidenceInspector
+        scenario={recoveryScenarios[0]}
+        snapshot={pendingSnapshot()}
+        clientDecisionIdFactory={() => "decision-late-conflict-742"}
+        onServerSuccess={onServerSuccess}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Approve remedy" }));
+    await act(async () => {
+      vi.advanceTimersByTime(2);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(onServerSuccess).toHaveBeenCalledTimes(1);
+    expect(
+      screen.getByText(
+        "Consent expired, but refreshed recovery evidence is unavailable.",
+      ),
+    ).toBeVisible();
+
+    resolveFetch?.(
+      new Response(
+        JSON.stringify({
+          detail: {
+            code: "already_decided",
+            recoveryId,
+          },
+        }),
+        { status: 409, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(onServerSuccess).toHaveBeenCalledTimes(1);
+    expect(
+      screen.queryByText(
+        "Decision state changed or could not be safely continued. Refreshing authoritative recovery evidence.",
+      ),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Consent expired, but refreshed recovery evidence is unavailable.",
+      ),
+    ).toBeVisible();
   });
 
   it("posts an exact decline, disables both actions, and refreshes only after acceptance", async () => {

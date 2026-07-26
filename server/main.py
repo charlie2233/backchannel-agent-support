@@ -29,6 +29,8 @@ from server.cleanup import (
 )
 from server.config import RuntimeSettings
 from server.controls import (
+    DECISION_CAPACITY_MESSAGE,
+    REQUEST_BODY_TOO_LARGE_MESSAGE,
     ClientIdentity,
     LiveAdmissionCode,
     LiveAdmissionError,
@@ -414,6 +416,120 @@ _PRIVATE_NOT_FOUND_RESPONSE: dict[int | str, dict[str, Any]] = {
     status.HTTP_404_NOT_FOUND: {"description": "Recovery not found."}
 }
 _INVALID_REQUEST_MESSAGE = "The request did not match the public API contract."
+
+
+def _decision_conflict_response(
+    *,
+    description: str,
+    codes: list[str],
+) -> dict[str, Any]:
+    return {
+        "description": description,
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["detail"],
+                    "properties": {
+                        "detail": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["code", "recoveryId"],
+                            "properties": {
+                                "code": {
+                                    "type": "string",
+                                    "enum": codes,
+                                },
+                                "recoveryId": {
+                                    "type": "string",
+                                    "format": "uuid",
+                                },
+                            },
+                        }
+                    },
+                }
+            }
+        },
+    }
+
+
+_DECISION_CONFLICT_RESPONSE = _decision_conflict_response(
+    description=(
+        "The authenticated decision conflicts with authoritative recovery state."
+    ),
+    codes=[
+        "already_decided",
+        "decision_id_conflict",
+        "decision_resume_unavailable",
+        "decision_unavailable",
+        "resume_incompatible",
+    ],
+)
+_DECISION_RESUME_CONFLICT_RESPONSE = _decision_conflict_response(
+    description=(
+        "The authenticated resume conflicts with authoritative recovery state."
+    ),
+    codes=[
+        "decision_id_conflict",
+        "decision_resume_unavailable",
+        "decision_unavailable",
+        "resume_incompatible",
+    ],
+)
+_DECISION_CAPACITY_RESPONSE: dict[str, Any] = {
+    "description": "Live decision processing is currently at capacity.",
+    "content": {
+        "application/json": {
+            "schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["code", "message", "requestId"],
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "enum": ["decision_capacity"],
+                    },
+                    "message": {
+                        "type": "string",
+                        "enum": [DECISION_CAPACITY_MESSAGE],
+                    },
+                    "requestId": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{32}$",
+                    },
+                },
+            }
+        }
+    },
+}
+_REQUEST_BODY_TOO_LARGE_RESPONSE: dict[str, Any] = {
+    "description": "The bounded public request body is too large.",
+    "content": {
+        "application/json": {
+            "schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["code", "message", "requestId"],
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "enum": ["request_too_large"],
+                    },
+                    "message": {
+                        "type": "string",
+                        "enum": [REQUEST_BODY_TOO_LARGE_MESSAGE],
+                    },
+                    "requestId": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{32}$",
+                    },
+                },
+            }
+        }
+    },
+}
+
 _DECISION_UNPROCESSABLE_RESPONSE: dict[str, Any] = {
     "description": (
         "The authenticated decision body or consent is invalid, or the recovery "
@@ -479,8 +595,9 @@ _DECISION_UNPROCESSABLE_RESPONSE: dict[str, Any] = {
 }
 _DECISION_RESUME_UNPROCESSABLE_RESPONSE: dict[str, Any] = {
     "description": (
-        "The authenticated resume body is invalid, the exact claim expired, "
-        "or the recovery path is not a valid UUID."
+        "The authenticated resume body, stored decision claim, or consent is "
+        "invalid; the exact claim may also be expired, or the recovery path "
+        "may not be a valid UUID."
     ),
     "content": {
         "application/json": {
@@ -499,8 +616,13 @@ _DECISION_RESUME_UNPROCESSABLE_RESPONSE: dict[str, Any] = {
                                     "code": {
                                         "type": "string",
                                         "enum": [
+                                            "authority_denied",
+                                            "constraint_denied",
                                             "decision_resume_body_invalid",
+                                            "remedy_digest_mismatch",
                                             "remedy_expired",
+                                            "remedy_mismatch",
+                                            "tool_call_mismatch",
                                         ],
                                     },
                                     "recoveryId": {
@@ -1287,7 +1409,7 @@ def create_app(
             request,
             status_code=status.HTTP_413_CONTENT_TOO_LARGE,
             code="request_too_large",
-            message="The request body is too large.",
+            message=REQUEST_BODY_TOO_LARGE_MESSAGE,
         )
 
     @application.exception_handler(Exception)
@@ -1602,7 +1724,10 @@ def create_app(
         description=_PRIVATE_RECOVERY_DESCRIPTION,
         responses={
             **_PRIVATE_NOT_FOUND_RESPONSE,
+            status.HTTP_409_CONFLICT: _DECISION_CONFLICT_RESPONSE,
+            status.HTTP_413_CONTENT_TOO_LARGE: _REQUEST_BODY_TOO_LARGE_RESPONSE,
             status.HTTP_422_UNPROCESSABLE_CONTENT: _DECISION_UNPROCESSABLE_RESPONSE,
+            status.HTTP_429_TOO_MANY_REQUESTS: _DECISION_CAPACITY_RESPONSE,
         },
         openapi_extra={
             "requestBody": {
@@ -1705,7 +1830,10 @@ def create_app(
         ),
         responses={
             **_PRIVATE_NOT_FOUND_RESPONSE,
+            status.HTTP_409_CONFLICT: _DECISION_RESUME_CONFLICT_RESPONSE,
+            status.HTTP_413_CONTENT_TOO_LARGE: _REQUEST_BODY_TOO_LARGE_RESPONSE,
             status.HTTP_422_UNPROCESSABLE_CONTENT: (_DECISION_RESUME_UNPROCESSABLE_RESPONSE),
+            status.HTTP_429_TOO_MANY_REQUESTS: _DECISION_CAPACITY_RESPONSE,
         },
         openapi_extra={
             "requestBody": {

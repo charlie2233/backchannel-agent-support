@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DECISION_CAPACITY_MESSAGE,
   DecisionCapacityError,
+  DecisionConflictError,
   DecisionExpiredError,
   LIVE_ADMISSION_MESSAGES,
   LiveAdmissionError,
@@ -263,6 +264,7 @@ describe("createRecovery public errors", () => {
 });
 
 describe("postDecision public errors", () => {
+  const recoveryId = "11111111-2222-4333-8444-555555555555";
   const decision = {
     action: "approve" as const,
     clientDecisionId: "decision-retry-742",
@@ -325,7 +327,6 @@ describe("postDecision public errors", () => {
   );
 
   it("returns a typed exact-expiry error only for the requested recovery", async () => {
-    const recoveryId = "11111111-2222-4333-8444-555555555555";
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue(
@@ -351,7 +352,6 @@ describe("postDecision public errors", () => {
   });
 
   it("rejects an uncorrelated expiry envelope as a generic error", async () => {
-    const recoveryId = "11111111-2222-4333-8444-555555555555";
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue(
@@ -374,6 +374,107 @@ describe("postDecision public errors", () => {
     expect(error).not.toBeInstanceOf(DecisionExpiredError);
     expect((error as Error).message).toBe(
       "Decision request failed with status 422",
+    );
+  });
+
+  it.each([
+    "already_decided",
+    "decision_id_conflict",
+    "decision_resume_unavailable",
+    "decision_unavailable",
+    "resume_incompatible",
+  ] as const)(
+    "returns a typed exact %s conflict only for the requested recovery",
+    async (code) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(
+          new Response(
+            JSON.stringify({ detail: { code, recoveryId } }),
+            { status: 409 },
+          ),
+        ),
+      );
+
+      await expect(postDecision(recoveryId, decision)).rejects.toEqual(
+        expect.objectContaining<Partial<DecisionConflictError>>({
+          name: "DecisionConflictError",
+          code,
+          recoveryId,
+        }),
+      );
+    },
+  );
+
+  it.each([
+    {
+      label: "foreign recovery",
+      status: 409,
+      body: {
+        detail: {
+          code: "already_decided",
+          recoveryId: "99999999-2222-4333-8444-555555555555",
+        },
+      },
+    },
+    {
+      label: "unknown code",
+      status: 409,
+      body: { detail: { code: "decision_state_unknown", recoveryId } },
+    },
+    {
+      label: "extra detail key",
+      status: 409,
+      body: {
+        detail: { code: "already_decided", recoveryId, winner: "approve" },
+      },
+    },
+    {
+      label: "extra outer key",
+      status: 409,
+      body: {
+        detail: { code: "already_decided", recoveryId },
+        retry: true,
+      },
+    },
+    {
+      label: "wrong status",
+      status: 422,
+      body: { detail: { code: "already_decided", recoveryId } },
+    },
+  ])("keeps a $label conflict envelope generic", async ({ status, body }) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify(body), { status }),
+      ),
+    );
+
+    const error = await postDecision(recoveryId, decision).catch(
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(DecisionConflictError);
+    expect((error as Error).message).toBe(
+      `Decision request failed with status ${status}`,
+    );
+  });
+
+  it("keeps malformed conflict JSON generic", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response("{not-json", { status: 409 }),
+      ),
+    );
+
+    const error = await postDecision(recoveryId, decision).catch(
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(DecisionConflictError);
+    expect((error as Error).message).toBe(
+      "Decision request failed with status 409",
     );
   });
 });
@@ -477,6 +578,116 @@ describe("claimed decision and explicit resume contracts", () => {
     await expect(
       postDecisionResume(recoveryId, claimedDecision),
     ).rejects.toBeInstanceOf(DecisionExpiredError);
+  });
+
+  it.each([
+    "decision_resume_unavailable",
+    "decision_unavailable",
+    "decision_id_conflict",
+    "resume_incompatible",
+  ] as const)(
+    "returns a typed exact %s conflict for the correlated resume",
+    async (code) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(
+          new Response(
+            JSON.stringify({ detail: { code, recoveryId } }),
+            { status: 409 },
+          ),
+        ),
+      );
+
+      await expect(
+        postDecisionResume(recoveryId, claimedDecision),
+      ).rejects.toEqual(
+        expect.objectContaining<Partial<DecisionConflictError>>({
+          name: "DecisionConflictError",
+          code,
+          recoveryId,
+        }),
+      );
+    },
+  );
+
+  it.each([
+    {
+      label: "submit-only code",
+      status: 409,
+      body: { detail: { code: "already_decided", recoveryId } },
+    },
+    {
+      label: "foreign recovery",
+      status: 409,
+      body: {
+        detail: {
+          code: "decision_resume_unavailable",
+          recoveryId: "99999999-2222-4333-8444-555555555555",
+        },
+      },
+    },
+    {
+      label: "extra detail key",
+      status: 409,
+      body: {
+        detail: {
+          code: "decision_resume_unavailable",
+          recoveryId,
+          action: "approve",
+        },
+      },
+    },
+    {
+      label: "extra outer key",
+      status: 409,
+      body: {
+        detail: { code: "decision_resume_unavailable", recoveryId },
+        retry: true,
+      },
+    },
+    {
+      label: "wrong status",
+      status: 422,
+      body: {
+        detail: { code: "decision_resume_unavailable", recoveryId },
+      },
+    },
+  ])("keeps a $label conflict generic on resume", async ({ status, body }) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify(body), { status }),
+      ),
+    );
+
+    const error = await postDecisionResume(
+      recoveryId,
+      claimedDecision,
+    ).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(DecisionConflictError);
+    expect((error as Error).message).toBe(
+      `Decision resume failed with status ${status}`,
+    );
+  });
+
+  it("keeps malformed resume conflict JSON generic", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response("{not-json", { status: 409 }),
+      ),
+    );
+
+    const error = await postDecisionResume(
+      recoveryId,
+      claimedDecision,
+    ).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(DecisionConflictError);
+    expect((error as Error).message).toBe(
+      "Decision resume failed with status 409",
+    );
   });
 
   it.each([
