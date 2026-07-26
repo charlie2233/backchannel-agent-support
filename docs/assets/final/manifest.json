@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "sourceCommit": "8823d29d7de93d44f4843a2fa4db1adec4e452bd",
+  "sourceCommit": "8d0a896c753c4c60894301a20a3866bbbfa1e76f",
   "runtimeInput": {
     "algorithm": "sha256",
-    "digest": "4ad336eaf2d304906e939fc0eb433c6633519e73d9855207ae72c4daea42eed2",
+    "digest": "a1e0ecaf69926044419e29c7359102188c80550834ddb9351021aae411705054",
     "paths": [
       ".node-version",
       "e2e/capture-manifest.mjs",
@@ -22,6 +22,7 @@
       "server/agents/stub_model.py",
       "server/agents/tracing.py",
       "server/agents/versioning.py",
+      "server/async_store.py",
       "server/cleanup.py",
       "server/config.py",
       "server/controls.py",
@@ -106,7 +107,7 @@
   "artifacts": [
     {
       "filename": "desktop-consent.png",
-      "sha256": "11c898b06ce6d010b3156faa2b952d3906dcf0295ea3e5f7aeb306f429a36379",
+      "sha256": "8e8ecb1952646c78a259ba499f159419ebc10c5edd06bf1bb72eb30d5bf7e022",
       "width": 1440,
       "height": 1024,
       "scenarioId": "hotel",
@@ -115,7 +116,7 @@
     },
     {
       "filename": "desktop-completed.png",
-      "sha256": "3589b8fb263fc353dad2f87f75cdb2120b3baa918e04dd5d94743eba2cc5b60c",
+      "sha256": "e8d2cf09f9ae2adefd43d06ae68918449f8e14b36ee4d411a4512e9d76f5fde7",
       "width": 1440,
       "height": 1024,
       "scenarioId": "hotel",
@@ -124,7 +125,7 @@
     },
     {
       "filename": "desktop-declined.png",
-      "sha256": "45f60604b096201bf28ffee6a0a4de683e363e29117befe701932832950f15b4",
+      "sha256": "533e11961d91a7022ac81f7d9a0dffaaf7eb8ecc00df02100d24942b98e46e90",
       "width": 1440,
       "height": 1024,
       "scenarioId": "hotel",
@@ -142,7 +143,7 @@
     },
     {
       "filename": "mobile-completed.png",
-      "sha256": "c946342ace68424efc087f2df94892075ac9b6c9facdfdb3c45b3d0877030575",
+      "sha256": "cc6b52111027ef7a92421ac4d1488d4afd7a1e7a9e04b05355c1d5bfbabd1884",
       "width": 390,
       "height": 844,
       "scenarioId": "hotel",
@@ -151,7 +152,7 @@
     },
     {
       "filename": "mobile-declined.png",
-      "sha256": "4de641876c134e2ad3949a8775675b1264149db5e754be3911460decd2ffc78f",
+      "sha256": "0b01ee04011da47e61a848bb1dd3ffde2f43ed593eb73939aa04b1c8d2549431",
       "width": 390,
       "height": 844,
       "scenarioId": "hotel",
