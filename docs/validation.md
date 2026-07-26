@@ -12,33 +12,49 @@ results from any sibling branch.
   `8823d29d7de93d44f4843a2fa4db1adec4e452bd`
 - Evidence activation:
   `55af1e6d68f11542b1c5cc5e3465b87dc158ec08`
+- Hosted validation successor:
+  `117e4ebe40efea36f89bbb737143de9c918f938f`
+- GitHub Actions:
+  [run 30182741263](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30182741263)
+- Result: `verify`
+  ([job 89742014836](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30182741263/job/89742014836))
+  reported `PASS`; `container-smoke`
+  ([job 89742159778](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30182741263/job/89742159778))
+  reported `PASS`. Both job annotation APIs returned `[]`.
 - `npm run capture:judge` reported `29 passed` against the clean capture source
   in Google Chrome 150.0.7871.186 and produced six manifest-bound PNGs at
   1440×1024 and 390×844.
 - Five PNGs changed and `mobile-consent.png` remained byte-identical against the
   immediately prior capture set.
-- No current Task28 GitHub Actions run or job has been observed.
-- No current Task28 hosted container result has been observed.
+- Hosted `verify` ran the canonical gate: 29 capture contracts,
+  `capture_manifest_valid`, 19 web test files / 292 tests, Ruff `PASS`,
+  strict MyPy over 34 source files, and 568 Python tests passed with 1 warning.
+  It also passed the deterministic stub smoke, OpenAPI check, and
+  history-aware secret scan.
+- Hosted `container-smoke` built the packaged Docker image, confirmed runtime user
+  `10001:10001`, and passed the offline network-none `deterministic-qa` and
+  `deployed-readonly` profiles.
 
 ## Per-SHA proof matrix
 
 | Lane | Exact evidence | Status and boundary |
 | --- | --- | --- |
-| Local source and tests | Capture source and `capture:judge` result above | **Verified locally for the capture contract** on source `8823d29…`; a broader exact-tree or hosted source gate is not claimed in this pre-CI checkpoint |
+| Local source and tests | Capture source and `capture:judge` result above; hosted canonical gate on successor `117e4eb…` | **Verified locally for the capture contract** on source `8823d29…` and **Verified in hosted CI** on successor `117e4eb…`; not browser deployment, live OpenAI, or release proof |
 | Local final-build captures | [`docs/assets/final/manifest.json`](assets/final/manifest.json); six provenance-checked PNGs under [`docs/assets/final`](assets/final) | **Verified locally** on capture source `8823d29…` in Google Chrome at 1440×1024 and 390×844; not container, deployment, live OpenAI, or release proof |
 | Live OpenAI | [`live-validation.md`](live-validation.md) records only a redacted invalid-key result | **Blocked / Unverified**; no valid `OPENAI_API_KEY`, one-run trace, or three consecutive successes |
 | Local Docker | No Docker-family runtime is installed on this Mac | **Unverified locally** |
-| GitHub CI/container | No current Task28 run or job result | **Unverified** for this source/capture checkpoint |
+| GitHub CI/container | Run 30182741263; `verify` and packaged `container-smoke` | **Verified** on successor `117e4eb…`; both jobs passed with empty annotations, but this is not local Docker, browser capture, or public deployment proof |
 | Public deployment | No public application origin | **Blocked / Unverified** |
 | Tag/release | No release tag or GitHub release | **Blocked / Unverified** |
 
 ## Hosted container evidence boundary
 
-No current Task28 hosted container result has been observed. Historical container
-results below do not transfer to this source/capture checkpoint. They also do not
-prove local Docker, long-lived `/data` persistence, target-host
-durability/networking, abrupt host-loss or backup restoration, concurrent
-multi-container SQLite, a public browser origin, or live OpenAI.
+The current hosted container job proves a packaged Docker image build, runtime user
+`10001:10001`, and the offline network-none `deterministic-qa` and
+`deployed-readonly` profiles. It does not prove local Docker, public deployment or
+browser URL, live OpenAI, real provider execution, container replacement or restart,
+long-lived `/data` volume persistence, target-host durability/networking, abrupt
+host-loss or backup, concurrent multi-container SQLite, tag or release.
 
 ## Capture contract
 

@@ -28,6 +28,9 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     browser = manifest["browser"]
     environment = manifest["environment"]
     artifacts = manifest["artifacts"]
+    current_hosted_sha = "117e4ebe40efea36f89bbb737143de9c918f938f"
+    current_run = "30182741263"
+    current_jobs = ("89742014836", "89742159778")
 
     historical_heading = "## Superseded historical hosted baseline"
     assert historical_heading in validation
@@ -35,6 +38,7 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
         historical_heading,
         maxsplit=1,
     )
+    normalized_current_evidence = " ".join(current_evidence.split())
 
     assert manifest["sourceCommit"] in current_evidence
     assert "55af1e6d68f11542b1c5cc5e3465b87dc158ec08" in current_evidence
@@ -59,11 +63,42 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
         "Five PNGs changed and `mobile-consent.png` remained byte-identical"
         in current_evidence
     )
-    for absent_current_claim in (
-        "No current Task28 GitHub Actions run or job has been observed.",
-        "No current Task28 hosted container result has been observed.",
+    for current_identifier in (
+        current_hosted_sha,
+        current_run,
+        *current_jobs,
     ):
-        assert absent_current_claim in current_evidence
+        assert current_identifier in current_evidence
+        assert current_identifier not in historical_evidence
+    assert "Both job annotation APIs returned `[]`" in current_evidence
+    for observed_current_fact in (
+        "29 capture contracts",
+        "`capture_manifest_valid`",
+        "19 web test files / 292 tests",
+        "Ruff",
+        "strict MyPy over 34 source files",
+        "568 Python tests passed with 1 warning",
+        "deterministic stub smoke",
+        "OpenAPI check",
+        "history-aware secret scan",
+        "packaged Docker image",
+        "`10001:10001`",
+        "network-none",
+        "`deterministic-qa`",
+        "`deployed-readonly`",
+    ):
+        assert observed_current_fact in normalized_current_evidence
+    for unproved_current_boundary in (
+        "does not prove local Docker",
+        "public deployment or browser URL",
+        "live OpenAI",
+        "real provider execution",
+        "container replacement or restart",
+        "abrupt host-loss or backup",
+        "concurrent multi-container SQLite",
+        "tag or release",
+    ):
+        assert unproved_current_boundary in normalized_current_evidence
     assert "CI did not execute the browser capture" in current_evidence
 
     immediate_prior_capture = "742e3caf2af5a9cce3cd8de242cf113424e8528f"
@@ -171,6 +206,30 @@ def test_validation_rejects_superseded_provenance_in_current_evidence(
     polluted_validation = validation.replace(
         historical_heading,
         f"Injected stale provenance: {superseded_identifier}\n\n{historical_heading}",
+        1,
+    )
+
+    with pytest.raises(AssertionError):
+        _assert_validation_matches_current_capture(polluted_validation)
+
+
+@pytest.mark.parametrize(
+    "current_identifier",
+    (
+        "117e4ebe40efea36f89bbb737143de9c918f938f",
+        "30182741263",
+        "89742014836",
+        "89742159778",
+    ),
+)
+def test_validation_rejects_current_hosted_provenance_in_historical_evidence(
+    current_identifier: str,
+) -> None:
+    validation = _read("docs/validation.md")
+    historical_heading = "## Superseded historical hosted baseline"
+    polluted_validation = validation.replace(
+        historical_heading,
+        f"{historical_heading}\n\nInjected current provenance: {current_identifier}",
         1,
     )
 
