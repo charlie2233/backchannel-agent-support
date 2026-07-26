@@ -1184,6 +1184,97 @@ def test_trusted_proxy_chain_stops_at_nearest_untrusted_hop(tmp_path) -> None:
     assert response.json()["code"] == "cooldown"
 
 
+def test_trusted_proxy_combines_duplicate_forwarded_fields_in_wire_order(
+    tmp_path,
+) -> None:
+    controls = PublicDemoControls(
+        SQLiteStore(tmp_path / "proxy-duplicate-identity.sqlite3"),
+        RuntimeSettings(
+            live_ready=True,
+            trusted_proxy_enabled=True,
+            trusted_proxy_cidrs=("10.0.0.0/8",),
+        ),
+    )
+
+    def forwarded_ip_key(*field_values: str) -> str:
+        request = Request(
+            {
+                "type": "http",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "method": "POST",
+                "scheme": "https",
+                "path": "/api/recoveries",
+                "raw_path": b"/api/recoveries",
+                "query_string": b"",
+                "root_path": "",
+                "headers": [(b"x-forwarded-for", value.encode("ascii")) for value in field_values],
+                "client": ("10.0.0.2", 5_000),
+                "server": ("demo.example", 443),
+            }
+        )
+        return controls.resolve_client_identity(request).ip_key
+
+    direct_peer_key = forwarded_ip_key()
+    duplicate_key = forwarded_ip_key(
+        "203.0.113.1",
+        "198.51.100.77",
+    )
+    assert duplicate_key == forwarded_ip_key("203.0.113.1, 198.51.100.77")
+    assert duplicate_key == forwarded_ip_key("198.51.100.77")
+    assert duplicate_key == forwarded_ip_key("203.0.113.2", "198.51.100.77")
+    assert duplicate_key != direct_peer_key
+    assert duplicate_key != forwarded_ip_key("198.51.100.77", "203.0.113.1")
+    assert duplicate_key != forwarded_ip_key("203.0.113.1", "198.51.100.78")
+    for malformed_fields in (
+        ("", "198.51.100.77"),
+        ("203.0.113.1", ""),
+        ("not-an-ip", "198.51.100.77"),
+        ("203.0.113.1", "not-an-ip"),
+    ):
+        assert forwarded_ip_key(*malformed_fields) == direct_peer_key
+
+
+def test_duplicate_forwarded_fields_cannot_bypass_live_ip_cooldown(tmp_path) -> None:
+    settings = RuntimeSettings(
+        live_ready=True,
+        max_concurrent_live_recoveries=5,
+        daily_demo_budget_units=10,
+        trusted_proxy_enabled=True,
+        trusted_proxy_cidrs=("10.0.0.0/8",),
+    )
+    app, _ = _live_app(tmp_path / "proxy-duplicate-cooldown.sqlite3", settings=settings)
+
+    def post_with_duplicate_fields(
+        client: TestClient,
+        *,
+        spoofed_hop: str,
+    ):
+        return client.post(
+            "/api/recoveries",
+            json={
+                "scenarioId": "hotel",
+                "executionMode": "openai_live",
+                "clientRequestId": uuid4().hex,
+            },
+            headers=[
+                ("X-Forwarded-For", spoofed_hop),
+                ("X-Forwarded-For", "198.51.100.77"),
+            ],
+        )
+
+    with TestClient(app, client=("10.0.0.2", 5_000)) as first:
+        assert post_with_duplicate_fields(first, spoofed_hop="203.0.113.1").status_code == 201
+    with TestClient(app, client=("10.0.0.2", 5_001)) as second:
+        response = post_with_duplicate_fields(
+            second,
+            spoofed_hop="203.0.113.2",
+        )
+
+    assert response.status_code == 429
+    assert response.json()["code"] == "cooldown"
+
+
 def test_cookieless_health_requests_do_not_touch_durable_demo_sessions(
     tmp_path,
 ) -> None:

@@ -72,6 +72,10 @@ recoveries. A 30-row expired backlog proves expired rows do not count independen
 25-row per-request cleanup batch. Fresh signed-cookie sessions from one TestClient address
 prove the shared-IP gate while a different address still succeeds; assertions cover only
 64-character HMAC correlations in SQLite and no raw address in the database or response.
+Trusted-proxy regressions also use raw duplicate `X-Forwarded-For` fields: rotating an
+attacker-controlled first field while holding the proxy-appended client field constant produces
+one opaque IP correlation and one cooldown domain. Single-field comma chains still stop at the
+nearest untrusted hop, while disabled trust and an untrusted direct peer ignore forwarding data.
 These are deterministic direct-peer tests, not a unique-user, NAT-fairness, or target-proxy
 topology claim.
 OpenAPI tests require the exact four-alternative 429 `oneOf`: no-fallback creation capacity,

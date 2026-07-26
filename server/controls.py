@@ -243,10 +243,14 @@ class PublicDemoControls:
             or not self._ip_is_trusted_proxy(normalized_direct)
         ):
             return normalized_direct
-        forwarded = request.headers.get("x-forwarded-for")
-        if not forwarded:
+        forwarded_fields = request.headers.getlist("x-forwarded-for")
+        if not forwarded_fields:
             return normalized_direct
-        forwarded_hops = [_normalize_ip(value) for value in forwarded.split(",")]
+        forwarded_hops = [
+            _normalize_ip(value)
+            for field_value in forwarded_fields
+            for value in field_value.split(",")
+        ]
         if any(hop is None for hop in forwarded_hops):
             return normalized_direct
         current = normalized_direct

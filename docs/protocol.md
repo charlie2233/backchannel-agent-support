@@ -98,8 +98,12 @@ live-admission envelopes, each with `fallbackExecutionMode: "replay_fixture"`.
 The per-IP gate is defense-in-depth abuse resistance, not authentication, a unique-user
 limit, or a fairness guarantee. Shared NATs can group unrelated users. The direct network peer
 is canonical unless trusted-proxy mode and its explicit CIDR allowlist are enabled; only then
-can a validated forwarded chain select the correlated address. The identity secret HMACs that
-value before creation-ledger persistence. Legacy creation rows are backfilled with their
+can a validated forwarded chain select the correlated address. Every `X-Forwarded-For` field
+is combined in wire order before comma-separated hops are normalized; the right-to-left walk
+stops at the nearest untrusted hop, and any malformed hop falls back to the direct peer. This
+prevents an attacker-controlled first duplicate field from replacing a later proxy-appended
+client address. The identity secret HMACs that value before creation-ledger persistence. Legacy
+creation rows are backfilled with their
 already-opaque session correlation as `ip_key`, preserving exact-key claim semantics without
 introducing a raw address into SQLite or invalidating a claim. This privacy boundary does not
 claim that Uvicorn or infrastructure access logs omit client addresses.
