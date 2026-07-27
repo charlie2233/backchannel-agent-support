@@ -38,6 +38,18 @@ function capacityError(): PublicApiError {
   );
 }
 
+function retryableStoreError(
+  errorRecoveryId: string | null = recoveryId,
+): PublicApiError {
+  return new PublicApiError("The request could not be completed.", 503, {
+    code: "internal_error",
+    requestId: "req_22222222222222222222222222222222",
+    recoveryId: errorRecoveryId,
+    retryAfterSeconds: 1,
+    fallback: null,
+  });
+}
+
 async function flushAsyncWork(): Promise<void> {
   await Promise.resolve();
   await Promise.resolve();
@@ -820,12 +832,21 @@ describe("useRecovery authoritative evidence deadlines", () => {
     expect(view.result.current.errorPhase).toBe("terminal");
   });
 
-  it("does not stack terminal retries when one paired read fails and the other hangs", async () => {
+  it("does not stack a manual terminal retry when one paired read hangs", async () => {
     vi.useFakeTimers();
+    const snapshotSignals: AbortSignal[] = [];
     const receiptSignals: AbortSignal[] = [];
     const getRecovery = vi
       .fn()
-      .mockRejectedValue(new Error("private snapshot transport detail"));
+      .mockRejectedValueOnce(new Error("private snapshot transport detail"))
+      .mockImplementation(
+        (_activeRecoveryId: string, signal?: AbortSignal) =>
+          new Promise<RecoverySnapshot>(() => {
+            if (signal !== undefined) {
+              snapshotSignals.push(signal);
+            }
+          }),
+      );
     const getReceipt = vi.fn(
       (_activeRecoveryId: string, signal?: AbortSignal) =>
         new Promise<RecoveryReceipt>(() => {
@@ -852,36 +873,49 @@ describe("useRecovery authoritative evidence deadlines", () => {
         getRecovery,
         getReceipt,
         openEvents,
-        terminalRetryDelayMs: 0,
         authoritativeReadDeadlineMs: 100,
       }),
     );
 
     await act(flushAsyncWork);
-    act(() => vi.advanceTimersByTime(0));
-    await act(flushAsyncWork);
     expect(getRecovery).toHaveBeenCalledOnce();
     expect(getReceipt).toHaveBeenCalledOnce();
-    expect(view.result.current.error).toBeNull();
-
-    act(() => vi.advanceTimersByTime(99));
-    await act(flushAsyncWork);
-    expect(getRecovery).toHaveBeenCalledOnce();
-    expect(getReceipt).toHaveBeenCalledOnce();
-    expect(receiptSignals[0]?.aborted).toBe(false);
-
-    act(() => vi.advanceTimersByTime(1));
-    await act(flushAsyncWork);
     expect(receiptSignals[0]?.aborted).toBe(true);
-    expect(view.result.current.error).toBe(
-      "Recovery evidence request timed out.",
-    );
+    expect(view.result.current.error).toBe("private snapshot transport detail");
     expect(view.result.current.errorPhase).toBe("terminal");
+    expect(view.result.current.terminalRetryAvailable).toBe(true);
+    expect(view.result.current.terminalRetrying).toBe(false);
+    expect(view.result.current.terminalRetryReason).toBe("manual_only");
 
-    act(() => vi.advanceTimersByTime(0));
+    act(() => {
+      view.result.current.retryTerminal();
+      view.result.current.retryTerminal();
+    });
     await act(flushAsyncWork);
     expect(getRecovery).toHaveBeenCalledTimes(2);
     expect(getReceipt).toHaveBeenCalledTimes(2);
+    expect(view.result.current.terminalRetryAvailable).toBe(false);
+    expect(view.result.current.terminalRetrying).toBe(true);
+    expect(snapshotSignals).toHaveLength(1);
+    expect(receiptSignals).toHaveLength(2);
+
+    act(() => vi.advanceTimersByTime(99));
+    await act(flushAsyncWork);
+    expect(getRecovery).toHaveBeenCalledTimes(2);
+    expect(getReceipt).toHaveBeenCalledTimes(2);
+    expect(snapshotSignals[0]?.aborted).toBe(false);
+    expect(receiptSignals[1]?.aborted).toBe(false);
+
+    act(() => vi.advanceTimersByTime(1));
+    await act(flushAsyncWork);
+    expect(snapshotSignals[0]?.aborted).toBe(true);
+    expect(receiptSignals[1]?.aborted).toBe(true);
+    expect(view.result.current.error).toBe(
+      "Recovery evidence request timed out.",
+    );
+    expect(view.result.current.terminalRetryAvailable).toBe(true);
+    expect(view.result.current.terminalRetrying).toBe(false);
+    expect(view.result.current.terminalRetryReason).toBe("manual_only");
   });
 
   it("restores one manual event retry after a hung snapshot read and ignores its late resolution", async () => {
@@ -1344,24 +1378,29 @@ describe("useRecovery authoritative terminal refresh", () => {
   it.each(["snapshot", "receipt"] as const)(
     "retries the authoritative terminal pair after a transient %s failure",
     async (failedRequest) => {
+      vi.useFakeTimers();
       const initial = snapshot("pending_approval", "Decision claim is durable.");
       const terminal = snapshot("closed_without_action", "Closed without provider action.");
       const receipt = declinedReceipt();
       const getRecovery = vi
-        .fn<(activeRecoveryId: string, signal?: AbortSignal) => Promise<RecoverySnapshot>>()
-        .mockResolvedValueOnce(initial);
+        .fn<
+          (
+            activeRecoveryId: string,
+            signal?: AbortSignal,
+          ) => Promise<RecoverySnapshot>
+        >();
       const getReceipt = vi
         .fn<(activeRecoveryId: string, signal?: AbortSignal) => Promise<RecoveryReceipt>>();
 
       if (failedRequest === "snapshot") {
         getRecovery
-          .mockRejectedValueOnce(new Error("Transient snapshot failure"))
+          .mockRejectedValueOnce(retryableStoreError())
           .mockResolvedValueOnce(terminal);
         getReceipt.mockResolvedValue(receipt);
       } else {
         getRecovery.mockResolvedValue(terminal);
         getReceipt
-          .mockRejectedValueOnce(new Error("Transient receipt failure"))
+          .mockRejectedValueOnce(retryableStoreError())
           .mockResolvedValueOnce(receipt);
       }
 
@@ -1374,30 +1413,403 @@ describe("useRecovery authoritative terminal refresh", () => {
       );
       const { result } = renderHook(() =>
         useRecovery(recoveryId, {
+          initialSnapshot: initial,
           getRecovery,
           getReceipt,
           openEvents,
-          terminalRetryDelayMs: 0,
         }),
       );
 
-      await waitFor(() => expect(result.current.snapshot).toEqual(initial));
+      await act(flushAsyncWork);
+      expect(result.current.snapshot).toEqual(initial);
       const terminalEvent = {
         ...event(1, "recovery.closed_without_action"),
         terminal: true,
       };
       act(() => handlers?.onEvent(terminalEvent));
+      await act(flushAsyncWork);
 
-      await waitFor(() => {
-        expect(result.current.snapshot).toEqual(terminal);
-        expect(result.current.receipt).toEqual(receipt);
-        expect(result.current.error).toBeNull();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(999);
       });
-      expect(getRecovery).toHaveBeenCalledTimes(3);
+      expect(getRecovery).toHaveBeenCalledOnce();
+      expect(getReceipt).toHaveBeenCalledOnce();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1);
+      });
+      expect(result.current.snapshot).toEqual(terminal);
+      expect(result.current.receipt).toEqual(receipt);
+      expect(result.current.error).toBeNull();
+      expect(getRecovery).toHaveBeenCalledTimes(2);
       expect(getReceipt).toHaveBeenCalledTimes(2);
       expect(result.current.events).toEqual([terminalEvent]);
     },
   );
+
+  it("honors the store hint, bounds terminal retries, and starts one fresh manual cycle", async () => {
+    vi.useFakeTimers();
+    const initial = snapshot("pending_approval", "Decision claim is durable.");
+    const terminal = snapshot(
+      "closed_without_action",
+      "Closed without provider action.",
+    );
+    const receipt = declinedReceipt();
+    const getRecovery = vi
+      .fn<
+        (
+          activeRecoveryId: string,
+          signal?: AbortSignal,
+        ) => Promise<RecoverySnapshot>
+      >()
+      .mockRejectedValue(retryableStoreError());
+    const getReceipt = vi
+      .fn<
+        (
+          activeRecoveryId: string,
+          signal?: AbortSignal,
+        ) => Promise<RecoveryReceipt>
+      >()
+      .mockRejectedValue(retryableStoreError());
+    let handlers: RecoveryEventStreamHandlers | undefined;
+    const openEvents = vi.fn<OpenEvents>(
+      (_request, nextHandlers) =>
+        new Promise(() => {
+          handlers = nextHandlers;
+        }),
+    );
+    const view = renderHook(() =>
+      useRecovery(recoveryId, {
+        initialSnapshot: initial,
+        getRecovery,
+        getReceipt,
+        openEvents,
+      }),
+    );
+
+    await act(flushAsyncWork);
+    const terminalEvent = {
+      ...event(1, "recovery.closed_without_action"),
+      terminal: true,
+    };
+    act(() => handlers?.onEvent(terminalEvent));
+    await act(flushAsyncWork);
+
+    expect(getRecovery).toHaveBeenCalledOnce();
+    expect(getReceipt).toHaveBeenCalledOnce();
+    expect(view.result.current.snapshot).toEqual(initial);
+    expect(view.result.current.events).toEqual([terminalEvent]);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(999);
+    });
+    expect(getRecovery).toHaveBeenCalledOnce();
+    expect(getReceipt).toHaveBeenCalledOnce();
+
+    for (let attempt = 2; attempt <= 4; attempt += 1) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(attempt === 2 ? 1 : 1_000);
+      });
+      expect(getRecovery).toHaveBeenCalledTimes(attempt);
+      expect(getReceipt).toHaveBeenCalledTimes(attempt);
+    }
+
+    expect(view.result.current.error).toBe(
+      "The request could not be completed.",
+    );
+    expect(view.result.current.errorPhase).toBe("terminal");
+    expect(view.result.current.terminalRetryAvailable).toBe(true);
+    expect(view.result.current.terminalRetrying).toBe(false);
+    expect(view.result.current.terminalRetryReason).toBe(
+      "automatic_retries_exhausted",
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(getRecovery).toHaveBeenCalledTimes(4);
+    expect(getReceipt).toHaveBeenCalledTimes(4);
+
+    act(() => {
+      view.result.current.retryTerminal();
+      view.result.current.retryTerminal();
+    });
+    expect(getRecovery).toHaveBeenCalledTimes(5);
+    expect(getReceipt).toHaveBeenCalledTimes(5);
+    expect(view.result.current.terminalRetryAvailable).toBe(false);
+    expect(view.result.current.terminalRetrying).toBe(true);
+
+    for (let attempt = 6; attempt <= 8; attempt += 1) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+      expect(getRecovery).toHaveBeenCalledTimes(attempt);
+      expect(getReceipt).toHaveBeenCalledTimes(attempt);
+    }
+    expect(view.result.current.terminalRetryAvailable).toBe(true);
+    expect(view.result.current.terminalRetrying).toBe(false);
+    expect(view.result.current.terminalRetryReason).toBe(
+      "automatic_retries_exhausted",
+    );
+
+    getRecovery.mockResolvedValueOnce(terminal);
+    getReceipt.mockResolvedValueOnce(receipt);
+    act(() => {
+      view.result.current.retryTerminal();
+      view.result.current.retryTerminal();
+    });
+    await act(flushAsyncWork);
+
+    expect(getRecovery).toHaveBeenCalledTimes(9);
+    expect(getReceipt).toHaveBeenCalledTimes(9);
+    expect(view.result.current.snapshot).toEqual(terminal);
+    expect(view.result.current.receipt).toEqual(receipt);
+    expect(view.result.current.events).toEqual([terminalEvent]);
+    expect(view.result.current.error).toBeNull();
+    expect(view.result.current.terminalRetryAvailable).toBe(false);
+    expect(view.result.current.terminalRetrying).toBe(false);
+    expect(view.result.current.terminalRetryReason).toBeNull();
+  });
+
+  it("aborts a hanging terminal peer and starts a fresh pair exactly after the hint", async () => {
+    vi.useFakeTimers();
+    const initial = snapshot("pending_approval", "Decision claim is durable.");
+    const terminal = snapshot(
+      "closed_without_action",
+      "Closed without provider action.",
+    );
+    const receipt = declinedReceipt();
+    const receiptSignals: AbortSignal[] = [];
+    const getRecovery = vi
+      .fn()
+      .mockRejectedValueOnce(retryableStoreError())
+      .mockResolvedValueOnce(terminal);
+    const getReceipt = vi
+      .fn<
+        (
+          activeRecoveryId: string,
+          signal?: AbortSignal,
+        ) => Promise<RecoveryReceipt>
+      >()
+      .mockImplementationOnce(
+        (_activeRecoveryId: string, signal?: AbortSignal) =>
+          new Promise<RecoveryReceipt>((_resolve, reject) => {
+            if (signal === undefined) {
+              return;
+            }
+            receiptSignals.push(signal);
+            signal.addEventListener(
+              "abort",
+              () => reject(new DOMException("Aborted", "AbortError")),
+              { once: true },
+            );
+          }),
+      )
+      .mockResolvedValueOnce(receipt);
+    let handlers: RecoveryEventStreamHandlers | undefined;
+    const openEvents = vi.fn<OpenEvents>(
+      (_request, nextHandlers) =>
+        new Promise(() => {
+          handlers = nextHandlers;
+        }),
+    );
+    const view = renderHook(() =>
+      useRecovery(recoveryId, {
+        initialSnapshot: initial,
+        getRecovery,
+        getReceipt,
+        openEvents,
+      }),
+    );
+
+    await act(flushAsyncWork);
+    const terminalEvent = {
+      ...event(1, "recovery.closed_without_action"),
+      terminal: true,
+    };
+    act(() => handlers?.onEvent(terminalEvent));
+    await act(flushAsyncWork);
+
+    expect(getRecovery).toHaveBeenCalledOnce();
+    expect(getReceipt).toHaveBeenCalledOnce();
+    expect(receiptSignals).toHaveLength(1);
+    expect(receiptSignals[0]?.aborted).toBe(true);
+    expect(view.result.current.snapshot).toEqual(initial);
+    expect(view.result.current.events).toEqual([terminalEvent]);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(999);
+    });
+    expect(getRecovery).toHaveBeenCalledOnce();
+    expect(getReceipt).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(getRecovery).toHaveBeenCalledTimes(2);
+    expect(getReceipt).toHaveBeenCalledTimes(2);
+    expect(view.result.current.snapshot).toEqual(terminal);
+    expect(view.result.current.receipt).toEqual(receipt);
+    expect(view.result.current.error).toBeNull();
+  });
+
+  it("cancels an owned one-second terminal retry on unmount", async () => {
+    vi.useFakeTimers();
+    const clearTimeout = vi.spyOn(globalThis, "clearTimeout");
+    const initial = snapshot("pending_approval");
+    const getRecovery = vi.fn().mockRejectedValue(retryableStoreError());
+    const getReceipt = vi.fn().mockRejectedValue(retryableStoreError());
+    let handlers: RecoveryEventStreamHandlers | undefined;
+    const openEvents = vi.fn<OpenEvents>(
+      (_request, nextHandlers) =>
+        new Promise(() => {
+          handlers = nextHandlers;
+        }),
+    );
+    const view = renderHook(() =>
+      useRecovery(recoveryId, {
+        initialSnapshot: initial,
+        getRecovery,
+        getReceipt,
+        openEvents,
+      }),
+    );
+
+    await act(flushAsyncWork);
+    act(() =>
+      handlers?.onEvent({
+        ...event(1, "recovery.closed_without_action"),
+        terminal: true,
+      }),
+    );
+    await act(flushAsyncWork);
+    expect(view.result.current.errorPhase).toBe("terminal");
+    expect(getRecovery).toHaveBeenCalledOnce();
+    expect(getReceipt).toHaveBeenCalledOnce();
+    const clearedBeforeUnmount = clearTimeout.mock.calls.length;
+
+    view.unmount();
+
+    expect(clearTimeout.mock.calls.length).toBeGreaterThan(
+      clearedBeforeUnmount,
+    );
+    expect(getRecovery).toHaveBeenCalledOnce();
+    expect(getReceipt).toHaveBeenCalledOnce();
+  });
+
+  it("does not automatically retry an uncorrelated terminal read failure", async () => {
+    const initial = snapshot("pending_approval");
+    const uncorrelatedError = new PublicApiError(
+      "The request could not be completed.",
+      503,
+      {
+        code: "internal_error",
+        requestId: "req_33333333333333333333333333333333",
+        recoveryId: null,
+        retryAfterSeconds: 1,
+        fallback: null,
+      },
+    );
+    const getRecovery = vi.fn().mockRejectedValue(uncorrelatedError);
+    const getReceipt = vi.fn().mockRejectedValue(uncorrelatedError);
+    let handlers: RecoveryEventStreamHandlers | undefined;
+    const openEvents = vi.fn<OpenEvents>(
+      (_request, nextHandlers) =>
+        new Promise(() => {
+          handlers = nextHandlers;
+        }),
+    );
+    const view = renderHook(() =>
+      useRecovery(recoveryId, {
+        initialSnapshot: initial,
+        getRecovery,
+        getReceipt,
+        openEvents,
+      }),
+    );
+
+    await act(flushAsyncWork);
+    act(() =>
+      handlers?.onEvent({
+        ...event(1, "recovery.closed_without_action"),
+        terminal: true,
+      }),
+    );
+    await waitFor(() =>
+      expect(view.result.current.terminalRetryAvailable).toBe(true),
+    );
+
+    expect(getRecovery).toHaveBeenCalledOnce();
+    expect(getReceipt).toHaveBeenCalledOnce();
+    expect(view.result.current.terminalRetryAvailable).toBe(true);
+    expect(view.result.current.terminalRetrying).toBe(false);
+    expect(view.result.current.terminalRetryReason).toBe("manual_only");
+  });
+
+  it("restores manual retry after an inconsistent pair settles a manual cycle", async () => {
+    const initial = snapshot("pending_approval", "Decision claim is durable.");
+    const terminal = snapshot(
+      "closed_without_action",
+      "Closed without provider action.",
+    );
+    const uncorrelatedError = new PublicApiError(
+      "The request could not be completed.",
+      503,
+      {
+        code: "internal_error",
+        requestId: "req_44444444444444444444444444444444",
+        recoveryId: null,
+        retryAfterSeconds: 1,
+        fallback: null,
+      },
+    );
+    const getRecovery = vi
+      .fn()
+      .mockRejectedValueOnce(uncorrelatedError)
+      .mockResolvedValueOnce(terminal);
+    const getReceipt = vi
+      .fn()
+      .mockRejectedValueOnce(uncorrelatedError)
+      .mockResolvedValueOnce({
+        ...declinedReceipt(),
+        rootTraceId: "qa_trace_mismatched_manual_retry",
+      });
+    let handlers: RecoveryEventStreamHandlers | undefined;
+    const openEvents = vi.fn<OpenEvents>(
+      (_request, nextHandlers) =>
+        new Promise(() => {
+          handlers = nextHandlers;
+        }),
+    );
+    const view = renderHook(() =>
+      useRecovery(recoveryId, {
+        initialSnapshot: initial,
+        getRecovery,
+        getReceipt,
+        openEvents,
+      }),
+    );
+
+    await act(flushAsyncWork);
+    const terminalEvent = {
+      ...event(1, "recovery.closed_without_action"),
+      terminal: true,
+    };
+    act(() => handlers?.onEvent(terminalEvent));
+    await act(flushAsyncWork);
+    expect(view.result.current.terminalRetryAvailable).toBe(true);
+
+    act(() => view.result.current.retryTerminal());
+    await act(flushAsyncWork);
+
+    expect(view.result.current.snapshot).toEqual(initial);
+    expect(view.result.current.receipt).toBeNull();
+    expect(view.result.current.events).toEqual([terminalEvent]);
+    expect(view.result.current.error).toMatch(/one recovery outcome/i);
+    expect(view.result.current.errorPhase).toBe("terminal");
+    expect(view.result.current.terminalRetryAvailable).toBe(true);
+    expect(view.result.current.terminalRetrying).toBe(false);
+    expect(view.result.current.terminalRetryReason).toBe("manual_only");
+  });
 
   it.each([
     {
@@ -1428,7 +1840,6 @@ describe("useRecovery authoritative terminal refresh", () => {
         getRecovery,
         getReceipt,
         openEvents,
-        terminalRetryDelayMs: 60_000,
       }),
     );
 
@@ -1485,7 +1896,6 @@ describe("useRecovery authoritative terminal refresh", () => {
         getRecovery,
         getReceipt,
         openEvents,
-        terminalRetryDelayMs: 60_000,
       }),
     );
 

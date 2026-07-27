@@ -148,7 +148,6 @@ interface UseRecoveryOptions {
     handlers: RecoveryEventStreamHandlers,
   ) => Promise<RecoveryEventStreamResult>;
   initialSnapshot?: RecoverySnapshot | null;
-  terminalRetryDelayMs?: number;
   eventReconnectDelayMs?: number;
   eventReconnectAttempts?: number;
   authoritativeReadDeadlineMs?: number;
@@ -250,14 +249,33 @@ interface EventRetryState {
   eventsRetrying: boolean;
 }
 
+interface TerminalRetryState {
+  terminalRetryAvailable: boolean;
+  terminalRetrying: boolean;
+  terminalRetryReason:
+    | "automatic_retries_exhausted"
+    | "manual_only"
+    | null;
+}
+
 const initialEventRetryState: EventRetryState = {
   eventsRetryAvailable: false,
   eventsRetryAfterSeconds: null,
   eventsRetrying: false,
 };
 
-export interface UseRecoveryResult extends RecoveryState, EventRetryState {
+const initialTerminalRetryState: TerminalRetryState = {
+  terminalRetryAvailable: false,
+  terminalRetrying: false,
+  terminalRetryReason: null,
+};
+
+export interface UseRecoveryResult
+  extends RecoveryState,
+    EventRetryState,
+    TerminalRetryState {
   retryEvents: () => void;
+  retryTerminal: () => void;
 }
 
 function isAbortError(error: unknown): boolean {
@@ -266,6 +284,22 @@ function isAbortError(error: unknown): boolean {
 
 const DEFAULT_AUTHORITATIVE_READ_DEADLINE_MS = 12_000;
 const MAX_AUTHORITATIVE_READ_DEADLINE_MS = 60_000;
+const MAX_TERMINAL_AUTOMATIC_RETRIES = 3;
+const TERMINAL_RETRY_DELAY_MS = 1_000;
+
+function isRetryableTerminalStoreError(
+  error: unknown,
+  recoveryId: string,
+): error is PublicApiError {
+  return (
+    error instanceof PublicApiError &&
+    error.status === 503 &&
+    error.code === "internal_error" &&
+    error.recoveryId === recoveryId &&
+    error.retryAfterSeconds === 1 &&
+    error.fallback === null
+  );
+}
 
 class AuthoritativeReadTimeoutError extends Error {
   constructor() {
@@ -346,15 +380,19 @@ export function useRecovery(
   const [eventRetryState, setEventRetryState] = useState<EventRetryState>(
     initialEventRetryState,
   );
+  const [terminalRetryState, setTerminalRetryState] =
+    useState<TerminalRetryState>(initialTerminalRetryState);
   const eventRetryStateRef = useRef(eventRetryState);
+  const terminalRetryStateRef = useRef(terminalRetryState);
   const retryEventsRef = useRef<() => void>(() => undefined);
+  const retryTerminalRef = useRef<() => void>(() => undefined);
   const retryEvents = useCallback(() => retryEventsRef.current(), []);
+  const retryTerminal = useCallback(() => retryTerminalRef.current(), []);
   const {
     getRecovery = getRecoveryFromServer,
     getReceipt = getReceiptFromServer,
     openEvents = openRecoveryEventStream,
     initialSnapshot = null,
-    terminalRetryDelayMs = 250,
     eventReconnectDelayMs = 250,
     eventReconnectAttempts = 3,
     authoritativeReadDeadlineMs =
@@ -383,8 +421,14 @@ export function useRecovery(
       eventRetryStateRef.current = next;
       setEventRetryState(next);
     };
+    const updateTerminalRetryState = (next: TerminalRetryState) => {
+      terminalRetryStateRef.current = next;
+      setTerminalRetryState(next);
+    };
     updateEventRetryState(initialEventRetryState);
+    updateTerminalRetryState(initialTerminalRetryState);
     retryEventsRef.current = () => undefined;
+    retryTerminalRef.current = () => undefined;
     if (recoveryId === null) {
       dispatch({ type: "reset" });
       return;
@@ -396,6 +440,7 @@ export function useRecovery(
     let authoritativeController = new AbortController();
     let terminalRefreshStarted = false;
     let terminalRetryTimer: ReturnType<typeof setTimeout> | null = null;
+    let terminalRetryCount = 0;
     let streamGeneration = 0;
     let streamController: AbortController | null = null;
     let streamRetryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -469,9 +514,17 @@ export function useRecovery(
           ),
           "terminal",
         );
+        terminalRefreshStarted = false;
+        updateTerminalRetryState({
+          terminalRetryAvailable: true,
+          terminalRetrying: false,
+          terminalRetryReason: "manual_only",
+        });
         return false;
       }
       dispatch({ type: "terminalLoaded", snapshot, receipt });
+      terminalRetryCount = 0;
+      updateTerminalRetryState(initialTerminalRetryState);
       return true;
     };
 
@@ -496,10 +549,35 @@ export function useRecovery(
       ) {
         return;
       }
+      if (
+        !isRetryableTerminalStoreError(error, activeRecoveryId) ||
+        terminalRetryCount >= MAX_TERMINAL_AUTOMATIC_RETRIES
+      ) {
+        updateTerminalRetryState({
+          terminalRetryAvailable: true,
+          terminalRetrying: false,
+          terminalRetryReason: isRetryableTerminalStoreError(
+            error,
+            activeRecoveryId,
+          )
+            ? "automatic_retries_exhausted"
+            : "manual_only",
+        });
+        return;
+      }
+      terminalRetryCount += 1;
       terminalRetryTimer = setTimeout(() => {
         terminalRetryTimer = null;
+        if (
+          disposed ||
+          controller !== authoritativeController ||
+          generation !== authoritativeGeneration ||
+          controller.signal.aborted
+        ) {
+          return;
+        }
         refreshTerminal();
-      }, terminalRetryDelayMs);
+      }, TERMINAL_RETRY_DELAY_MS);
     };
 
     const loadReceiptForSnapshot = (snapshot: RecoverySnapshot) => {
@@ -526,25 +604,23 @@ export function useRecovery(
     };
 
     function refreshTerminal() {
-      if (terminalRefreshStarted || disposed) {
+      if (
+        terminalRefreshStarted ||
+        terminalRetryTimer !== null ||
+        terminalRetryStateRef.current.terminalRetryAvailable ||
+        disposed
+      ) {
         return;
       }
       terminalRefreshStarted = true;
       const controller = authoritativeController;
       const generation = authoritativeGeneration;
       void readAuthoritative(async (signal) => {
-        const [snapshotResult, receiptResult] =
-          await Promise.allSettled([
-            getRecovery(activeRecoveryId, signal),
-            getReceipt(activeRecoveryId, signal),
-          ]);
-        if (snapshotResult.status === "rejected") {
-          throw snapshotResult.reason;
-        }
-        if (receiptResult.status === "rejected") {
-          throw receiptResult.reason;
-        }
-        return [snapshotResult.value, receiptResult.value] as const;
+        const [snapshot, receipt] = await Promise.all([
+          getRecovery(activeRecoveryId, signal),
+          getReceipt(activeRecoveryId, signal),
+        ]);
+        return [snapshot, receipt] as const;
       }, controller.signal)
         .then(([snapshot, receipt]) => {
           if (
@@ -560,6 +636,32 @@ export function useRecovery(
           scheduleTerminalRetry(error, controller, generation),
         );
     }
+
+    retryTerminalRef.current = () => {
+      const retryState = terminalRetryStateRef.current;
+      if (
+        disposed ||
+        !retryState.terminalRetryAvailable ||
+        retryState.terminalRetrying
+      ) {
+        return;
+      }
+      updateTerminalRetryState({
+        terminalRetryAvailable: false,
+        terminalRetrying: true,
+        terminalRetryReason: retryState.terminalRetryReason,
+      });
+      if (terminalRetryTimer !== null) {
+        clearTimeout(terminalRetryTimer);
+        terminalRetryTimer = null;
+      }
+      authoritativeGeneration += 1;
+      authoritativeController.abort();
+      authoritativeController = new AbortController();
+      terminalRefreshStarted = false;
+      terminalRetryCount = 0;
+      refreshTerminal();
+    };
 
     const acceptInitialSnapshot = (
       snapshot: RecoverySnapshot,
@@ -885,6 +987,7 @@ export function useRecovery(
     return () => {
       disposed = true;
       retryEventsRef.current = () => undefined;
+      retryTerminalRef.current = () => undefined;
       clearRetryEligibility();
       streamGeneration += 1;
       if (streamRetryTimer !== null) {
@@ -908,12 +1011,13 @@ export function useRecovery(
     initialSnapshot,
     openEvents,
     recoveryId,
-    terminalRetryDelayMs,
   ]);
 
   return {
     ...state,
     ...eventRetryState,
+    ...terminalRetryState,
     retryEvents,
+    retryTerminal,
   };
 }

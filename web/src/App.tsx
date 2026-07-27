@@ -199,6 +199,8 @@ export default function App() {
   const quotaActionController = useRef<AbortController | null>(null);
   const consentReviewTrigger = useRef<HTMLAnchorElement>(null);
   const recoveryFocusTarget = useRef<HTMLHeadingElement>(null);
+  const terminalRetryButton = useRef<HTMLButtonElement>(null);
+  const terminalRetryFocusOwner = useRef<ScenarioId | null>(null);
   const compactLayout = useMediaQuery("(max-width: 759px)");
   const previousCompactLayout = useRef(compactLayout);
   const focusPreviousCompactLayout = useRef(compactLayout);
@@ -642,6 +644,16 @@ export default function App() {
   const activeEvents = activeRecovery.events;
   const activeEventError =
     activeRecovery.errorPhase === "events" ? activeRecovery.error : null;
+  const activeTerminalError =
+    activeRecovery.errorPhase === "terminal" ? activeRecovery.error : null;
+  const terminalEvidenceVisibilityMessage =
+    activeSnapshot !== null && activeEvents.length > 0
+      ? "The retained recovery snapshot and event history remain visible while you retry."
+      : activeSnapshot !== null
+        ? "The retained recovery snapshot remains visible while you retry."
+        : activeEvents.length > 0
+          ? "The retained recovery event history remains visible while you retry."
+          : "No authoritative recovery snapshot or event history is loaded yet.";
   const activeRecoveryStateLabel = recoveryStateLabel(
     activeSnapshot,
     activeScenarioView,
@@ -672,6 +684,37 @@ export default function App() {
     compactLayout,
     consentReviewAvailable,
     shouldFocusRecoveryAfterConsentTransition,
+  ]);
+
+  useLayoutEffect(() => {
+    if (
+      activeTerminalError !== null ||
+      activeRecovery.terminalRetryAvailable ||
+      activeRecovery.terminalRetrying
+    ) {
+      return;
+    }
+    const focusOwner = terminalRetryFocusOwner.current;
+    terminalRetryFocusOwner.current = null;
+    if (focusOwner !== activeId) {
+      return;
+    }
+    const focusedElement =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    if (
+      focusedElement === null ||
+      focusedElement === document.body ||
+      !focusedElement.isConnected
+    ) {
+      recoveryFocusTarget.current?.focus();
+    }
+  }, [
+    activeId,
+    activeRecovery.terminalRetryAvailable,
+    activeRecovery.terminalRetrying,
+    activeTerminalError,
   ]);
 
   useEffect(() => {
@@ -841,6 +884,46 @@ export default function App() {
                 {activeRecovery.eventsRetrying
                   ? "Retrying event updates…"
                   : "Retry event updates"}
+              </button>
+            </section>
+          ) : null}
+          {activeTerminalError !== null &&
+          (activeRecovery.terminalRetryAvailable ||
+            activeRecovery.terminalRetrying) ? (
+            <section
+              className="live-run-controls"
+              role="alert"
+              aria-label="Terminal evidence loading"
+              aria-busy={activeRecovery.terminalRetrying}
+            >
+              <p>
+                {activeTerminalError}
+                {activeRecovery.terminalRetrying
+                  ? " Reloading authoritative terminal evidence."
+                  : activeRecovery.terminalRetryReason ===
+                      "automatic_retries_exhausted"
+                    ? " Automatic terminal evidence retries are exhausted."
+                    : " Automatic retry is unavailable for this response."}
+              </p>
+              <p>{terminalEvidenceVisibilityMessage}</p>
+              <button
+                type="button"
+                ref={terminalRetryButton}
+                disabled={
+                  !activeRecovery.terminalRetryAvailable ||
+                  activeRecovery.terminalRetrying
+                }
+                onClick={() => {
+                  terminalRetryFocusOwner.current =
+                    document.activeElement === terminalRetryButton.current
+                      ? activeId
+                      : null;
+                  activeRecovery.retryTerminal();
+                }}
+              >
+                {activeRecovery.terminalRetrying
+                  ? "Retrying terminal evidence…"
+                  : "Retry terminal evidence"}
               </button>
             </section>
           ) : null}

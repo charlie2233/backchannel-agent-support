@@ -166,6 +166,7 @@ async function failedRequest(
   options: {
     allowFallback?: boolean;
     allowCreationBudget?: boolean;
+    allowRecoveryStoreUnavailable?: boolean;
     allowStreamCapacity?: boolean;
     expectedRecoveryId?: string | null;
   } = {},
@@ -203,13 +204,35 @@ async function failedRequest(
   ) {
     return unexpectedResponse(response.status);
   }
+  const code = error.code as PublicErrorCode;
+  const contentType = response.headers.get("Content-Type");
+  const isJsonResponse =
+    contentType !== null &&
+    contentType.split(";", 1)[0]?.trim().toLowerCase() === "application/json";
+  const isExactRecoveryStoreUnavailable =
+    options.allowRecoveryStoreUnavailable === true &&
+    code === "internal_error" &&
+    response.status === 503 &&
+    isUuid(options.expectedRecoveryId) &&
+    error.recoveryId === options.expectedRecoveryId &&
+    error.retryAfterSeconds === 1 &&
+    error.fallback === null &&
+    response.headers.get("Retry-After") === "1" &&
+    isJsonResponse;
+  if (
+    options.allowRecoveryStoreUnavailable === true &&
+    code === "internal_error" &&
+    response.status === 503 &&
+    !isExactRecoveryStoreUnavailable
+  ) {
+    return unexpectedResponse(response.status);
+  }
   if (
     options.expectedRecoveryId !== undefined &&
     error.recoveryId !== options.expectedRecoveryId
   ) {
     return unexpectedResponse(response.status);
   }
-  const code = error.code as PublicErrorCode;
   if (
     code === "creation_daily_budget_exceeded" &&
     (options.allowCreationBudget !== true ||
@@ -508,7 +531,10 @@ export async function getRecovery(
     cache: "no-store",
   });
   if (!response.ok) {
-    throw await failedRequest(response, { expectedRecoveryId: recoveryId });
+    throw await failedRequest(response, {
+      allowRecoveryStoreUnavailable: true,
+      expectedRecoveryId: recoveryId,
+    });
   }
   const recovery = await readRecovery(response);
   if (recovery.recoveryId !== recoveryId) {
@@ -917,7 +943,10 @@ export async function getReceipt(
     },
   );
   if (!response.ok) {
-    throw await failedRequest(response, { expectedRecoveryId: recoveryId });
+    throw await failedRequest(response, {
+      allowRecoveryStoreUnavailable: true,
+      expectedRecoveryId: recoveryId,
+    });
   }
   const body = await successfulJson(response);
   if (!isRecoveryReceipt(body)) {

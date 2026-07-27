@@ -122,6 +122,49 @@ function streamCapacityResponse(
   );
 }
 
+function storeUnavailableResponse(
+  {
+    status = 503,
+    retryAfterSeconds = 1,
+    retryAfterHeader = String(retryAfterSeconds),
+    errorRecoveryId = recoveryId,
+    fallback = null,
+    contentType = "application/json",
+  }: {
+    status?: number;
+    retryAfterSeconds?: number | null;
+    retryAfterHeader?: string | null;
+    errorRecoveryId?: string | null;
+    fallback?: object | null;
+    contentType?: string | null;
+  } = {},
+): Response {
+  const headers = new Headers();
+  if (contentType !== null) {
+    headers.set("Content-Type", contentType);
+  }
+  if (retryAfterHeader !== null) {
+    headers.set("Retry-After", retryAfterHeader);
+  }
+  const response = new Response(
+    JSON.stringify({
+      error: {
+        code: "internal_error",
+        message: "The request could not be completed.",
+        requestId: "req_22222222222222222222222222222222",
+        recoveryId: errorRecoveryId,
+        retryAfterSeconds,
+        fallback,
+      },
+    }),
+    { status, headers },
+  );
+  if (contentType === null) {
+    response.headers.delete("Content-Type");
+  }
+  return response;
+}
+
 function cancellationReceipt(executionCount = 0) {
   return {
     recoveryId,
@@ -311,6 +354,135 @@ describe("authoritative recovery reads", () => {
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(init.cache).toBeUndefined();
   });
+
+  it.each([
+    ["snapshot", () => getRecovery(recoveryId)],
+    ["receipt", () => getReceipt(recoveryId)],
+  ] as const)(
+    "accepts the exact recovery-scoped store-unavailable envelope for a %s read",
+    async (_label, read) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(storeUnavailableResponse()),
+      );
+
+      const failure = await read().catch((error: unknown) => error);
+
+      expect(failure).toBeInstanceOf(PublicApiError);
+      expect(failure).toMatchObject({
+        code: "internal_error",
+        status: 503,
+        requestId: "req_22222222222222222222222222222222",
+        recoveryId,
+        retryAfterSeconds: 1,
+        fallback: null,
+      });
+    },
+  );
+
+  it.each([
+    ["snapshot", () => getRecovery(recoveryId)],
+    ["receipt", () => getReceipt(recoveryId)],
+  ] as const)(
+    "preserves a legitimate scoped internal-error HTTP 500 for a %s read",
+    async (_label, read) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(
+          storeUnavailableResponse({
+            status: 500,
+            retryAfterSeconds: null,
+            retryAfterHeader: null,
+          }),
+        ),
+      );
+
+      const failure = await read().catch((error: unknown) => error);
+
+      expect(failure).toBeInstanceOf(PublicApiError);
+      expect(failure).toMatchObject({
+        code: "internal_error",
+        status: 500,
+        requestId: "req_22222222222222222222222222222222",
+        recoveryId,
+        retryAfterSeconds: null,
+        fallback: null,
+      });
+    },
+  );
+
+  it.each([
+    [
+      "null body retry",
+      () => storeUnavailableResponse({ retryAfterSeconds: null }),
+    ],
+    [
+      "wrong body retry",
+      () =>
+        storeUnavailableResponse({
+          retryAfterSeconds: 2,
+          retryAfterHeader: "2",
+        }),
+    ],
+    [
+      "missing Retry-After",
+      () => storeUnavailableResponse({ retryAfterHeader: null }),
+    ],
+    [
+      "mismatched Retry-After",
+      () => storeUnavailableResponse({ retryAfterHeader: "2" }),
+    ],
+    [
+      "missing recovery correlation",
+      () => storeUnavailableResponse({ errorRecoveryId: null }),
+    ],
+    [
+      "substituted recovery",
+      () =>
+        storeUnavailableResponse({
+          errorRecoveryId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        }),
+    ],
+    [
+      "fallback offer",
+      () =>
+        storeUnavailableResponse({
+          fallback: {
+            kind: "show_replay_fixture",
+            scenarioId: "hotel",
+            executionMode: "replay_fixture",
+          },
+        }),
+    ],
+    [
+      "missing Content-Type",
+      () => storeUnavailableResponse({ contentType: null }),
+    ],
+    [
+      "text Content-Type",
+      () => storeUnavailableResponse({ contentType: "text/plain" }),
+    ],
+  ])(
+    "rejects a malformed recovery-scoped store-unavailable envelope with %s",
+    async (_label, response) => {
+      for (const read of [
+        () => getRecovery(recoveryId),
+        () => getReceipt(recoveryId),
+      ]) {
+        vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response()));
+
+        const failure = await read().catch((error: unknown) => error);
+
+        expect(failure).toBeInstanceOf(PublicApiError);
+        expect(failure).toMatchObject({
+          code: "unexpected_response",
+          recoveryId: null,
+          retryAfterSeconds: null,
+          fallback: null,
+        });
+      }
+    },
+  );
 });
 
 describe("decision and receipt contracts", () => {
