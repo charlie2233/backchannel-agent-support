@@ -38,29 +38,21 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     normalized_current_evidence = " ".join(current_evidence.split())
 
     assert manifest["sourceCommit"] in current_evidence
-    current_activation = "cca97a8e75d52a26889d3bbb66740756041d9caf"
-    current_hosted_sha = "e188202a4b0612a66503fda2b6ee1a3c89ec7b65"
-    current_run = "30208188300"
-    current_jobs = ("89809811619", "89809998273")
+    current_activation = "98dae414b3cdd36ee25d0dad3fe78257f3f4c135"
     superseded_failed_attempt = (
         "30206582233",
         "89805619343",
         "89805788728",
     )
     assert current_activation in current_evidence
-    assert current_hosted_sha in current_evidence
     assert runtime_input["digest"] in current_evidence
     for current_identifier in (
         manifest["sourceCommit"],
-        "8d0a896…",
+        "96543ff…",
         current_activation,
-        "cca97a8…",
+        "98dae41…",
         runtime_input["digest"],
-        "a1e0eca…",
-        current_hosted_sha,
-        "e188202…",
-        current_run,
-        *current_jobs,
+        "e22c420…",
     ):
         assert current_identifier not in historical_evidence
     assert f"{len(runtime_input['paths'])} runtime paths" in current_evidence
@@ -83,75 +75,117 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
         "Five PNGs changed and `mobile-consent.png` remained byte-identical"
         in current_evidence
     )
-    for observed_current_fact in (
-        "two consecutive focused Task29 matrices passed 133 tests",
+
+    def current_bullet(prefix: str) -> str:
+        match = re.search(
+            rf"^- {re.escape(prefix)}.*?(?=^- |\n## |\Z)",
+            current_evidence,
+            flags=re.MULTILINE | re.DOTALL,
+        )
+        assert match is not None
+        return " ".join(match.group(0).split())
+
+    pre_capture_gate = current_bullet("Pre-capture gates on clean source")
+    assert manifest["sourceCommit"] in pre_capture_gate
+    for pre_capture_fact in (
+        "targeted Task30 matrix passed 142 tests",
+        "19 web test files / 315 tests",
+        "TypeScript/Vite",
+    ):
+        assert pre_capture_fact in pre_capture_gate
+    for post_activation_only_fact in (
+        "671 Python tests",
+        "3 warnings",
+        "Ruff",
+        "strict MyPy",
+        "`npm run check`",
+        "`capture_manifest_valid`",
+    ):
+        assert post_activation_only_fact not in pre_capture_gate
+
+    post_activation_gate = current_bullet("After activation")
+    assert current_activation in post_activation_gate
+    for post_activation_fact in (
+        "current pre-CI check on the identical working tree",
+        "`npm run check`",
         "29 capture contracts",
         "`capture_manifest_valid`",
-        "19 web test files / 292 tests",
+        "19 web test files / 315 tests",
+        "TypeScript/Vite build",
         "Ruff",
         "strict MyPy over 35 source files",
-        "622 Python tests with 1 warning",
-        "638 Python tests with 1 warning",
-        "Stub",
-        "single-process production smokes",
-        "deterministic stub smoke",
+        "671 Python tests with 3 warnings in 106.82s",
+        "one Starlette TestClient deprecation and two multiprocessing fork warnings",
+    ):
+        assert post_activation_fact in post_activation_gate
+    assert "targeted Task30 matrix passed 142 tests" not in post_activation_gate
+
+    separate_current_gate = current_bullet("Separate current pre-CI gates")
+    for separate_gate_fact in (
+        "deterministic stub and local single-process production smokes",
         "OpenAPI freshness",
-        "OpenAPI check",
         "history-aware secret scan",
         "diff checks",
-        "packaged Docker image",
-        "`10001:10001`",
-        "network-none",
-        "`deterministic-qa`",
-        "`deployed-readonly`",
+        "focused release-doc contract passed 88/88",
+        "build, static/API, SSE, decision, session, and bounded shutdown",
+        "independent specification and quality reviews passed with no P0-P2",
+    ):
+        assert separate_gate_fact in separate_current_gate
+
+    for observed_current_fact in (
+        "29 capture contracts",
+        "in-app Browser capture attempt failed closed as unavailable",
     ):
         assert observed_current_fact in normalized_current_evidence
-    for current_identifier in (
-        current_hosted_sha,
-        current_run,
-        *current_jobs,
+
+    terminal_heading = "## Terminal evidence retry proof boundary"
+    terminal_end_heading = "## Async SQLite proof boundary"
+    assert terminal_heading in current_evidence
+    assert terminal_end_heading in current_evidence
+    terminal_evidence = current_evidence.split(terminal_heading, maxsplit=1)[1].split(
+        terminal_end_heading,
+        maxsplit=1,
+    )[0]
+    normalized_terminal_evidence = " ".join(terminal_evidence.split())
+    for required_terminal_fact in (
+        "HTTP `503`, code `internal_error`, `recoveryId` equal to the requested "
+        "recovery UUID, `retryAfterSeconds: 1`, `fallback: null`, a matching "
+        "`Retry-After: 1` header, and `application/json` media",
+        "Null, foreign, or substituted recovery IDs",
+        "malformed status, header, body, or media fail closed",
+        "one initial authoritative read pair plus exactly three one-second "
+        "automatic retries",
+        "one accessible manual retry begins a fresh equally bounded "
+        "initial-plus-three cycle",
+        "already verified snapshot, receipt, event, and cursor state remains visible",
+        "No POST, create, decision, reset, or fallback request is issued by either "
+        "automatic or manual terminal evidence retry",
     ):
-        assert current_identifier in current_evidence
-    assert "Both job annotation APIs returned `[]`" in current_evidence
-    actions_base = (
-        "https://github.com/charlie2233/backchannel-agent-support/actions/runs"
-    )
-    current_run_url = f"{actions_base}/{current_run}"
-    current_job_urls = tuple(
-        f"{current_run_url}/job/{job_id}" for job_id in current_jobs
-    )
-    assert current_evidence.count(f"[run {current_run}]({current_run_url})") == 1
-    for job_id, job_url in zip(current_jobs, current_job_urls, strict=True):
-        assert current_evidence.count(f"[job {job_id}]({job_url})") == 1
+        assert required_terminal_fact in normalized_terminal_evidence
     observed_action_urls = re.findall(
         r"https://github\.com/[^)\s]+/actions/runs/\d+(?:/job/\d+)?",
         current_evidence,
     )
-    assert set(observed_action_urls) == {
-        current_run_url,
-        *current_job_urls,
-    }
-    assert len(observed_action_urls) == 3
-    assert set(re.findall(r"/actions/runs/(\d+)", current_evidence)) == {current_run}
-    assert set(re.findall(r"/job/(\d+)", current_evidence)) == set(current_jobs)
+    assert observed_action_urls == []
+    assert re.findall(r"/actions/runs/(\d+)", current_evidence) == []
+    assert re.findall(r"/job/(\d+)", current_evidence) == []
     hosted_successor_matches = re.findall(
         r"Hosted validation successor:\s+`([0-9a-f]{40})`",
         current_evidence,
     )
-    assert hosted_successor_matches == [current_hosted_sha]
-    pass_block_pattern = (
-        rf"Result: `verify`\s+\(\[job {current_jobs[0]}\]"
-        rf"\({re.escape(current_job_urls[0])}\)\)\s+reported `PASS`; "
-        rf"`container-smoke`\s+\(\[job {current_jobs[1]}\]"
-        rf"\({re.escape(current_job_urls[1])}\)\)\s+reported `PASS`\."
-    )
-    assert re.search(pass_block_pattern, current_evidence)
+    assert hosted_successor_matches == []
+    for required_current_boundary in (
+        "No green current Task30 GitHub Actions run or job has been observed.",
+        "No current Task30 packaged container smoke was executed.",
+        "**Unverified** for this source/capture checkpoint",
+    ):
+        assert required_current_boundary in current_evidence
     for forbidden_current_claim in (
+        "Both job annotation APIs returned `[]`",
+        "reported `PASS`",
         "reported `FAILURE`",
         "reported `SKIPPED`",
-        "No green current Task29 GitHub Actions run or job has been observed.",
-        "No current Task29 packaged container smoke was executed.",
-        "**Unverified** for this source/capture checkpoint",
+        "Hosted validation successor:",
     ):
         assert forbidden_current_claim not in current_evidence
     for superseded_identifier in superseded_failed_attempt:
@@ -170,6 +204,14 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
         assert unproved_current_boundary in normalized_current_evidence
     assert "CI did not execute the browser capture" in current_evidence
 
+    task29_capture = "8d0a896c753c4c60894301a20a3866bbbfa1e76f"
+    task29_activation = "cca97a8e75d52a26889d3bbb66740756041d9caf"
+    task29_successor = "e188202a4b0612a66503fda2b6ee1a3c89ec7b65"
+    task29_digest = (
+        "a1e0ecaf69926044419e29c7359102188c80550834ddb9351021aae411705054"
+    )
+    task29_run = "30208188300"
+    task29_jobs = ("89809811619", "89809998273")
     request_boundary_capture = "8823d29d7de93d44f4843a2fa4db1adec4e452bd"
     request_boundary_activation = "55af1e6d68f11542b1c5cc5e3465b87dc158ec08"
     request_boundary_successor = "117e4ebe40efea36f89bbb737143de9c918f938f"
@@ -196,6 +238,16 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     for historical_identifier in (
         "85e1e8ec9147242adca311c4ba10ea8c1c3008dc",
         "85e1e8e…",
+        task29_capture,
+        "8d0a896…",
+        task29_activation,
+        "cca97a8…",
+        task29_successor,
+        "e188202…",
+        task29_digest,
+        "a1e0eca…",
+        task29_run,
+        *task29_jobs,
         request_boundary_capture,
         "8823d29…",
         request_boundary_activation,
@@ -227,6 +279,16 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     ):
         assert historical_identifier not in current_evidence
     for required_historical_identifier in (
+        task29_capture,
+        "8d0a896…",
+        task29_activation,
+        "cca97a8…",
+        task29_successor,
+        "e188202…",
+        task29_digest,
+        "a1e0eca…",
+        task29_run,
+        *task29_jobs,
         request_boundary_capture,
         "8823d29…",
         request_boundary_activation,
@@ -269,6 +331,17 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     (
         "85e1e8ec9147242adca311c4ba10ea8c1c3008dc",
         "85e1e8e…",
+        "8d0a896c753c4c60894301a20a3866bbbfa1e76f",
+        "8d0a896…",
+        "cca97a8e75d52a26889d3bbb66740756041d9caf",
+        "cca97a8…",
+        "e188202a4b0612a66503fda2b6ee1a3c89ec7b65",
+        "e188202…",
+        "a1e0ecaf69926044419e29c7359102188c80550834ddb9351021aae411705054",
+        "a1e0eca…",
+        "30208188300",
+        "89809811619",
+        "89809998273",
         "8823d29d7de93d44f4843a2fa4db1adec4e452bd",
         "8823d29…",
         "55af1e6d68f11542b1c5cc5e3465b87dc158ec08",
@@ -324,17 +397,12 @@ def test_validation_rejects_superseded_provenance_in_current_evidence(
 @pytest.mark.parametrize(
     "current_identifier",
     (
-        "8d0a896c753c4c60894301a20a3866bbbfa1e76f",
-        "8d0a896…",
-        "cca97a8e75d52a26889d3bbb66740756041d9caf",
-        "cca97a8…",
-        "a1e0ecaf69926044419e29c7359102188c80550834ddb9351021aae411705054",
-        "a1e0eca…",
-        "e188202a4b0612a66503fda2b6ee1a3c89ec7b65",
-        "e188202…",
-        "30208188300",
-        "89809811619",
-        "89809998273",
+        "96543fff62bb5d0a3c0f8a0464e9a07bf9c54568",
+        "96543ff…",
+        "98dae414b3cdd36ee25d0dad3fe78257f3f4c135",
+        "98dae41…",
+        "e22c42085703fcdfaaa3f994334cc418a4e81e858187757edb5a33b8e2221e13",
+        "e22c420…",
     ),
 )
 def test_validation_rejects_current_capture_provenance_in_historical_evidence(
@@ -363,17 +431,17 @@ def test_validation_rejects_current_capture_provenance_in_historical_evidence(
         (
             "- Result: `verify`\n"
             "  ([job 999998](https://github.com/example/repo/actions/runs/"
-            "30208188300/job/999998)) reported `PASS`."
+            "999999/job/999998)) reported `PASS`."
         ),
         (
             "- GitHub Actions:\n"
-            "  [run 30208188300]"
-            "(https://github.com/example/repo/actions/runs/30208188300)"
+            "  [run 999999]"
+            "(https://github.com/example/repo/actions/runs/999999)"
         ),
         (
             "- Result: `verify`\n"
-            "  ([job 89809811619](https://github.com/example/repo/actions/runs/"
-            "30208188300/job/89809811619)) reported `PASS`."
+            "  ([job 999998](https://github.com/example/repo/actions/runs/"
+            "999999/job/999998)) reported `PASS`."
         ),
         "- Result: `verify` reported `FAILURE`; `container-smoke` reported `SKIPPED`.",
     ),
@@ -393,14 +461,111 @@ def test_validation_rejects_unexpected_current_hosted_provenance(
         _assert_validation_matches_current_capture(polluted_validation)
 
 
-@pytest.mark.parametrize("non_pass_status", ("CANCELLED", "PENDING"))
-def test_validation_requires_both_current_jobs_to_report_pass(
-    non_pass_status: str,
-) -> None:
+def test_validation_requires_current_hosted_lane_to_remain_unverified_pre_ci() -> None:
     validation = _read("docs/validation.md")
     polluted_validation = validation.replace(
-        "reported `PASS`",
-        f"reported `{non_pass_status}`",
+        "No green current Task30 GitHub Actions run or job has been observed.",
+        "A green current Task30 GitHub Actions run has been observed.",
+    )
+
+    with pytest.raises(AssertionError):
+        _assert_validation_matches_current_capture(polluted_validation)
+
+
+@pytest.mark.parametrize(
+    ("bullet_prefix", "original", "replacement"),
+    (
+        (
+            "Pre-capture gates on clean source",
+            "TypeScript/Vite.",
+            "TypeScript/Vite and 671 Python tests with 3 warnings.",
+        ),
+        (
+            "After activation",
+            "671 Python tests with 3 warnings in 106.82s",
+            "an unspecified Python suite",
+        ),
+        (
+            "After activation",
+            "98dae414b3cdd36ee25d0dad3fe78257f3f4c135",
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        ),
+    ),
+)
+def test_validation_rejects_evidence_timing_mutation(
+    bullet_prefix: str,
+    original: str,
+    replacement: str,
+) -> None:
+    validation = _read("docs/validation.md")
+    bullet_match = re.search(
+        rf"^- {re.escape(bullet_prefix)}.*?(?=^- |\n## |\Z)",
+        validation,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    assert bullet_match is not None
+    bullet = bullet_match.group(0)
+    original_pattern = re.compile(re.escape(original).replace(r"\ ", r"\s+"))
+    assert original_pattern.search(bullet)
+    polluted_bullet = original_pattern.sub(replacement, bullet, count=1)
+    polluted_validation = validation.replace(bullet, polluted_bullet, 1)
+
+    with pytest.raises(AssertionError):
+        _assert_validation_matches_current_capture(polluted_validation)
+
+
+@pytest.mark.parametrize(
+    ("original", "replacement"),
+    (
+        ("HTTP `503`", "HTTP `502`"),
+        ("code `internal_error`", "code `rate_limited`"),
+        (
+            "`recoveryId` equal to the requested recovery UUID",
+            "`recoveryId` equal to null",
+        ),
+        ("`retryAfterSeconds: 1`", "`retryAfterSeconds: 2`"),
+        ("`fallback: null`", "`fallback: {}`"),
+        ("`Retry-After: 1`", "`Retry-After: 2`"),
+        ("`application/json` media", "`text/plain` media"),
+        ("exactly three", "exactly four"),
+        ("one-second automatic retries", "immediate automatic retries"),
+        ("one accessible manual retry", "two manual retries"),
+        (
+            "fresh equally bounded initial-plus-three cycle",
+            "fresh unbounded cycle",
+        ),
+        (
+            "already verified snapshot, receipt, event, and cursor state remains visible",
+            "verified terminal state is cleared",
+        ),
+        (
+            "No POST, create, decision, reset, or fallback request",
+            "A create POST or fallback request",
+        ),
+    ),
+)
+def test_validation_rejects_terminal_retry_contract_mutation(
+    original: str,
+    replacement: str,
+) -> None:
+    validation = _read("docs/validation.md")
+    terminal_heading = "## Terminal evidence retry proof boundary"
+    terminal_end_heading = "## Async SQLite proof boundary"
+    terminal_evidence = validation.split(terminal_heading, maxsplit=1)[1].split(
+        terminal_end_heading,
+        maxsplit=1,
+    )[0]
+    original_pattern = re.compile(re.escape(original).replace(r"\ ", r"\s+"))
+    assert original_pattern.search(terminal_evidence)
+    polluted_terminal_evidence = original_pattern.sub(
+        replacement,
+        terminal_evidence,
+        count=1,
+    )
+    polluted_validation = validation.replace(
+        terminal_evidence,
+        polluted_terminal_evidence,
+        1,
     )
 
     with pytest.raises(AssertionError):
@@ -598,6 +763,7 @@ def test_release_docs_cover_architecture_protocol_and_evidence_boundaries() -> N
     assert "`codex/backchannel-v0.3`" in validation
     assert "## Current capture and evidence activation" in validation
     assert "## Superseded historical hosted baseline" in validation
+    assert "### Async SQLite capture and hosted baseline (superseded)" in validation
     assert "### Immediate prior capture and hosted baseline (superseded)" in validation
     assert "### Prior capture and hosted baseline (superseded)" in validation
     assert "### Older hosted baseline (superseded)" in validation
