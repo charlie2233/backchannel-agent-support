@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "sourceCommit": "96543fff62bb5d0a3c0f8a0464e9a07bf9c54568",
+  "sourceCommit": "c446f05adfb836539ddbaa74a41502034c910092",
   "runtimeInput": {
     "algorithm": "sha256",
-    "digest": "e22c42085703fcdfaaa3f994334cc418a4e81e858187757edb5a33b8e2221e13",
+    "digest": "3bb9737a483fc90e50d5a6158bf0c61c1807e6510d22c9bf6d88e142d21ff5d9",
     "paths": [
       ".node-version",
       "e2e/capture-manifest.mjs",
@@ -94,7 +94,7 @@
   "captureProfile": "keyless_sdk_stub",
   "browser": {
     "name": "Google Chrome",
-    "version": "150.0.7871.186",
+    "version": "150.0.7871.187",
     "channel": "chrome",
     "headless": true
   },
@@ -107,7 +107,7 @@
   "artifacts": [
     {
       "filename": "desktop-consent.png",
-      "sha256": "c3e2d2975a8c6af408a05c5f3f40b2126cc321c2d92cdbb26d3a23a268bab0e5",
+      "sha256": "9d3850340495340ede0d1c4e2d423b3d6725a14e116fac508ca0405491f1718a",
       "width": 1440,
       "height": 1024,
       "scenarioId": "hotel",
@@ -116,7 +116,7 @@
     },
     {
       "filename": "desktop-completed.png",
-      "sha256": "a0505361f2c73939197d47abd82bb90a740fd25b18ca60ef9c78a587328fbe64",
+      "sha256": "b18d83f96fff4288bb039e0fd5de2be667a86092d1c9fea22c362c0c7c12f576",
       "width": 1440,
       "height": 1024,
       "scenarioId": "hotel",
@@ -125,7 +125,7 @@
     },
     {
       "filename": "desktop-declined.png",
-      "sha256": "af0b81f47b398fa45d0377397a193cf3f4c4938ea3d0901f5b16dd9885a76630",
+      "sha256": "2dedafccc592dca5a0af5ee3f6265653d66cf53927ce8f860952376ecfecd705",
       "width": 1440,
       "height": 1024,
       "scenarioId": "hotel",
@@ -143,7 +143,7 @@
     },
     {
       "filename": "mobile-completed.png",
-      "sha256": "98dae579f6d7c15ec96c38fc5c3fbac77dafa293356b7750a62d6d3357ab2e78",
+      "sha256": "d0c6d553f6c416b33592a3aa63f3fad42fe559c216c52ecffb380a62f804a538",
       "width": 390,
       "height": 844,
       "scenarioId": "hotel",
@@ -152,7 +152,7 @@
     },
     {
       "filename": "mobile-declined.png",
-      "sha256": "010d42011c3694f06b264ca5a40fd441d15d0e08e0e51aaed5de4cd20000fcbd",
+      "sha256": "443e8164383164d00592d63c4e23fbe0b9a4e53714ee58ef2bad8495ab55ea59",
       "width": 390,
       "height": 844,
       "scenarioId": "hotel",
