@@ -39,6 +39,9 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
 
     assert manifest["sourceCommit"] in current_evidence
     current_activation = "98dae414b3cdd36ee25d0dad3fe78257f3f4c135"
+    current_hosted_sha = "a3e3179bafb8050598cc5512d56e0c7661318c64"
+    current_run = "30499178838"
+    current_jobs = ("90734790003", "90735121608")
     superseded_failed_attempt = (
         "30206582233",
         "89805619343",
@@ -53,6 +56,10 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
         "98dae41…",
         runtime_input["digest"],
         "e22c420…",
+        current_hosted_sha,
+        "a3e3179…",
+        current_run,
+        *current_jobs,
     ):
         assert current_identifier not in historical_evidence
     assert f"{len(runtime_input['paths'])} runtime paths" in current_evidence
@@ -166,26 +173,52 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
         r"https://github\.com/[^)\s]+/actions/runs/\d+(?:/job/\d+)?",
         current_evidence,
     )
-    assert observed_action_urls == []
-    assert re.findall(r"/actions/runs/(\d+)", current_evidence) == []
-    assert re.findall(r"/job/(\d+)", current_evidence) == []
+    actions_base = (
+        "https://github.com/charlie2233/backchannel-agent-support/actions/runs"
+    )
+    current_run_url = f"{actions_base}/{current_run}"
+    current_job_urls = tuple(
+        f"{current_run_url}/job/{job_id}" for job_id in current_jobs
+    )
+    assert set(observed_action_urls) == {
+        current_run_url,
+        *current_job_urls,
+    }
+    assert len(observed_action_urls) == 3
+    assert set(re.findall(r"/actions/runs/(\d+)", current_evidence)) == {current_run}
+    assert set(re.findall(r"/job/(\d+)", current_evidence)) == set(current_jobs)
     hosted_successor_matches = re.findall(
         r"Hosted validation successor:\s+`([0-9a-f]{40})`",
         current_evidence,
     )
-    assert hosted_successor_matches == []
-    for required_current_boundary in (
+    assert hosted_successor_matches == [current_hosted_sha]
+    assert current_evidence.count(f"[run {current_run}]({current_run_url})") == 1
+    for job_id, job_url in zip(current_jobs, current_job_urls, strict=True):
+        assert current_evidence.count(f"[job {job_id}]({job_url})") == 1
+    pass_block_pattern = (
+        rf"Result: `verify`\s+\(\[job {current_jobs[0]}\]"
+        rf"\({re.escape(current_job_urls[0])}\)\)\s+reported `PASS`; "
+        rf"`container-smoke`\s+\(\[job {current_jobs[1]}\]"
+        rf"\({re.escape(current_job_urls[1])}\)\)\s+reported `PASS`\."
+    )
+    assert re.search(pass_block_pattern, current_evidence)
+    for required_current_hosted_fact in (
+        "Both job annotation APIs returned `[]`",
+        "canonical `npm run check`",
+        "deterministic stub smoke",
+        "OpenAPI verification",
+        "history-aware secret scan",
+        "packaged Docker image",
+        "runtime user `10001:10001`",
+        "offline network-none `deterministic-qa` and `deployed-readonly` profiles",
+    ):
+        assert required_current_hosted_fact in normalized_current_evidence
+    for forbidden_current_claim in (
+        "reported `FAILURE`",
+        "reported `SKIPPED`",
         "No green current Task30 GitHub Actions run or job has been observed.",
         "No current Task30 packaged container smoke was executed.",
         "**Unverified** for this source/capture checkpoint",
-    ):
-        assert required_current_boundary in current_evidence
-    for forbidden_current_claim in (
-        "Both job annotation APIs returned `[]`",
-        "reported `PASS`",
-        "reported `FAILURE`",
-        "reported `SKIPPED`",
-        "Hosted validation successor:",
     ):
         assert forbidden_current_claim not in current_evidence
     for superseded_identifier in superseded_failed_attempt:
@@ -403,6 +436,11 @@ def test_validation_rejects_superseded_provenance_in_current_evidence(
         "98dae41…",
         "e22c42085703fcdfaaa3f994334cc418a4e81e858187757edb5a33b8e2221e13",
         "e22c420…",
+        "a3e3179bafb8050598cc5512d56e0c7661318c64",
+        "a3e3179…",
+        "30499178838",
+        "90734790003",
+        "90735121608",
     ),
 )
 def test_validation_rejects_current_capture_provenance_in_historical_evidence(
@@ -461,11 +499,15 @@ def test_validation_rejects_unexpected_current_hosted_provenance(
         _assert_validation_matches_current_capture(polluted_validation)
 
 
-def test_validation_requires_current_hosted_lane_to_remain_unverified_pre_ci() -> None:
+@pytest.mark.parametrize("non_pass_status", ("CANCELLED", "PENDING"))
+def test_validation_requires_both_current_jobs_to_report_pass(
+    non_pass_status: str,
+) -> None:
     validation = _read("docs/validation.md")
     polluted_validation = validation.replace(
-        "No green current Task30 GitHub Actions run or job has been observed.",
-        "A green current Task30 GitHub Actions run has been observed.",
+        "reported `PASS`",
+        f"reported `{non_pass_status}`",
+        1,
     )
 
     with pytest.raises(AssertionError):

@@ -36,8 +36,20 @@ results from any sibling branch.
 - The in-app Browser capture attempt failed closed as unavailable. The exact local
   final-build lane then used the installed Google Chrome binary recorded by the
   manifest; evidence is not borrowed between browser tools.
-- No green current Task30 GitHub Actions run or job has been observed.
-- No current Task30 packaged container smoke was executed.
+- Hosted validation successor:
+  `a3e3179bafb8050598cc5512d56e0c7661318c64`
+- GitHub Actions:
+  [run 30499178838](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30499178838)
+- Result: `verify`
+  ([job 90734790003](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30499178838/job/90734790003))
+  reported `PASS`; `container-smoke`
+  ([job 90735121608](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30499178838/job/90735121608))
+  reported `PASS`. Both job annotation APIs returned `[]`.
+- Hosted `verify` passed the canonical `npm run check`, deterministic stub smoke,
+  OpenAPI verification, and the history-aware secret scan.
+- Hosted `container-smoke` built the packaged Docker image, confirmed runtime user
+  `10001:10001`, and passed the offline network-none `deterministic-qa` and
+  `deployed-readonly` profiles.
 
 ## Per-SHA proof matrix
 
@@ -47,19 +59,19 @@ results from any sibling branch.
 | Local final-build captures | [`docs/assets/final/manifest.json`](assets/final/manifest.json); six provenance-checked PNGs under [`docs/assets/final`](assets/final) | **Verified locally** on capture source `96543ff…` in Google Chrome at 1440×1024 and 390×844; not container, deployment, live OpenAI, or release proof |
 | Live OpenAI | [`live-validation.md`](live-validation.md) records only a redacted invalid-key result | **Blocked / Unverified**; no valid `OPENAI_API_KEY`, one-run trace, or three consecutive successes |
 | Local Docker | No Docker-family runtime is installed on this Mac | **Unverified locally** |
-| GitHub CI/container | No current Task30 run or packaged container job has been observed | **Unverified** for this source/capture checkpoint; superseded Task29 proof is retained only below and is not inherited |
+| GitHub CI/container | Run 30499178838; `verify` and packaged `container-smoke` | **Verified** on hosted successor `a3e3179…`; both jobs passed with empty annotations, but this is not local Docker, browser capture, public deployment, live OpenAI, or release proof |
 | Public deployment | No public application origin | **Blocked / Unverified** |
 | Tag/release | No release tag or GitHub release | **Blocked / Unverified** |
 
 ## Hosted container evidence boundary
 
-There is no current Task30 hosted-container result. The superseded historical section
-records an earlier packaged Docker image result, but that evidence is not current for
-this source/capture checkpoint. Current local source and capture evidence does not
-prove local Docker, public deployment or browser URL, live OpenAI, real provider
-execution, container replacement or restart, long-lived `/data` volume persistence,
-target-host durability/networking, abrupt host-loss or backup, concurrent
-multi-container SQLite, tag or release.
+The current hosted container job proves a packaged Docker image build, runtime user
+`10001:10001`, and the offline network-none `deterministic-qa` and
+`deployed-readonly` profiles. It does not prove local Docker, browser capture, public
+deployment or browser URL, live OpenAI, real provider execution, container
+replacement or restart, long-lived `/data` volume persistence, target-host
+durability/networking, abrupt host-loss or backup, concurrent multi-container SQLite,
+tag or release.
 
 ## Capture contract
 
