@@ -38,10 +38,7 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     normalized_current_evidence = " ".join(current_evidence.split())
 
     assert manifest["sourceCommit"] in current_evidence
-    current_activation = "98dae414b3cdd36ee25d0dad3fe78257f3f4c135"
-    current_hosted_sha = "a3e3179bafb8050598cc5512d56e0c7661318c64"
-    current_run = "30499178838"
-    current_jobs = ("90734790003", "90735121608")
+    current_activation = "b4c1bcbd70ff22ce3ac2b8a1de3828b7ce691afe"
     superseded_failed_attempt = (
         "30206582233",
         "89805619343",
@@ -51,15 +48,11 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     assert runtime_input["digest"] in current_evidence
     for current_identifier in (
         manifest["sourceCommit"],
-        "96543ff…",
+        "c446f05…",
         current_activation,
-        "98dae41…",
+        "b4c1bcb…",
         runtime_input["digest"],
-        "e22c420…",
-        current_hosted_sha,
-        "a3e3179…",
-        current_run,
-        *current_jobs,
+        "3bb9737…",
     ):
         assert current_identifier not in historical_evidence
     assert f"{len(runtime_input['paths'])} runtime paths" in current_evidence
@@ -92,20 +85,27 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
         assert match is not None
         return " ".join(match.group(0).split())
 
-    pre_capture_gate = current_bullet("Pre-capture gates on clean source")
+    red_evidence = current_bullet("Task31 RED evidence")
+    for red_fact in (
+        "wrong response media",
+        "two duplicate-header bypasses",
+    ):
+        assert red_fact in red_evidence
+
+    pre_capture_gate = current_bullet("Pre-capture Task31 gates on clean source")
     assert manifest["sourceCommit"] in pre_capture_gate
     for pre_capture_fact in (
-        "targeted Task30 matrix passed 142 tests",
-        "19 web test files / 315 tests",
+        "focused client matrix passed 120 tests",
+        "19 web test files / 345 tests",
         "TypeScript/Vite",
+        "diff checks",
     ):
         assert pre_capture_fact in pre_capture_gate
     for post_activation_only_fact in (
-        "671 Python tests",
+        "695 Python tests",
         "3 warnings",
         "Ruff",
         "strict MyPy",
-        "`npm run check`",
         "`capture_manifest_valid`",
     ):
         assert post_activation_only_fact not in pre_capture_gate
@@ -113,37 +113,60 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     post_activation_gate = current_bullet("After activation")
     assert current_activation in post_activation_gate
     for post_activation_fact in (
-        "current pre-CI check on the identical working tree",
-        "`npm run check`",
+        "clean canonical current-tree gate passed",
         "29 capture contracts",
         "`capture_manifest_valid`",
-        "19 web test files / 315 tests",
+        "19 web test files / 345 tests",
         "TypeScript/Vite build",
         "Ruff",
         "strict MyPy over 35 source files",
-        "671 Python tests with 3 warnings in 106.82s",
+        "695 Python tests with 3 warnings in 179.85s",
         "one Starlette TestClient deprecation and two multiprocessing fork warnings",
     ):
         assert post_activation_fact in post_activation_gate
-    assert "targeted Task30 matrix passed 142 tests" not in post_activation_gate
+    assert "focused client matrix passed 120 tests" not in post_activation_gate
+    assert "stale release-doc contract failure" not in post_activation_gate
+    assert "Python count remains pending" not in post_activation_gate
 
-    separate_current_gate = current_bullet("Separate current pre-CI gates")
-    for separate_gate_fact in (
-        "deterministic stub and local single-process production smokes",
-        "OpenAPI freshness",
-        "history-aware secret scan",
-        "diff checks",
-        "focused release-doc contract passed 88/88",
-        "build, static/API, SSE, decision, session, and bounded shutdown",
-        "independent specification and quality reviews passed with no P0-P2",
+    review_gate = current_bullet("Independent Task31 review")
+    for review_fact in (
+        "specification and quality reviews passed with no P0-P3",
+        "28 adversarial cases with zero mismatches",
+        "visual review passed with no P0-P3",
     ):
-        assert separate_gate_fact in separate_current_gate
+        assert review_fact in review_gate
 
     for observed_current_fact in (
         "29 capture contracts",
-        "in-app Browser capture attempt failed closed as unavailable",
+        "Google Chrome 150.0.7871.187",
     ):
         assert observed_current_fact in normalized_current_evidence
+
+    json_media_heading = "## JSON response media proof boundary"
+    json_media_end_heading = "## Terminal evidence retry proof boundary"
+    assert json_media_heading in current_evidence
+    assert json_media_end_heading in current_evidence
+    json_media_evidence = current_evidence.split(
+        json_media_heading,
+        maxsplit=1,
+    )[1].split(
+        json_media_end_heading,
+        maxsplit=1,
+    )[0]
+    normalized_json_media_evidence = " ".join(json_media_evidence.split())
+    for required_json_media_fact in (
+        "exactly one `Content-Type` field",
+        "case-insensitive `application/json` media type",
+        "valid no-comma token or quoted-string parameters",
+        "missing, wrong, malformed, comma-joined, duplicate parameters, and "
+        "split-quote values",
+        "cancels the unlocked wrong-media response body without waiting",
+        "typed IDs, fallback, retry metadata, and provenance remain inactive",
+        "SSE behavior is unchanged",
+        "ordinary `500` handling and the Task30 exact `503` retry contract remain "
+        "preserved",
+    ):
+        assert required_json_media_fact in normalized_json_media_evidence
 
     terminal_heading = "## Terminal evidence retry proof boundary"
     terminal_end_heading = "## Async SQLite proof boundary"
@@ -173,52 +196,26 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
         r"https://github\.com/[^)\s]+/actions/runs/\d+(?:/job/\d+)?",
         current_evidence,
     )
-    actions_base = (
-        "https://github.com/charlie2233/backchannel-agent-support/actions/runs"
-    )
-    current_run_url = f"{actions_base}/{current_run}"
-    current_job_urls = tuple(
-        f"{current_run_url}/job/{job_id}" for job_id in current_jobs
-    )
-    assert set(observed_action_urls) == {
-        current_run_url,
-        *current_job_urls,
-    }
-    assert len(observed_action_urls) == 3
-    assert set(re.findall(r"/actions/runs/(\d+)", current_evidence)) == {current_run}
-    assert set(re.findall(r"/job/(\d+)", current_evidence)) == set(current_jobs)
+    assert observed_action_urls == []
+    assert re.findall(r"/actions/runs/(\d+)", current_evidence) == []
+    assert re.findall(r"/job/(\d+)", current_evidence) == []
     hosted_successor_matches = re.findall(
         r"Hosted validation successor:\s+`([0-9a-f]{40})`",
         current_evidence,
     )
-    assert hosted_successor_matches == [current_hosted_sha]
-    assert current_evidence.count(f"[run {current_run}]({current_run_url})") == 1
-    for job_id, job_url in zip(current_jobs, current_job_urls, strict=True):
-        assert current_evidence.count(f"[job {job_id}]({job_url})") == 1
-    pass_block_pattern = (
-        rf"Result: `verify`\s+\(\[job {current_jobs[0]}\]"
-        rf"\({re.escape(current_job_urls[0])}\)\)\s+reported `PASS`; "
-        rf"`container-smoke`\s+\(\[job {current_jobs[1]}\]"
-        rf"\({re.escape(current_job_urls[1])}\)\)\s+reported `PASS`\."
-    )
-    assert re.search(pass_block_pattern, current_evidence)
-    for required_current_hosted_fact in (
-        "Both job annotation APIs returned `[]`",
-        "canonical `npm run check`",
-        "deterministic stub smoke",
-        "OpenAPI verification",
-        "history-aware secret scan",
-        "packaged Docker image",
-        "runtime user `10001:10001`",
-        "offline network-none `deterministic-qa` and `deployed-readonly` profiles",
+    assert hosted_successor_matches == []
+    for required_current_boundary in (
+        "No green current Task31 GitHub Actions run or job has been observed.",
+        "No current Task31 packaged container smoke was executed.",
+        "**Unverified** for this source/capture checkpoint",
     ):
-        assert required_current_hosted_fact in normalized_current_evidence
+        assert required_current_boundary in current_evidence
     for forbidden_current_claim in (
+        "Both job annotation APIs returned `[]`",
+        "reported `PASS`",
         "reported `FAILURE`",
         "reported `SKIPPED`",
-        "No green current Task30 GitHub Actions run or job has been observed.",
-        "No current Task30 packaged container smoke was executed.",
-        "**Unverified** for this source/capture checkpoint",
+        "Hosted validation successor:",
     ):
         assert forbidden_current_claim not in current_evidence
     for superseded_identifier in superseded_failed_attempt:
@@ -237,6 +234,52 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
         assert unproved_current_boundary in normalized_current_evidence
     assert "CI did not execute the browser capture" in current_evidence
 
+    task30_capture = "96543fff62bb5d0a3c0f8a0464e9a07bf9c54568"
+    task30_activation = "98dae414b3cdd36ee25d0dad3fe78257f3f4c135"
+    task30_digest = (
+        "e22c42085703fcdfaaa3f994334cc418a4e81e858187757edb5a33b8e2221e13"
+    )
+    task30_pre_ci_successor = "a3e3179bafb8050598cc5512d56e0c7661318c64"
+    task30_pre_ci_run = "30499178838"
+    task30_pre_ci_jobs = ("90734790003", "90735121608")
+    task30_final_docs_tip = "9e19b12de072e55932d1b32e24987576284ac4f0"
+    task30_final_run = "30499500934"
+    task30_final_jobs = ("90735804461", "90736149754")
+    task30_history_heading = (
+        "### Terminal-retry capture and hosted baselines (superseded)"
+    )
+    task30_history_end_heading = (
+        "### Async SQLite capture and hosted baseline (superseded)"
+    )
+    assert task30_history_heading in historical_evidence
+    assert task30_history_end_heading in historical_evidence
+    task30_history = historical_evidence.split(
+        task30_history_heading,
+        maxsplit=1,
+    )[1].split(
+        task30_history_end_heading,
+        maxsplit=1,
+    )[0]
+    for exact_historical_fact in (
+        "Both pre-CI jobs passed and both pre-CI job annotation APIs returned `[]`",
+        "Both final-tip jobs passed and both final-tip job annotation APIs returned `[]`",
+    ):
+        assert exact_historical_fact in task30_history
+    actions_base = (
+        "https://github.com/charlie2233/backchannel-agent-support/actions/runs"
+    )
+    historical_action_urls = {
+        f"{actions_base}/{task30_pre_ci_run}",
+        *(f"{actions_base}/{task30_pre_ci_run}/job/{job}" for job in task30_pre_ci_jobs),
+        f"{actions_base}/{task30_final_run}",
+        *(f"{actions_base}/{task30_final_run}/job/{job}" for job in task30_final_jobs),
+    }
+    assert set(
+        re.findall(
+            r"https://github\.com/[^)\s]+/actions/runs/\d+(?:/job/\d+)?",
+            task30_history,
+        )
+    ) == historical_action_urls
     task29_capture = "8d0a896c753c4c60894301a20a3866bbbfa1e76f"
     task29_activation = "cca97a8e75d52a26889d3bbb66740756041d9caf"
     task29_successor = "e188202a4b0612a66503fda2b6ee1a3c89ec7b65"
@@ -271,6 +314,20 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     for historical_identifier in (
         "85e1e8ec9147242adca311c4ba10ea8c1c3008dc",
         "85e1e8e…",
+        task30_capture,
+        "96543ff…",
+        task30_activation,
+        "98dae41…",
+        task30_digest,
+        "e22c420…",
+        task30_pre_ci_successor,
+        "a3e3179…",
+        task30_pre_ci_run,
+        *task30_pre_ci_jobs,
+        task30_final_docs_tip,
+        "9e19b12…",
+        task30_final_run,
+        *task30_final_jobs,
         task29_capture,
         "8d0a896…",
         task29_activation,
@@ -312,6 +369,20 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     ):
         assert historical_identifier not in current_evidence
     for required_historical_identifier in (
+        task30_capture,
+        "96543ff…",
+        task30_activation,
+        "98dae41…",
+        task30_digest,
+        "e22c420…",
+        task30_pre_ci_successor,
+        "a3e3179…",
+        task30_pre_ci_run,
+        *task30_pre_ci_jobs,
+        task30_final_docs_tip,
+        "9e19b12…",
+        task30_final_run,
+        *task30_final_jobs,
         task29_capture,
         "8d0a896…",
         task29_activation,
@@ -364,6 +435,22 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     (
         "85e1e8ec9147242adca311c4ba10ea8c1c3008dc",
         "85e1e8e…",
+        "96543fff62bb5d0a3c0f8a0464e9a07bf9c54568",
+        "96543ff…",
+        "98dae414b3cdd36ee25d0dad3fe78257f3f4c135",
+        "98dae41…",
+        "e22c42085703fcdfaaa3f994334cc418a4e81e858187757edb5a33b8e2221e13",
+        "e22c420…",
+        "a3e3179bafb8050598cc5512d56e0c7661318c64",
+        "a3e3179…",
+        "30499178838",
+        "90734790003",
+        "90735121608",
+        "9e19b12de072e55932d1b32e24987576284ac4f0",
+        "9e19b12…",
+        "30499500934",
+        "90735804461",
+        "90736149754",
         "8d0a896c753c4c60894301a20a3866bbbfa1e76f",
         "8d0a896…",
         "cca97a8e75d52a26889d3bbb66740756041d9caf",
@@ -430,17 +517,12 @@ def test_validation_rejects_superseded_provenance_in_current_evidence(
 @pytest.mark.parametrize(
     "current_identifier",
     (
-        "96543fff62bb5d0a3c0f8a0464e9a07bf9c54568",
-        "96543ff…",
-        "98dae414b3cdd36ee25d0dad3fe78257f3f4c135",
-        "98dae41…",
-        "e22c42085703fcdfaaa3f994334cc418a4e81e858187757edb5a33b8e2221e13",
-        "e22c420…",
-        "a3e3179bafb8050598cc5512d56e0c7661318c64",
-        "a3e3179…",
-        "30499178838",
-        "90734790003",
-        "90735121608",
+        "c446f05adfb836539ddbaa74a41502034c910092",
+        "c446f05…",
+        "b4c1bcbd70ff22ce3ac2b8a1de3828b7ce691afe",
+        "b4c1bcb…",
+        "3bb9737a483fc90e50d5a6158bf0c61c1807e6510d22c9bf6d88e142d21ff5d9",
+        "3bb9737…",
     ),
 )
 def test_validation_rejects_current_capture_provenance_in_historical_evidence(
@@ -499,15 +581,11 @@ def test_validation_rejects_unexpected_current_hosted_provenance(
         _assert_validation_matches_current_capture(polluted_validation)
 
 
-@pytest.mark.parametrize("non_pass_status", ("CANCELLED", "PENDING"))
-def test_validation_requires_both_current_jobs_to_report_pass(
-    non_pass_status: str,
-) -> None:
+def test_validation_requires_current_hosted_lane_to_remain_unverified_pre_ci() -> None:
     validation = _read("docs/validation.md")
     polluted_validation = validation.replace(
-        "reported `PASS`",
-        f"reported `{non_pass_status}`",
-        1,
+        "No green current Task31 GitHub Actions run or job has been observed.",
+        "A green current Task31 GitHub Actions run has been observed.",
     )
 
     with pytest.raises(AssertionError):
@@ -518,18 +596,18 @@ def test_validation_requires_both_current_jobs_to_report_pass(
     ("bullet_prefix", "original", "replacement"),
     (
         (
-            "Pre-capture gates on clean source",
-            "TypeScript/Vite.",
-            "TypeScript/Vite and 671 Python tests with 3 warnings.",
+            "Pre-capture Task31 gates on clean source",
+            "TypeScript/Vite, and diff checks.",
+            "TypeScript/Vite, diff checks, and 695 Python tests with 3 warnings.",
         ),
         (
             "After activation",
-            "671 Python tests with 3 warnings in 106.82s",
+            "695 Python tests with 3 warnings in 179.85s",
             "an unspecified Python suite",
         ),
         (
             "After activation",
-            "98dae414b3cdd36ee25d0dad3fe78257f3f4c135",
+            "b4c1bcbd70ff22ce3ac2b8a1de3828b7ce691afe",
             "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
         ),
     ),
@@ -551,6 +629,67 @@ def test_validation_rejects_evidence_timing_mutation(
     assert original_pattern.search(bullet)
     polluted_bullet = original_pattern.sub(replacement, bullet, count=1)
     polluted_validation = validation.replace(bullet, polluted_bullet, 1)
+
+    with pytest.raises(AssertionError):
+        _assert_validation_matches_current_capture(polluted_validation)
+
+
+@pytest.mark.parametrize(
+    ("original", "replacement"),
+    (
+        ("exactly one `Content-Type` field", "multiple `Content-Type` fields"),
+        (
+            "case-insensitive `application/json` media type",
+            "case-sensitive `application/json` media type",
+        ),
+        (
+            "valid no-comma token or quoted-string parameters",
+            "arbitrary comma-joined parameters",
+        ),
+        (
+            "missing, wrong, malformed, comma-joined, duplicate parameters, and "
+            "split-quote values",
+            "only wrong media types",
+        ),
+        (
+            "cancels the unlocked wrong-media response body without waiting",
+            "waits for the wrong-media response body",
+        ),
+        (
+            "typed IDs, fallback, retry metadata, and provenance remain inactive",
+            "typed IDs and retry metadata activate",
+        ),
+        ("SSE behavior is unchanged", "SSE behavior also uses this parser"),
+        (
+            "ordinary `500` handling and the Task30 exact `503` retry contract remain "
+            "preserved",
+            "ordinary errors share the new media failure",
+        ),
+    ),
+)
+def test_validation_rejects_json_media_contract_mutation(
+    original: str,
+    replacement: str,
+) -> None:
+    validation = _read("docs/validation.md")
+    media_heading = "## JSON response media proof boundary"
+    media_end_heading = "## Terminal evidence retry proof boundary"
+    media_evidence = validation.split(media_heading, maxsplit=1)[1].split(
+        media_end_heading,
+        maxsplit=1,
+    )[0]
+    original_pattern = re.compile(re.escape(original).replace(r"\ ", r"\s+"))
+    assert original_pattern.search(media_evidence)
+    polluted_media_evidence = original_pattern.sub(
+        replacement,
+        media_evidence,
+        count=1,
+    )
+    polluted_validation = validation.replace(
+        media_evidence,
+        polluted_media_evidence,
+        1,
+    )
 
     with pytest.raises(AssertionError):
         _assert_validation_matches_current_capture(polluted_validation)
@@ -804,7 +943,11 @@ def test_release_docs_cover_architecture_protocol_and_evidence_boundaries() -> N
     validation = _read("docs/validation.md")
     assert "`codex/backchannel-v0.3`" in validation
     assert "## Current capture and evidence activation" in validation
+    assert "## JSON response media proof boundary" in validation
     assert "## Superseded historical hosted baseline" in validation
+    assert (
+        "### Terminal-retry capture and hosted baselines (superseded)" in validation
+    )
     assert "### Async SQLite capture and hosted baseline (superseded)" in validation
     assert "### Immediate prior capture and hosted baseline (superseded)" in validation
     assert "### Prior capture and hosted baseline (superseded)" in validation
