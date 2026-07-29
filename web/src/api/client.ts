@@ -136,7 +136,134 @@ function unexpectedResponse(status: number): PublicApiError {
   });
 }
 
+const httpTokenPattern = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+
+function trimOptionalWhitespace(value: string): string {
+  return value.replace(/^[\t ]+|[\t ]+$/g, "");
+}
+
+function isHttpQuotedString(value: string): boolean {
+  if (
+    value.length < 2 ||
+    value[0] !== '"' ||
+    value[value.length - 1] !== '"'
+  ) {
+    return false;
+  }
+  for (let index = 1; index < value.length - 1; index += 1) {
+    const character = value[index] ?? "";
+    const codePoint = character.charCodeAt(0);
+    if (character === "\\") {
+      index += 1;
+      if (index >= value.length - 1) {
+        return false;
+      }
+      const escapedCodePoint = (value[index] ?? "").charCodeAt(0);
+      if (
+        escapedCodePoint !== 0x09 &&
+        (escapedCodePoint < 0x20 || escapedCodePoint === 0x7f)
+      ) {
+        return false;
+      }
+      continue;
+    }
+    if (
+      character === '"' ||
+      (codePoint !== 0x09 && (codePoint < 0x20 || codePoint === 0x7f))
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function splitContentTypeSections(value: string): string[] | null {
+  const sections: string[] = [];
+  let sectionStart = 0;
+  let inQuotes = false;
+  let escaped = false;
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index] ?? "";
+    if (character === ",") {
+      return null;
+    }
+    if (inQuotes) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (character === "\\") {
+        escaped = true;
+      } else if (character === '"') {
+        inQuotes = false;
+      }
+      continue;
+    }
+    if (character === '"') {
+      inQuotes = true;
+    } else if (character === ";") {
+      sections.push(value.slice(sectionStart, index));
+      sectionStart = index + 1;
+    }
+  }
+  if (inQuotes || escaped) {
+    return null;
+  }
+  sections.push(value.slice(sectionStart));
+  return sections;
+}
+
+function hasJsonContentType(response: Response): boolean {
+  const contentType = response.headers.get("Content-Type");
+  if (contentType === null) {
+    return false;
+  }
+  const sections = splitContentTypeSections(contentType);
+  if (
+    sections === null ||
+    trimOptionalWhitespace(sections.shift() ?? "").toLowerCase() !==
+      "application/json"
+  ) {
+    return false;
+  }
+  const parameterNames = new Set<string>();
+  for (const rawParameter of sections) {
+    const parameter = trimOptionalWhitespace(rawParameter);
+    const equalsIndex = parameter.indexOf("=");
+    if (equalsIndex < 1) {
+      return false;
+    }
+    const name = trimOptionalWhitespace(
+      parameter.slice(0, equalsIndex),
+    );
+    const value = trimOptionalWhitespace(
+      parameter.slice(equalsIndex + 1),
+    );
+    const normalizedName = name.toLowerCase();
+    if (
+      !httpTokenPattern.test(name) ||
+      parameterNames.has(normalizedName) ||
+      (!httpTokenPattern.test(value) && !isHttpQuotedString(value))
+    ) {
+      return false;
+    }
+    parameterNames.add(normalizedName);
+  }
+  return true;
+}
+
+function cancelUnlockedResponseBody(response: Response): void {
+  if (response.body === null || response.body.locked) {
+    return;
+  }
+  void response.body.cancel().catch(() => undefined);
+}
+
 async function successfulJson(response: Response): Promise<unknown> {
+  if (!hasJsonContentType(response)) {
+    cancelUnlockedResponseBody(response);
+    throw unexpectedResponse(response.status);
+  }
   try {
     return await response.json();
   } catch {
@@ -171,6 +298,10 @@ async function failedRequest(
     expectedRecoveryId?: string | null;
   } = {},
 ): Promise<PublicApiError> {
+  if (!hasJsonContentType(response)) {
+    cancelUnlockedResponseBody(response);
+    return unexpectedResponse(response.status);
+  }
   let body: unknown;
   try {
     body = await response.json();
@@ -205,10 +336,6 @@ async function failedRequest(
     return unexpectedResponse(response.status);
   }
   const code = error.code as PublicErrorCode;
-  const contentType = response.headers.get("Content-Type");
-  const isJsonResponse =
-    contentType !== null &&
-    contentType.split(";", 1)[0]?.trim().toLowerCase() === "application/json";
   const isExactRecoveryStoreUnavailable =
     options.allowRecoveryStoreUnavailable === true &&
     code === "internal_error" &&
@@ -218,7 +345,7 @@ async function failedRequest(
     error.retryAfterSeconds === 1 &&
     error.fallback === null &&
     response.headers.get("Retry-After") === "1" &&
-    isJsonResponse;
+    hasJsonContentType(response);
   if (
     options.allowRecoveryStoreUnavailable === true &&
     code === "internal_error" &&

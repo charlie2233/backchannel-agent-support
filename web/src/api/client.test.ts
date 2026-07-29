@@ -22,6 +22,28 @@ function jsonResponse(body: unknown): Response {
   });
 }
 
+function responseWithContentType(
+  body: unknown,
+  contentType: string | null,
+  status = 200,
+): Response {
+  const response = new Response(JSON.stringify(body), {
+    status,
+    headers:
+      contentType === null ? undefined : { "Content-Type": contentType },
+  });
+  if (contentType === null) {
+    response.headers.delete("Content-Type");
+  }
+  return response;
+}
+
+function appendSplitQuotedContentType(response: Response): Response {
+  response.headers.set("Content-Type", 'application/json; x="first');
+  response.headers.append("Content-Type", 'text/html"');
+  return response;
+}
+
 function publicErrorResponse(
   code: string,
   message: string,
@@ -308,6 +330,450 @@ describe("health transport", () => {
       signal,
       cache: "no-store",
     });
+  });
+});
+
+describe("JSON response media contracts", () => {
+  const decision = {
+    decision: "decline" as const,
+    clientDecisionId: "decision-json-media-contract",
+    remedyId: "remedy-json-media-contract",
+    remedyDigest: digest,
+    toolCallId: "call-json-media-contract",
+  };
+  const decisionResponse = {
+    clientDecisionId: decision.clientDecisionId,
+    recoveryId,
+    decision: "decline",
+    status: "closed_without_action",
+    decisionRemedyDigest: digest,
+    executionStarted: false,
+  };
+  const healthResponse = {
+    backend: "stub",
+    liveReady: false,
+    sdkStubReady: true,
+    providerBoundary: "demo_adapter_only",
+  };
+  const successCases: ReadonlyArray<
+    readonly [string, () => Promise<unknown>, unknown]
+  > = [
+    ["health", () => getHealth(), healthResponse],
+    ["recovery", () => getRecovery(recoveryId), replayRecoverySnapshot()],
+    ["receipt", () => getReceipt(recoveryId), cancellationReceipt()],
+    [
+      "creation",
+      () => createRecovery("hotel", "replay_fixture"),
+      replayRecoverySnapshot(),
+    ],
+    ["decision", () => postDecision(recoveryId, decision), decisionResponse],
+  ];
+
+  it.each([
+    ["missing", null],
+    ["HTML", "text/html"],
+    ["plain text", "text/plain"],
+    ["JSONP", "application/jsonp"],
+    ["malformed", "application-json"],
+    [
+      "conflicting duplicate",
+      "application/json; charset=utf-8, text/html",
+    ],
+    ["empty parameter", "application/json;"],
+    ["valueless parameter", "application/json; charset"],
+    ["empty parameter value", "application/json; charset="],
+    [
+      "duplicate parameter",
+      "application/json; charset=utf-8; CHARSET=utf-16",
+    ],
+  ] as const)(
+    "rejects every successful JSON endpoint with %s media",
+    async (_mediaLabel, contentType) => {
+      for (const [_endpoint, request, body] of successCases) {
+        vi.stubGlobal(
+          "fetch",
+          vi.fn().mockResolvedValue(
+            responseWithContentType(body, contentType),
+          ),
+        );
+
+        const failure = await request().catch((error: unknown) => error);
+
+        expect(failure).toBeInstanceOf(PublicApiError);
+        expect(failure).toMatchObject({
+          code: "unexpected_response",
+          status: 200,
+          requestId: null,
+          recoveryId: null,
+          retryAfterSeconds: null,
+          fallback: null,
+        });
+      }
+    },
+  );
+
+  it("rejects conflicting Content-Type fields joined by native Headers", async () => {
+    const response = jsonResponse(healthResponse);
+    response.headers.append("Content-Type", "text/html");
+    expect(response.headers.get("Content-Type")).toBe(
+      "application/json, text/html",
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+
+    await expect(getHealth()).rejects.toMatchObject({
+      code: "unexpected_response",
+      status: 200,
+      requestId: null,
+      recoveryId: null,
+      retryAfterSeconds: null,
+      fallback: null,
+    });
+  });
+
+  it("rejects native duplicate fields that join into a quoted success parameter", async () => {
+    const response = appendSplitQuotedContentType(
+      jsonResponse(healthResponse),
+    );
+    expect(response.headers.get("Content-Type")).toBe(
+      'application/json; x="first, text/html"',
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+
+    await expect(getHealth()).rejects.toMatchObject({
+      code: "unexpected_response",
+      status: 200,
+      requestId: null,
+      recoveryId: null,
+      retryAfterSeconds: null,
+      fallback: null,
+    });
+  });
+
+  it.each([
+    ["token parameter", "Application/JSON; charset=utf-8"],
+    [
+      "quoted parameter with optional whitespace",
+      ' Application/JSON ; Charset = "UTF-8" ',
+    ],
+  ])(
+    "accepts application/json with a valid %s on every JSON endpoint",
+    async (_label, contentType) => {
+      for (const [_endpoint, request, body] of successCases) {
+        vi.stubGlobal(
+          "fetch",
+          vi.fn().mockResolvedValue(
+            responseWithContentType(body, contentType),
+          ),
+        );
+
+        await expect(request()).resolves.toBeDefined();
+      }
+    },
+  );
+
+  it.each([
+    [
+      "conflicting duplicate media",
+      "application/json; charset=utf-8, text/html",
+    ],
+    ["empty parameter", "application/json;"],
+    ["valueless parameter", "application/json; charset"],
+    ["empty parameter value", "application/json; charset="],
+    [
+      "duplicate parameter",
+      "application/json; charset=utf-8; CHARSET=utf-16",
+    ],
+  ])(
+    "rejects public errors with %s without activating typed metadata",
+    async (_label, contentType) => {
+      const endpointCases: ReadonlyArray<
+        readonly [string, () => Promise<unknown>, string | null]
+      > = [
+        ["health", () => getHealth(), null],
+        ["recovery", () => getRecovery(recoveryId), recoveryId],
+        ["receipt", () => getReceipt(recoveryId), recoveryId],
+        [
+          "creation",
+          () => createRecovery("hotel", "replay_fixture"),
+          null,
+        ],
+        ["decision", () => postDecision(recoveryId, decision), recoveryId],
+      ];
+
+      for (const [_endpoint, request, errorRecoveryId] of endpointCases) {
+        const response = publicErrorResponse(
+          "not_found",
+          "The requested resource was not found.",
+          404,
+          null,
+          errorRecoveryId,
+        );
+        response.headers.set("Content-Type", contentType);
+        vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+
+        const failure = await request().catch(
+          (error: unknown) => error,
+        );
+
+        expect(failure).toBeInstanceOf(PublicApiError);
+        expect(failure).toMatchObject({
+          code: "unexpected_response",
+          status: 404,
+          requestId: null,
+          recoveryId: null,
+          retryAfterSeconds: null,
+          fallback: null,
+        });
+      }
+    },
+  );
+
+  it("rejects wrong-media public errors without activating typed metadata", async () => {
+    const endpointCases: ReadonlyArray<
+      readonly [string, () => Promise<unknown>, string | null]
+    > = [
+      ["health", () => getHealth(), null],
+      ["recovery", () => getRecovery(recoveryId), recoveryId],
+      ["receipt", () => getReceipt(recoveryId), recoveryId],
+      [
+        "creation",
+        () => createRecovery("hotel", "replay_fixture"),
+        null,
+      ],
+      ["decision", () => postDecision(recoveryId, decision), recoveryId],
+    ];
+
+    for (const [_endpoint, request, errorRecoveryId] of endpointCases) {
+      const response = publicErrorResponse(
+        "not_found",
+        "The requested resource was not found.",
+        404,
+        null,
+        errorRecoveryId,
+      );
+      response.headers.set("Content-Type", "text/html");
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+
+      const failure = await request().catch((error: unknown) => error);
+
+      expect(failure).toBeInstanceOf(PublicApiError);
+      expect(failure).toMatchObject({
+        code: "unexpected_response",
+        status: 404,
+        requestId: null,
+        recoveryId: null,
+        retryAfterSeconds: null,
+        fallback: null,
+      });
+    }
+  });
+
+  it("does not activate fallback metadata from a wrong-media public error", async () => {
+    const response = publicErrorResponse(
+      "live_cooldown",
+      "Live mode is cooling down for this demo identity.",
+      429,
+      {
+        kind: "show_replay_fixture",
+        scenarioId: "hotel",
+        executionMode: "replay_fixture",
+      },
+    );
+    response.headers.set(
+      "Content-Type",
+      "application/json; charset=utf-8, text/plain",
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+
+    const failure = await createRecovery("hotel", "openai_live").catch(
+      (error: unknown) => error,
+    );
+
+    expect(failure).toMatchObject({
+      code: "unexpected_response",
+      status: 429,
+      requestId: null,
+      recoveryId: null,
+      retryAfterSeconds: null,
+      fallback: null,
+    });
+  });
+
+  it("rejects a native split-quote public error without trusting its metadata", async () => {
+    const response = appendSplitQuotedContentType(
+      publicErrorResponse(
+        "not_found",
+        "The requested resource was not found.",
+        404,
+        null,
+        recoveryId,
+      ),
+    );
+    expect(response.headers.get("Content-Type")).toBe(
+      'application/json; x="first, text/html"',
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+
+    const failure = await getRecovery(recoveryId).catch(
+      (error: unknown) => error,
+    );
+
+    expect(failure).toMatchObject({
+      code: "unexpected_response",
+      status: 404,
+      requestId: null,
+      recoveryId: null,
+      retryAfterSeconds: null,
+      fallback: null,
+    });
+  });
+
+  it("does not activate fallback metadata from native split-quote fields", async () => {
+    const response = appendSplitQuotedContentType(
+      publicErrorResponse(
+        "live_cooldown",
+        "Live mode is cooling down for this demo identity.",
+        429,
+        {
+          kind: "show_replay_fixture",
+          scenarioId: "hotel",
+          executionMode: "replay_fixture",
+        },
+      ),
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+
+    const failure = await createRecovery("hotel", "openai_live").catch(
+      (error: unknown) => error,
+    );
+
+    expect(failure).toMatchObject({
+      code: "unexpected_response",
+      status: 429,
+      requestId: null,
+      recoveryId: null,
+      retryAfterSeconds: null,
+      fallback: null,
+    });
+  });
+
+  it.each([
+    [
+      "conflicting duplicate media",
+      "application/json; charset=utf-8, text/plain",
+    ],
+    ["an empty parameter", "application/json;"],
+    ["a valueless parameter", "application/json; charset"],
+    [
+      "a duplicate parameter",
+      "application/json; charset=utf-8; CHARSET=utf-16",
+    ],
+  ])(
+    "does not activate Task30 retry metadata from %s",
+    async (_label, contentType) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(
+          storeUnavailableResponse({ contentType }),
+        ),
+      );
+
+      const failure = await getRecovery(recoveryId).catch(
+        (error: unknown) => error,
+      );
+
+      expect(failure).toMatchObject({
+        code: "unexpected_response",
+        status: 503,
+        requestId: null,
+        recoveryId: null,
+        retryAfterSeconds: null,
+        fallback: null,
+      });
+    },
+  );
+
+  it("does not activate Task30 retry metadata from native split-quote fields", async () => {
+    const response = appendSplitQuotedContentType(
+      storeUnavailableResponse(),
+    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+
+    const failure = await getRecovery(recoveryId).catch(
+      (error: unknown) => error,
+    );
+
+    expect(failure).toMatchObject({
+      code: "unexpected_response",
+      status: 503,
+      requestId: null,
+      recoveryId: null,
+      retryAfterSeconds: null,
+      fallback: null,
+    });
+  });
+
+  it("cancels an unlocked wrong-media body and settles without waiting for EOF", async () => {
+    const cancel = vi.fn(() =>
+      Promise.reject(new Error("wrong-media cancel rejection canary")),
+    );
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          new TextEncoder().encode(JSON.stringify(healthResponse)),
+        );
+      },
+      cancel,
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(body, {
+          status: 200,
+          headers: { "Content-Type": "text/plain" },
+        }),
+      ),
+    );
+
+    const outcome = await Promise.race([
+      getHealth().catch((error: unknown) => error),
+      new Promise<"timeout">((resolve) => {
+        setTimeout(() => resolve("timeout"), 50);
+      }),
+    ]);
+
+    expect(outcome).toBeInstanceOf(PublicApiError);
+    expect(outcome).toMatchObject({
+      code: "unexpected_response",
+      status: 200,
+    });
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it("does not infer live provenance from a wrong-media receipt body", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        responseWithContentType(
+          liveApprovedReceipt(),
+          "text/html; charset=utf-8",
+        ),
+      ),
+    );
+
+    const failure = await getReceipt(recoveryId).catch(
+      (error: unknown) => error,
+    );
+
+    expect(failure).toMatchObject({
+      code: "unexpected_response",
+      status: 200,
+      requestId: null,
+      recoveryId: null,
+    });
+    expect(JSON.stringify(failure)).not.toContain(
+      "gpt-5.6-luna-2026-07-15-returned",
+    );
   });
 });
 
