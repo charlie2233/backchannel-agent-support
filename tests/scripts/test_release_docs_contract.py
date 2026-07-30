@@ -36,12 +36,56 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
         maxsplit=1,
     )
     normalized_current_evidence = " ".join(current_evidence.split())
+    assert "718" not in current_evidence
+
+    hosted_scope_pattern = re.compile(
+        r"\b(?:CI|GitHub\s+Actions|workflow|verify\s+job|"
+        r"container(?:-smoke|\s+smoke|\s+job)?|packaged\s+Docker)\b",
+        flags=re.IGNORECASE,
+    )
+    positive_word_pattern = re.compile(
+        r"\b(?:pass|passed|passing|green|healthy|clean|cleanly|clear|"
+        r"succeed|succeeded|succeeding|success|successful|successfully|verified)\b"
+        r"|\b(?:completed|finished)\s+(?:cleanly|successfully)\b"
+        r"|\bwithout\s+(?:any\s+)?(?:failures?|errors?)\b"
+        r"|\b(?:no|zero)\s+(?:failures?|errors?)\b"
+        r"|\b(?:failure|error)-free\b",
+        flags=re.IGNORECASE,
+    )
+    current_evidence_sequences = (
+        tuple(line.strip() for line in current_evidence.splitlines() if line.strip()),
+        tuple(
+            sentence.strip()
+            for sentence in re.split(r"(?<=[.!?])\s+", normalized_current_evidence)
+            if sentence.strip()
+        ),
+    )
+    sanctioned_negative_units = (
+        "- No current Task32 GitHub Actions run or job has been observed.",
+        "- No current Task32 packaged container smoke was executed.",
+    )
+    for sanctioned_negative_unit in sanctioned_negative_units:
+        assert current_evidence.count(sanctioned_negative_unit) == 1
+    task32_pattern = re.compile(r"\bTask32\b", flags=re.IGNORECASE)
+    for evidence_sequence in current_evidence_sequences:
+        for index, evidence_unit in enumerate(evidence_sequence):
+            assert not (
+                hosted_scope_pattern.search(evidence_unit)
+                and positive_word_pattern.search(evidence_unit)
+            ), f"positive hosted-evidence claim: {evidence_unit.strip()}"
+            if (
+                task32_pattern.search(evidence_unit)
+                and hosted_scope_pattern.search(evidence_unit)
+            ):
+                adjacent_window = " ".join(
+                    evidence_sequence[max(0, index - 1) : index + 2]
+                )
+                assert not positive_word_pattern.search(
+                    adjacent_window
+                ), f"positive adjacent hosted-evidence claim: {adjacent_window.strip()}"
 
     assert manifest["sourceCommit"] in current_evidence
-    current_activation = "b4c1bcbd70ff22ce3ac2b8a1de3828b7ce691afe"
-    current_hosted_sha = "62c37d6261257ea3800335257e43ae45ed839c47"
-    current_run = "30501109833"
-    current_jobs = ("90740755548", "90741063564")
+    current_activation = "9de054e5131ad3f610902d0a7bd4bd97c5968c7a"
     superseded_failed_attempt = (
         "30206582233",
         "89805619343",
@@ -51,15 +95,11 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     assert runtime_input["digest"] in current_evidence
     for current_identifier in (
         manifest["sourceCommit"],
-        "c446f05…",
+        "a8057a8…",
         current_activation,
-        "b4c1bcb…",
+        "9de054e…",
         runtime_input["digest"],
-        "3bb9737…",
-        current_hosted_sha,
-        "62c37d6…",
-        current_run,
-        *current_jobs,
+        "a5fdc8a…",
     ):
         assert current_identifier not in historical_evidence
     assert f"{len(runtime_input['paths'])} runtime paths" in current_evidence
@@ -77,7 +117,7 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     }:
         assert f"{width}×{height}" in current_evidence
 
-    assert "`npm run capture:judge` reported `29 passed`" in current_evidence
+    assert "`npm run test:e2e` reported `29 passed`" in current_evidence
     assert (
         "Five PNGs changed and `mobile-consent.png` remained byte-identical"
         in current_evidence
@@ -92,24 +132,15 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
         assert match is not None
         return " ".join(match.group(0).split())
 
-    red_evidence = current_bullet("Task31 RED evidence")
-    for red_fact in (
-        "wrong response media",
-        "two duplicate-header bypasses",
-    ):
-        assert red_fact in red_evidence
-
-    pre_capture_gate = current_bullet("Pre-capture Task31 gates on clean source")
+    pre_capture_gate = current_bullet("Pre-capture Task32 gates on clean source")
     assert manifest["sourceCommit"] in pre_capture_gate
     for pre_capture_fact in (
-        "focused client matrix passed 120 tests",
-        "19 web test files / 345 tests",
-        "TypeScript/Vite",
-        "diff checks",
+        "focused SQLite permission matrix passed 23 tests",
+        "independent security review passed with no P0-P3 findings",
     ):
         assert pre_capture_fact in pre_capture_gate
     for post_activation_only_fact in (
-        "695 Python tests",
+        "717 passed",
         "3 warnings",
         "Ruff",
         "strict MyPy",
@@ -120,34 +151,60 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     post_activation_gate = current_bullet("After activation")
     assert current_activation in post_activation_gate
     for post_activation_fact in (
-        "clean canonical current-tree gate passed",
+        "every observed non-document canonical lane passed",
         "29 capture contracts",
         "`capture_manifest_valid`",
         "19 web test files / 345 tests",
         "TypeScript/Vite build",
         "Ruff",
         "strict MyPy over 35 source files",
-        "695 Python tests with 3 warnings in 179.85s",
-        "one Starlette TestClient deprecation and two multiprocessing fork warnings",
+        "717 passed plus one expected stale validation-doc contract failure",
+        "3 warnings",
+        "does not establish a final full-suite canonical result",
     ):
         assert post_activation_fact in post_activation_gate
-    assert "focused client matrix passed 120 tests" not in post_activation_gate
-    assert "stale release-doc contract failure" not in post_activation_gate
-    assert "Python count remains pending" not in post_activation_gate
+    assert "focused SQLite permission matrix passed 23 tests" not in post_activation_gate
 
-    review_gate = current_bullet("Independent Task31 review")
-    for review_fact in (
-        "specification and quality reviews passed with no P0-P3",
-        "28 adversarial cases with zero mismatches",
-        "visual review passed with no P0-P3",
-    ):
-        assert review_fact in review_gate
+    review_gate = current_bullet("Independent Task32 visual review")
+    assert "passed with no P0-P3 findings" in review_gate
 
     for observed_current_fact in (
         "29 capture contracts",
         "Google Chrome 150.0.7871.187",
     ):
         assert observed_current_fact in normalized_current_evidence
+
+    sqlite_permission_heading = "## SQLite file-permission proof boundary"
+    sqlite_permission_end_heading = "## JSON response media proof boundary"
+    assert sqlite_permission_heading in current_evidence
+    assert sqlite_permission_end_heading in current_evidence
+    sqlite_permission_evidence = current_evidence.split(
+        sqlite_permission_heading,
+        maxsplit=1,
+    )[1].split(
+        sqlite_permission_end_heading,
+        maxsplit=1,
+    )[0]
+    normalized_sqlite_permission_evidence = " ".join(
+        sqlite_permission_evidence.split()
+    )
+    for required_sqlite_permission_fact in (
+        "database and its `-journal`, `-wal`, and `-shm` sidecars as owner-only "
+        "`0600` regular files",
+        "Constructor-time initialization is the only lane allowed to harden",
+        "connection and readiness checks are nonmutating and fail closed instead "
+        "of repairing permission drift",
+        "Every SQLite connection uses a URI with `mode=rw`",
+        "Unsupported POSIX capabilities",
+        "unexpected owner",
+        "unprotected directory ancestry",
+        "symlink or other non-regular file",
+        "changed device/inode identity",
+        "insecure database or sidecar permissions all fail closed",
+        "packaged image creates `/data` as owner-only `0700`",
+        "23 focused tests",
+    ):
+        assert required_sqlite_permission_fact in normalized_sqlite_permission_evidence
 
     json_media_heading = "## JSON response media proof boundary"
     json_media_end_heading = "## Terminal evidence retry proof boundary"
@@ -203,57 +260,26 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
         r"https://github\.com/[^)\s]+/actions/runs/\d+(?:/job/\d+)?",
         current_evidence,
     )
-    actions_base = (
-        "https://github.com/charlie2233/backchannel-agent-support/actions/runs"
-    )
-    current_run_url = f"{actions_base}/{current_run}"
-    current_job_urls = tuple(
-        f"{current_run_url}/job/{job_id}" for job_id in current_jobs
-    )
-    assert set(observed_action_urls) == {
-        current_run_url,
-        *current_job_urls,
-    }
-    assert len(observed_action_urls) == 3
-    assert set(re.findall(r"/actions/runs/(\d+)", current_evidence)) == {current_run}
-    assert set(re.findall(r"/job/(\d+)", current_evidence)) == set(current_jobs)
+    assert observed_action_urls == []
+    assert re.findall(r"/actions/runs/(\d+)", current_evidence) == []
+    assert re.findall(r"/job/(\d+)", current_evidence) == []
     hosted_successor_matches = re.findall(
         r"Hosted validation successor:\s+`([0-9a-f]{40})`",
         current_evidence,
     )
-    assert hosted_successor_matches == [current_hosted_sha]
-    assert current_evidence.count(f"[run {current_run}]({current_run_url})") == 1
-    for job_id, job_url in zip(current_jobs, current_job_urls, strict=True):
-        assert current_evidence.count(f"[job {job_id}]({job_url})") == 1
-    pass_block_pattern = (
-        rf"Result: `verify`\s+\(\[job {current_jobs[0]}\]"
-        rf"\({re.escape(current_job_urls[0])}\)\)\s+reported `PASS`; "
-        rf"`container-smoke`\s+\(\[job {current_jobs[1]}\]"
-        rf"\({re.escape(current_job_urls[1])}\)\)\s+reported `PASS`\."
-    )
-    assert re.search(pass_block_pattern, current_evidence)
-    for required_current_hosted_fact in (
-        "Both job annotation APIs returned `[]`",
-        "`capture_manifest_valid`",
-        "19 web test files / 345 tests",
-        "TypeScript/Vite build",
-        "Ruff",
-        "strict MyPy over 35 source files",
-        "695 Python tests with 1 warning in 43.09s",
-        "deterministic stub smoke",
-        "OpenAPI verification",
-        "history-aware secret scan",
-        "packaged Docker image",
-        "runtime user `10001:10001`",
-        "offline network-none `deterministic-qa` and `deployed-readonly` profiles",
+    assert hosted_successor_matches == []
+    for required_current_boundary in (
+        "No current Task32 GitHub Actions run or job has been observed.",
+        "No current Task32 packaged container smoke was executed.",
+        "**Unverified** for this source/capture checkpoint",
     ):
-        assert required_current_hosted_fact in normalized_current_evidence
+        assert required_current_boundary in current_evidence
     for forbidden_current_claim in (
+        "Both job annotation APIs returned `[]`",
+        "reported `PASS`",
         "reported `FAILURE`",
         "reported `SKIPPED`",
-        "No green current Task31 GitHub Actions run or job has been observed.",
-        "No current Task31 packaged container smoke was executed.",
-        "**Unverified** for this source/capture checkpoint",
+        "Hosted validation successor:",
     ):
         assert forbidden_current_claim not in current_evidence
     for superseded_identifier in superseded_failed_attempt:
@@ -271,6 +297,63 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     ):
         assert unproved_current_boundary in normalized_current_evidence
     assert "CI did not execute the browser capture" in current_evidence
+
+    actions_base = (
+        "https://github.com/charlie2233/backchannel-agent-support/actions/runs"
+    )
+    task31_capture = "c446f05adfb836539ddbaa74a41502034c910092"
+    task31_activation = "b4c1bcbd70ff22ce3ac2b8a1de3828b7ce691afe"
+    task31_digest = (
+        "3bb9737a483fc90e50d5a6158bf0c61c1807e6510d22c9bf6d88e142d21ff5d9"
+    )
+    task31_pre_ci_successor = "62c37d6261257ea3800335257e43ae45ed839c47"
+    task31_pre_ci_run = "30501109833"
+    task31_pre_ci_jobs = ("90740755548", "90741063564")
+    task31_final_docs_tip = "3abd059087e216fb4fed613b45927f27a3af627f"
+    task31_final_run = "30501426777"
+    task31_final_jobs = ("90741727313", "90742037347")
+    task31_history_heading = (
+        "### JSON-media capture and hosted baselines (superseded)"
+    )
+    task31_history_end_heading = (
+        "### Terminal-retry capture and hosted baselines (superseded)"
+    )
+    assert task31_history_heading in historical_evidence
+    assert task31_history_end_heading in historical_evidence
+    task31_history = historical_evidence.split(
+        task31_history_heading,
+        maxsplit=1,
+    )[1].split(
+        task31_history_end_heading,
+        maxsplit=1,
+    )[0]
+    normalized_task31_history = " ".join(task31_history.split())
+    for exact_historical_fact in (
+        "120-test client matrix",
+        "19 web test files / 345 tests",
+        "695 Python tests with 3 warnings in 179.85s",
+        "Both pre-CI jobs passed and both pre-CI job annotation APIs returned `[]`",
+        "Both final-tip jobs passed and both final-tip job annotation APIs returned `[]`",
+    ):
+        assert exact_historical_fact in normalized_task31_history
+    task31_historical_action_urls = {
+        f"{actions_base}/{task31_pre_ci_run}",
+        *(
+            f"{actions_base}/{task31_pre_ci_run}/job/{job}"
+            for job in task31_pre_ci_jobs
+        ),
+        f"{actions_base}/{task31_final_run}",
+        *(
+            f"{actions_base}/{task31_final_run}/job/{job}"
+            for job in task31_final_jobs
+        ),
+    }
+    assert set(
+        re.findall(
+            r"https://github\.com/[^)\s]+/actions/runs/\d+(?:/job/\d+)?",
+            task31_history,
+        )
+    ) == task31_historical_action_urls
 
     task30_capture = "96543fff62bb5d0a3c0f8a0464e9a07bf9c54568"
     task30_activation = "98dae414b3cdd36ee25d0dad3fe78257f3f4c135"
@@ -303,9 +386,6 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
         "Both final-tip jobs passed and both final-tip job annotation APIs returned `[]`",
     ):
         assert exact_historical_fact in task30_history
-    actions_base = (
-        "https://github.com/charlie2233/backchannel-agent-support/actions/runs"
-    )
     historical_action_urls = {
         f"{actions_base}/{task30_pre_ci_run}",
         *(f"{actions_base}/{task30_pre_ci_run}/job/{job}" for job in task30_pre_ci_jobs),
@@ -352,6 +432,20 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     for historical_identifier in (
         "85e1e8ec9147242adca311c4ba10ea8c1c3008dc",
         "85e1e8e…",
+        task31_capture,
+        "c446f05…",
+        task31_activation,
+        "b4c1bcb…",
+        task31_digest,
+        "3bb9737…",
+        task31_pre_ci_successor,
+        "62c37d6…",
+        task31_pre_ci_run,
+        *task31_pre_ci_jobs,
+        task31_final_docs_tip,
+        "3abd059…",
+        task31_final_run,
+        *task31_final_jobs,
         task30_capture,
         "96543ff…",
         task30_activation,
@@ -407,6 +501,20 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     ):
         assert historical_identifier not in current_evidence
     for required_historical_identifier in (
+        task31_capture,
+        "c446f05…",
+        task31_activation,
+        "b4c1bcb…",
+        task31_digest,
+        "3bb9737…",
+        task31_pre_ci_successor,
+        "62c37d6…",
+        task31_pre_ci_run,
+        *task31_pre_ci_jobs,
+        task31_final_docs_tip,
+        "3abd059…",
+        task31_final_run,
+        *task31_final_jobs,
         task30_capture,
         "96543ff…",
         task30_activation,
@@ -473,6 +581,22 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     (
         "85e1e8ec9147242adca311c4ba10ea8c1c3008dc",
         "85e1e8e…",
+        "c446f05adfb836539ddbaa74a41502034c910092",
+        "c446f05…",
+        "b4c1bcbd70ff22ce3ac2b8a1de3828b7ce691afe",
+        "b4c1bcb…",
+        "3bb9737a483fc90e50d5a6158bf0c61c1807e6510d22c9bf6d88e142d21ff5d9",
+        "3bb9737…",
+        "62c37d6261257ea3800335257e43ae45ed839c47",
+        "62c37d6…",
+        "30501109833",
+        "90740755548",
+        "90741063564",
+        "3abd059087e216fb4fed613b45927f27a3af627f",
+        "3abd059…",
+        "30501426777",
+        "90741727313",
+        "90742037347",
         "96543fff62bb5d0a3c0f8a0464e9a07bf9c54568",
         "96543ff…",
         "98dae414b3cdd36ee25d0dad3fe78257f3f4c135",
@@ -555,17 +679,12 @@ def test_validation_rejects_superseded_provenance_in_current_evidence(
 @pytest.mark.parametrize(
     "current_identifier",
     (
-        "c446f05adfb836539ddbaa74a41502034c910092",
-        "c446f05…",
-        "b4c1bcbd70ff22ce3ac2b8a1de3828b7ce691afe",
-        "b4c1bcb…",
-        "3bb9737a483fc90e50d5a6158bf0c61c1807e6510d22c9bf6d88e142d21ff5d9",
-        "3bb9737…",
-        "62c37d6261257ea3800335257e43ae45ed839c47",
-        "62c37d6…",
-        "30501109833",
-        "90740755548",
-        "90741063564",
+        "a8057a8e0c29bdcc95e35949819c64005e5ee064",
+        "a8057a8…",
+        "9de054e5131ad3f610902d0a7bd4bd97c5968c7a",
+        "9de054e…",
+        "a5fdc8adc9788f181ace5f4de9cce7974344af02312cef2caa9e123193744503",
+        "a5fdc8a…",
     ),
 )
 def test_validation_rejects_current_capture_provenance_in_historical_evidence(
@@ -624,14 +743,74 @@ def test_validation_rejects_unexpected_current_hosted_provenance(
         _assert_validation_matches_current_capture(polluted_validation)
 
 
-@pytest.mark.parametrize("non_pass_status", ("CANCELLED", "PENDING"))
-def test_validation_requires_both_current_jobs_to_report_pass(
-    non_pass_status: str,
-) -> None:
+def test_validation_requires_current_hosted_lane_to_remain_unverified_pre_ci() -> None:
     validation = _read("docs/validation.md")
     polluted_validation = validation.replace(
-        "reported `PASS`",
-        f"reported `{non_pass_status}`",
+        "No current Task32 GitHub Actions run or job has been observed.",
+        "A green current Task32 GitHub Actions run has been observed.",
+    )
+
+    with pytest.raises(AssertionError):
+        _assert_validation_matches_current_capture(polluted_validation)
+
+
+@pytest.mark.parametrize(
+    "unexpected_positive_claim",
+    (
+        "Current Task32 CI passed.",
+        "Current Task32 CI. Passed.",
+        "Current Task32 CI.\nPassed.",
+        "Passed. Current Task32 CI.",
+        "Current Task32 container job passed.",
+        "Current Task32 verify job passed.",
+        "Task32 GitHub Actions passed successfully.",
+        "The current Task32 GitHub workflow passed.",
+        "Task32 container smoke. Result: verified.",
+        "Task32 container smoke.\nResult: verified.",
+        "Status: verified. Task32 container smoke.",
+        "Healthy. Current Task32 workflow.",
+        "Completed cleanly. Current Task32 packaged Docker.",
+        "No failures. Current Task32 verify job.",
+        "Current Task32 CI completed cleanly.",
+        "Current Task32 CI is passing.",
+        "Current Task32 workflow is healthy.",
+        "Current Task32 container smoke completed without failures.",
+        "Current Task32 CI has no failures.",
+        "Current Task32 CI has zero failures.",
+        "Current Task32 CI is error-free.",
+        (
+            "- No current Task32 GitHub Actions run or job has been observed.\n"
+            "Passed."
+        ),
+        (
+            "Passed.\n"
+            "- No current Task32 GitHub Actions run or job has been observed."
+        ),
+        "The full Python suite passed all 718 tests.",
+        "Canonical backend: 718 passed.",
+        "Current Task32 GitHub Actions passed successfully.",
+        "Current Task32 GitHub Actions run is green.",
+        "Current Task32 hosted CI succeeded.",
+        "Current Task32 packaged container smoke passed successfully.",
+        "Current Task32 container-smoke job is green.",
+        "Current Task32 container smoke succeeded.",
+        "Current Task32 workflow green.",
+        "Current Task32 packaged Docker successful.",
+        "Current Task32 container-smoke verified.",
+        "Full canonical Python gate passed 718 tests.",
+        "Full canonical gate succeeded with 718 tests.",
+        "Final full canonical gate passed 718 tests.",
+        "Current full canonical Python gate passed 718 tests.",
+    ),
+)
+def test_validation_rejects_generic_current_positive_claims(
+    unexpected_positive_claim: str,
+) -> None:
+    validation = _read("docs/validation.md")
+    historical_heading = "## Superseded historical hosted baseline"
+    polluted_validation = validation.replace(
+        historical_heading,
+        f"{unexpected_positive_claim}\n\n{historical_heading}",
         1,
     )
 
@@ -643,19 +822,24 @@ def test_validation_requires_both_current_jobs_to_report_pass(
     ("bullet_prefix", "original", "replacement"),
     (
         (
-            "Pre-capture Task31 gates on clean source",
-            "TypeScript/Vite, and diff checks.",
-            "TypeScript/Vite, diff checks, and 695 Python tests with 3 warnings.",
+            "Pre-capture Task32 gates on clean source",
+            "P0-P3 findings.",
+            "P0-P3 findings and 717 passed.",
         ),
         (
             "After activation",
-            "695 Python tests with 3 warnings in 179.85s",
-            "an unspecified Python suite",
+            "717 passed plus one expected stale validation-doc contract failure",
+            "718 passed",
         ),
         (
             "After activation",
-            "b4c1bcbd70ff22ce3ac2b8a1de3828b7ce691afe",
+            "9de054e5131ad3f610902d0a7bd4bd97c5968c7a",
             "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        ),
+        (
+            "After activation",
+            "does not establish a final full-suite canonical result",
+            "establishes a final full-suite canonical result",
         ),
     ),
 )
@@ -676,6 +860,60 @@ def test_validation_rejects_evidence_timing_mutation(
     assert original_pattern.search(bullet)
     polluted_bullet = original_pattern.sub(replacement, bullet, count=1)
     polluted_validation = validation.replace(bullet, polluted_bullet, 1)
+
+    with pytest.raises(AssertionError):
+        _assert_validation_matches_current_capture(polluted_validation)
+
+
+@pytest.mark.parametrize(
+    ("original", "replacement"),
+    (
+        ("owner-only `0600` regular files", "group-readable `0640` files"),
+        (
+            "Constructor-time initialization is the only lane allowed to harden",
+            "Runtime readiness may also harden",
+        ),
+        (
+            "connection and readiness checks are nonmutating and fail closed instead "
+            "of repairing permission drift",
+            "runtime checks repair permission drift",
+        ),
+        ("URI with `mode=rw`", "URI with `mode=rwc`"),
+        ("Unsupported POSIX capabilities", "Unsupported capabilities are ignored"),
+        ("unexpected owner", "any owner"),
+        ("unprotected directory ancestry", "untrusted directory ancestry"),
+        ("changed device/inode identity", "changed pathname only"),
+        (
+            "insecure database or sidecar permissions all fail closed",
+            "insecure sidecars remain usable",
+        ),
+        ("owner-only `0700`", "group-writable `0770`"),
+        ("23 focused tests", "an unspecified test count"),
+    ),
+)
+def test_validation_rejects_sqlite_permission_contract_mutation(
+    original: str,
+    replacement: str,
+) -> None:
+    validation = _read("docs/validation.md")
+    sqlite_heading = "## SQLite file-permission proof boundary"
+    sqlite_end_heading = "## JSON response media proof boundary"
+    sqlite_evidence = validation.split(sqlite_heading, maxsplit=1)[1].split(
+        sqlite_end_heading,
+        maxsplit=1,
+    )[0]
+    original_pattern = re.compile(re.escape(original).replace(r"\ ", r"\s+"))
+    assert original_pattern.search(sqlite_evidence)
+    polluted_sqlite_evidence = original_pattern.sub(
+        replacement,
+        sqlite_evidence,
+        count=1,
+    )
+    polluted_validation = validation.replace(
+        sqlite_evidence,
+        polluted_sqlite_evidence,
+        1,
+    )
 
     with pytest.raises(AssertionError):
         _assert_validation_matches_current_capture(polluted_validation)
@@ -990,8 +1228,10 @@ def test_release_docs_cover_architecture_protocol_and_evidence_boundaries() -> N
     validation = _read("docs/validation.md")
     assert "`codex/backchannel-v0.3`" in validation
     assert "## Current capture and evidence activation" in validation
+    assert "## SQLite file-permission proof boundary" in validation
     assert "## JSON response media proof boundary" in validation
     assert "## Superseded historical hosted baseline" in validation
+    assert "### JSON-media capture and hosted baselines (superseded)" in validation
     assert (
         "### Terminal-retry capture and hosted baselines (superseded)" in validation
     )
