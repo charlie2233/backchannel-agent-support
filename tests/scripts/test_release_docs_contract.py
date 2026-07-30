@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -36,94 +37,207 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
         maxsplit=1,
     )
     normalized_current_evidence = " ".join(current_evidence.split())
+    current_evidence_digest = hashlib.sha256(
+        normalized_current_evidence.encode("utf-8")
+    ).hexdigest()
+    assert (
+        current_evidence_digest
+        == "76ab31bccc2a5b38a79dfe775a65676a1631e52430c9db5ab3fe0764e89d538b"
+    )
     assert "718" not in current_evidence
 
-    hosted_heading = "## Current Task32 hosted CI and packaged-container evidence"
-    hosted_end_heading = "## Per-SHA proof matrix"
-    assert hosted_heading in current_evidence
-    assert hosted_end_heading in current_evidence
-    current_before_hosted, current_from_hosted = current_evidence.split(
-        hosted_heading,
-        maxsplit=1,
-    )
-    hosted_evidence, current_after_hosted = current_from_hosted.split(
-        hosted_end_heading,
-        maxsplit=1,
-    )
-    normalized_hosted_evidence = " ".join(hosted_evidence.split())
-    current_without_hosted = (
-        current_before_hosted + hosted_end_heading + current_after_hosted
-    )
-    normalized_current_without_hosted = " ".join(current_without_hosted.split())
-
     hosted_scope_pattern = re.compile(
-        r"\b(?:CI|GitHub\s+Actions|workflow|verify\s+job|"
-        r"container(?:-smoke|\s+smoke|\s+job)?|packaged\s+Docker)\b",
+        r"\b(?:CI|GitHub\s+Actions|workflow|verify\s+job|canonical|backend|"
+        r"container(?:-smoke|\s+smoke|\s+job)?|packaged\s+Docker|"
+        r"public\s+deployment|live\s+OpenAI|provider|release|docs-tip)\b",
         flags=re.IGNORECASE,
     )
     positive_word_pattern = re.compile(
         r"\b(?:pass|passed|passing|green|healthy|clean|cleanly|clear|"
-        r"succeed|succeeded|succeeding|success|successful|successfully|verified)\b"
+        r"succeed|succeeded|succeeding|success|successful|successfully|verified|"
+        r"validat(?:e|ed|es|ing)|confirm(?:ed|s|ing)?|ok|complete(?:d|ly)?|"
+        r"operational|live|approv(?:e|ed|ing)|prov(?:e|ed|en|ing))\b"
         r"|\b(?:completed|finished)\s+(?:cleanly|successfully)\b"
         r"|\bwithout\s+(?:any\s+)?(?:failures?|errors?)\b"
         r"|\b(?:no|zero)\s+(?:failures?|errors?)\b"
-        r"|\b(?:failure|error)-free\b",
+        r"|\b(?:failure|error)-free\b"
+        r"|\b(?:returned\s+)?exit(?:\s+code)?\s*(?:[:=]\s*)?0\b"
+        r"|\bstatus\s*(?:[:=]\s*)?0\b",
         flags=re.IGNORECASE,
     )
-    current_evidence_sequences = (
-        tuple(
-            line.strip()
-            for line in current_without_hosted.splitlines()
-            if line.strip()
-        ),
-        tuple(
-            sentence.strip()
-            for sentence in re.split(
-                r"(?<=[.!?])\s+",
-                normalized_current_without_hosted,
-            )
-            if sentence.strip()
-        ),
+    current_evidence_lines = tuple(
+        line.strip() for line in current_evidence.splitlines() if line.strip()
     )
-    task32_pattern = re.compile(r"\bTask32\b", flags=re.IGNORECASE)
-    for evidence_sequence in current_evidence_sequences:
-        for index, evidence_unit in enumerate(evidence_sequence):
-            if (
-                task32_pattern.search(evidence_unit)
-                and hosted_scope_pattern.search(evidence_unit)
-            ):
-                adjacent_window = " ".join(
-                    evidence_sequence[max(0, index - 1) : index + 2]
-                )
-                assert not positive_word_pattern.search(
-                    adjacent_window
-                ), f"positive adjacent hosted-evidence claim: {adjacent_window.strip()}"
+    expected_current_scope_lines = (
+        "container, live OpenAI, deployment, or release evidence.",
+        "- Hosted verification and a full canonical/backend gate are intentionally",
+        "- No current Task33 full canonical/backend, GitHub Actions, or packaged",
+        "container result has been observed.",
+        (
+            "| Local source and tests | Focused and full web source gates on "
+            "`84af413…`; no current full canonical/backend result | **Verified "
+            "locally** only in the named frontend lanes; not backend, hosted CI, "
+            "container, browser deployment, live OpenAI, or release proof |"
+        ),
+        (
+            "| Local final-build captures | "
+            "[`docs/assets/final/manifest.json`](assets/final/manifest.json); six "
+            "provenance-checked PNGs under [`docs/assets/final`](assets/final) | "
+            "**Local capture evidence only** on source `84af413…` in Google Chrome "
+            "at 1440×1024 and 390×844; not container, deployment, live OpenAI, or "
+            "release proof |"
+        ),
+        (
+            "| Live OpenAI | [`live-validation.md`](live-validation.md) records only "
+            "a redacted invalid-key result | **Blocked / Unverified**; no valid "
+            "`OPENAI_API_KEY`, one-run trace, or three consecutive successes |"
+        ),
+        (
+            "| GitHub CI/container | No current Task33 GitHub Actions run or packaged "
+            "container job has been observed | **Unverified** for this source/capture "
+            "checkpoint; superseded Task32 proof is retained only below and is not "
+            "inherited |"
+        ),
+        "| Public deployment | No public application origin | **Blocked / Unverified** |",
+        (
+            "| Tag/release | No release tag or GitHub release | **Blocked / "
+            "Unverified** |"
+        ),
+        "## Hosted container evidence boundary",
+        (
+            "There is no current Task33 hosted-container result. The superseded "
+            "historical section"
+        ),
+        "records prior packaged Docker evidence, but it is not current for this source/capture",
+        "browser capture in CI, public deployment or browser URL, live OpenAI, real provider",
+        "execution, container replacement or restart, long-lived `/data` volume persistence,",
+        "multi-container SQLite, tag or release. The browser capture remained local; CI did",
+        (
+            "files. CI did not execute the browser capture. The six images prove "
+            "only the local keyless"
+        ),
+        "SDK-stub final build; they do not prove live OpenAI, a public deployment, a container,",
+        "a release, or a real provider mutation.",
+        "This is local source/test evidence only. It does not prove a backend, hosted,",
+        "container, public-network, live OpenAI, or release result, and the ordinary final",
+        "container-replacement, abrupt-host-loss, or concurrent multi-container SQLite proof.",
+        "container proof. It does not prove multi-process or concurrent multi-container SQLite,",
+        "target-host scheduling, abrupt host loss, public latency, or live provider behavior.",
+        "`84af413…` and is not public deployment, live OpenAI, container-host durability, tag,",
+        "or release proof.",
+        "route-gate release, retained admission charges, exact public `504 live_timeout`",
+        "envelopes, retryable approve/decline claims, and no duplicate dispatch when provider",
+        "process-termination proof, public deployment, or release claim.",
+    )
+    observed_current_scope_lines = tuple(
+        line for line in current_evidence_lines if hosted_scope_pattern.search(line)
+    )
+    assert observed_current_scope_lines == expected_current_scope_lines, (
+        "unexpected current scoped evidence lines: "
+        f"{observed_current_scope_lines!r}"
+    )
+    expected_current_positive_lines = (
+        "container, live OpenAI, deployment, or release evidence.",
+        "- `npm run test:e2e` reported `29 passed` against the clean capture source",
+        "- Pre-capture Task33 gates on clean source",
+        (
+            "`84af413c3a7833daa635e6a0b84e8f331cc1f7f2`: the focused client "
+            "matrix passed"
+        ),
+        (
+            "144 / 144 tests, and the full web source gate passed 369 / 369 "
+            "tests plus the"
+        ),
+        "- Independent Task33 specification and quality reviews passed with no P0-P3",
+        (
+            "- Independent Task33 combined before/after visual review passed "
+            "with no P0-P3"
+        ),
+        (
+            "| Local source and tests | Focused and full web source gates on "
+            "`84af413…`; no current full canonical/backend result | **Verified "
+            "locally** only in the named frontend lanes; not backend, hosted CI, "
+            "container, browser deployment, live OpenAI, or release proof |"
+        ),
+        (
+            "| Local final-build captures | "
+            "[`docs/assets/final/manifest.json`](assets/final/manifest.json); six "
+            "provenance-checked PNGs under [`docs/assets/final`](assets/final) | "
+            "**Local capture evidence only** on source `84af413…` in Google Chrome "
+            "at 1440×1024 and 390×844; not container, deployment, live OpenAI, or "
+            "release proof |"
+        ),
+        (
+            "| Live OpenAI | [`live-validation.md`](live-validation.md) records only "
+            "a redacted invalid-key result | **Blocked / Unverified**; no valid "
+            "`OPENAI_API_KEY`, one-run trace, or three consecutive successes |"
+        ),
+        "checkpoint. Current local source and capture evidence does not prove local Docker,",
+        "browser capture in CI, public deployment or browser URL, live OpenAI, real provider",
+        "validates API and DOM provenance before each viewport screenshot.",
+        (
+            "produced against the clean source SHA, and the activation successor "
+            "added the captured"
+        ),
+        (
+            "files. CI did not execute the browser capture. The six images prove "
+            "only the local keyless"
+        ),
+        "SDK-stub final build; they do not prove live OpenAI, a public deployment, a container,",
+        "different clean frozen tree.",
+        "The Task33 client validator accepts `completed`, `closed_without_action`, and",
+        "This is local source/test evidence only. It does not prove a backend, hosted,",
+        "container, public-network, live OpenAI, or release result, and the ordinary final",
+        "cases prove these source-level parser boundaries; the screenshots do not prove",
+        (
+            "fresh equally bounded initial-plus-three cycle. Throughout retry, "
+            "already verified"
+        ),
+        "The ordinary final-state screenshots do not prove transient store failure, retry",
+        "container proof. It does not prove multi-process or concurrent multi-container SQLite,",
+        "target-host scheduling, abrupt host loss, public latency, or live provider behavior.",
+        "are source and raw-ASGI contract properties. The six screenshots do not prove",
+        "second/third write failure, validation-before-charge, live-ledger separation, reset",
+        "`84af413…` and is not public deployment, live OpenAI, container-host durability, tag,",
+        "## Live deadline proof boundary",
+        "The source contract bounds the complete live pre-approval graph and each live",
+        "envelopes, retryable approve/decline claims, and no duplicate dispatch when provider",
+        "execution committed before the timeout. The OpenAI client and the redacted live-smoke",
+    )
+    observed_current_positive_lines = tuple(
+        line for line in current_evidence_lines if positive_word_pattern.search(line)
+    )
+    assert observed_current_positive_lines == expected_current_positive_lines, (
+        "unexpected current positive evidence lines: "
+        f"{observed_current_positive_lines!r}"
+    )
 
     assert manifest["sourceCommit"] in current_evidence
-    current_activation = "9de054e5131ad3f610902d0a7bd4bd97c5968c7a"
-    current_hosted_successor = "c6c60d4354eba7348aef3245d19e787661544fa7"
-    current_run = "30588357735"
-    current_jobs = ("91024909140", "91025281220")
-    superseded_failed_attempt = (
+    current_activation = "7a8092f9ac0be03274358bb9814db3d8e6a34507"
+    excluded_nonproof_attempts = (
         "30206582233",
         "89805619343",
         "89805788728",
+        "30589885023",
+        "91029626933",
+        "91029704182",
+        "30590117346",
+        "91030339125",
+        "91030653603",
     )
     assert current_activation in current_evidence
     assert runtime_input["digest"] in current_evidence
     for current_identifier in (
         manifest["sourceCommit"],
-        "a8057a8…",
+        "84af413…",
         current_activation,
-        "9de054e…",
-        current_hosted_successor,
-        "c6c60d4…",
-        current_run,
-        *current_jobs,
+        "7a8092f…",
         runtime_input["digest"],
-        "a5fdc8a…",
+        "00d4636…",
     ):
         assert current_identifier not in historical_evidence
+    for excluded_identifier in excluded_nonproof_attempts:
+        assert excluded_identifier not in validation
     assert f"{len(runtime_input['paths'])} runtime paths" in current_evidence
     assert f"{browser['name']} {browser['version']}" in current_evidence
     browser_mode = "headless" if browser["headless"] else "headed"
@@ -154,50 +268,237 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
         assert match is not None
         return " ".join(match.group(0).split())
 
-    pre_capture_gate = current_bullet("Pre-capture Task32 gates on clean source")
+    activation_heading = "## Current capture and evidence activation"
+    activation_end_heading = "## Per-SHA proof matrix"
+    activation_evidence = current_evidence.split(
+        activation_heading,
+        maxsplit=1,
+    )[1].split(
+        activation_end_heading,
+        maxsplit=1,
+    )[0]
+    activation_bullets = tuple(
+        " ".join(match.group(0).split())
+        for match in re.finditer(
+            r"^- .*?(?=^- |\Z)",
+            activation_evidence,
+            flags=re.MULTILINE | re.DOTALL,
+        )
+    )
+    expected_activation_bullets = (
+        f"- Capture source / frozen runtime: `{manifest['sourceCommit']}`",
+        f"- Evidence activation: `{current_activation}`",
+        (
+            "- `npm run test:e2e` reported `29 passed` against the clean capture "
+            "source in Google Chrome 150.0.7871.187 and produced six manifest-bound "
+            "PNGs at 1440×1024 and 390×844. The run covered 29 capture contracts."
+        ),
+        (
+            "- Five PNGs changed and `mobile-consent.png` remained byte-identical "
+            "against the immediately prior capture set."
+        ),
+        (
+            f"- Pre-capture Task33 gates on clean source `{manifest['sourceCommit']}`: "
+            "the focused client matrix passed 144 / 144 tests, and the full web "
+            "source gate passed 369 / 369 tests plus the TypeScript/Vite build."
+        ),
+        (
+            "- Independent Task33 specification and quality reviews passed with no "
+            "P0-P3 findings after the quality loop replaced one vacuous "
+            "pending-consent test with a fully valid pending-approval fixture."
+        ),
+        (
+            "- Independent Task33 combined before/after visual review passed with no "
+            "P0-P3 findings."
+        ),
+        (
+            "- Hosted verification and a full canonical/backend gate are "
+            "intentionally excluded from this activation checkpoint."
+        ),
+        (
+            "- No current Task33 full canonical/backend, GitHub Actions, or packaged "
+            "container result has been observed."
+        ),
+    )
+    assert activation_bullets == expected_activation_bullets
+
+    pre_capture_gate = current_bullet("Pre-capture Task33 gates on clean source")
     assert manifest["sourceCommit"] in pre_capture_gate
     for pre_capture_fact in (
-        "focused SQLite permission matrix passed 23 tests",
-        "independent security review passed with no P0-P3 findings",
+        "focused client matrix passed 144 / 144 tests",
+        "full web source gate passed 369 / 369 tests",
+        "TypeScript/Vite build",
     ):
         assert pre_capture_fact in pre_capture_gate
     for post_activation_only_fact in (
-        "778 passed",
-        "778 / 778 Python tests",
-        "3 warnings",
+        "Python",
         "Ruff",
         "strict MyPy",
         "`capture_manifest_valid`",
+        "GitHub Actions",
+        "container",
     ):
         assert post_activation_only_fact not in pre_capture_gate
 
-    local_exact_gate = current_bullet(
-        "Local exact clean gate on hosted validation successor"
+    source_review_gate = current_bullet(
+        "Independent Task33 specification and quality reviews"
     )
-    assert current_hosted_successor in local_exact_gate
-    for local_exact_fact in (
-        "29 capture contracts",
-        "`capture_manifest_valid`",
-        "19 web test files / 345 tests",
-        "TypeScript/Vite build",
-        "Ruff",
-        "strict MyPy over 35 source files",
-        "778 / 778 Python tests with 3 warnings in 28.51s",
-        "deterministic stub and local single-process production smokes",
-        "OpenAPI verification",
-        "history-aware secret scan all passed",
+    for source_review_fact in (
+        "passed with no P0-P3 findings",
+        "replaced one vacuous pending-consent test",
+        "fully valid pending-approval fixture",
     ):
-        assert local_exact_fact in local_exact_gate
-    assert "focused SQLite permission matrix passed 23 tests" not in local_exact_gate
+        assert source_review_fact in source_review_gate
 
-    review_gate = current_bullet("Independent Task32 visual review")
-    assert "passed with no P0-P3 findings" in review_gate
+    visual_review_gate = current_bullet(
+        "Independent Task33 combined before/after visual review"
+    )
+    assert "passed with no P0-P3 findings" in visual_review_gate
+
+    excluded_gate = current_bullet(
+        "Hosted verification and a full canonical/backend gate"
+    )
+    assert "intentionally excluded from this activation checkpoint" in excluded_gate
+
+    unobserved_gate = current_bullet(
+        "No current Task33 full canonical/backend"
+    )
+    assert (
+        "GitHub Actions, or packaged container result has been observed"
+        in unobserved_gate
+    )
+
+    matrix_heading = "## Per-SHA proof matrix"
+    hosted_boundary_heading = "## Hosted container evidence boundary"
+    matrix_evidence = current_evidence.split(matrix_heading, maxsplit=1)[1].split(
+        hosted_boundary_heading,
+        maxsplit=1,
+    )[0]
+    matrix_rows = tuple(
+        line.strip()
+        for line in matrix_evidence.splitlines()
+        if line.strip().startswith("|")
+    )
+    assert matrix_rows == (
+        "| Lane | Exact evidence | Status and boundary |",
+        "| --- | --- | --- |",
+        (
+            "| Local source and tests | Focused and full web source gates on "
+            "`84af413…`; no current full canonical/backend result | **Verified "
+            "locally** only in the named frontend lanes; not backend, hosted CI, "
+            "container, browser deployment, live OpenAI, or release proof |"
+        ),
+        (
+            "| Local final-build captures | "
+            "[`docs/assets/final/manifest.json`](assets/final/manifest.json); six "
+            "provenance-checked PNGs under [`docs/assets/final`](assets/final) | "
+            "**Local capture evidence only** on source `84af413…` in Google Chrome "
+            "at 1440×1024 and 390×844; not container, deployment, live OpenAI, or "
+            "release proof |"
+        ),
+        (
+            "| Live OpenAI | [`live-validation.md`](live-validation.md) records only "
+            "a redacted invalid-key result | **Blocked / Unverified**; no valid "
+            "`OPENAI_API_KEY`, one-run trace, or three consecutive successes |"
+        ),
+        (
+            "| Local Docker | No Docker-family runtime is installed on this Mac | "
+            "**Unverified locally** |"
+        ),
+        (
+            "| GitHub CI/container | No current Task33 GitHub Actions run or packaged "
+            "container job has been observed | **Unverified** for this source/capture "
+            "checkpoint; superseded Task32 proof is retained only below and is not "
+            "inherited |"
+        ),
+        (
+            "| Public deployment | No public application origin | **Blocked / "
+            "Unverified** |"
+        ),
+        (
+            "| Tag/release | No release tag or GitHub release | **Blocked / "
+            "Unverified** |"
+        ),
+    )
+
+    hosted_boundary_end_heading = "## Capture contract"
+    hosted_boundary_evidence = current_evidence.split(
+        hosted_boundary_heading,
+        maxsplit=1,
+    )[1].split(
+        hosted_boundary_end_heading,
+        maxsplit=1,
+    )[0]
+    normalized_hosted_boundary_evidence = " ".join(
+        hosted_boundary_evidence.split()
+    )
+    assert normalized_hosted_boundary_evidence == (
+        "There is no current Task33 hosted-container result. The superseded "
+        "historical section records prior packaged Docker evidence, but it is not "
+        "current for this source/capture checkpoint. Current local source and "
+        "capture evidence does not prove local Docker, browser capture in CI, "
+        "public deployment or browser URL, live OpenAI, real provider execution, "
+        "container replacement or restart, long-lived `/data` volume persistence, "
+        "target-host durability/networking, abrupt host-loss or backup, concurrent "
+        "multi-container SQLite, tag or release. The browser capture remained "
+        "local; CI did not execute the browser capture."
+    )
 
     for observed_current_fact in (
         "29 capture contracts",
         "Google Chrome 150.0.7871.187",
     ):
         assert observed_current_fact in normalized_current_evidence
+
+    terminal_snapshot_heading = "## Terminal snapshot consistency proof boundary"
+    terminal_snapshot_end_heading = "## SQLite file-permission proof boundary"
+    assert terminal_snapshot_heading in current_evidence
+    assert terminal_snapshot_end_heading in current_evidence
+    terminal_snapshot_evidence = current_evidence.split(
+        terminal_snapshot_heading,
+        maxsplit=1,
+    )[1].split(
+        terminal_snapshot_end_heading,
+        maxsplit=1,
+    )[0]
+    normalized_terminal_snapshot_evidence = " ".join(
+        terminal_snapshot_evidence.split()
+    )
+    assert normalized_terminal_snapshot_evidence == (
+        "The Task33 client validator accepts `completed`, `closed_without_action`, "
+        "and `outcome_unknown` recovery snapshots only at terminal `currentStep: 5`. "
+        "Each of those terminal statuses is rejected at steps 0 through 4, and all "
+        "terminal snapshots continue to reject even a structurally valid pending "
+        "approval. Nonterminal `in_progress` and `pending_approval` snapshots retain "
+        "their previously valid steps, including a fully valid pending-consent "
+        "fixture. The focused 144-test client matrix covers every terminal status at "
+        "every step 0 through 5, the retained nonterminal cases, and the "
+        "valid-pending-consent boundary. The full web source gate covered 369 tests "
+        "plus the TypeScript/Vite build. This is local source/test evidence only. It "
+        "does not prove a backend, hosted, container, public-network, live OpenAI, or "
+        "release result, and the ordinary final state screenshots do not exercise "
+        "malformed terminal snapshots."
+    )
+    for required_terminal_snapshot_fact in (
+        "`completed`, `closed_without_action`, and `outcome_unknown` recovery "
+        "snapshots only at terminal `currentStep: 5`",
+        "terminal statuses is rejected at steps 0 through 4",
+        "terminal snapshots continue to reject even a structurally valid pending "
+        "approval",
+        "Nonterminal `in_progress` and `pending_approval` snapshots retain their "
+        "previously valid steps",
+        "fully valid pending-consent fixture",
+        "focused 144-test client matrix",
+        "every terminal status at every step 0 through 5",
+        "full web source gate covered 369 tests plus the TypeScript/Vite build",
+        "local source/test evidence only",
+        "does not prove a backend, hosted, container, public-network, live OpenAI, "
+        "or release result",
+        "screenshots do not exercise malformed terminal snapshots",
+    ):
+        assert (
+            required_terminal_snapshot_fact in normalized_terminal_snapshot_evidence
+        )
 
     sqlite_permission_heading = "## SQLite file-permission proof boundary"
     sqlite_permission_end_heading = "## JSON response media proof boundary"
@@ -288,73 +589,12 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     actions_base = (
         "https://github.com/charlie2233/backchannel-agent-support/actions/runs"
     )
-    assert observed_action_urls == [
-        f"{actions_base}/{current_run}",
-        f"{actions_base}/{current_run}/job/{current_jobs[0]}",
-        f"{actions_base}/{current_run}/job/{current_jobs[1]}",
-    ]
-    hosted_successor_matches = re.findall(
-        r"Hosted validation successor:\s+`([0-9a-f]{40})`",
-        current_evidence,
-    )
-    assert hosted_successor_matches == [current_hosted_successor]
-    expected_hosted_bullets = (
-        f"- Hosted validation successor: `{current_hosted_successor}`",
-        f"- GitHub Actions: [run {current_run}]({actions_base}/{current_run}).",
-        (
-            f"- Result: `verify` ([job {current_jobs[0]}]"
-            f"({actions_base}/{current_run}/job/{current_jobs[0]})) "
-            "reported `PASS`; `container-smoke` "
-            f"([job {current_jobs[1]}]"
-            f"({actions_base}/{current_run}/job/{current_jobs[1]})) "
-            "reported `PASS`."
-        ),
-        "- Both current job annotation APIs returned `[]`.",
-        (
-            "- Hosted `verify` passed `capture_manifest_valid`, 19 web test files / "
-            "345 tests, Ruff, strict MyPy over 35 source files, 778 Python tests "
-            "with 1 warning in 43.35s, deterministic stub smoke, OpenAPI "
-            "verification, and the history-aware secret scan."
-        ),
-        (
-            "- Hosted `container-smoke` built the packaged image with "
-            "`install -d -m 0700 -o backchannel -g backchannel /data`, confirmed "
-            "runtime user `10001:10001`, and passed the offline network-none "
-            "`deterministic-qa` and `deployed-readonly` profiles."
-        ),
-    )
-    hosted_bullets = tuple(
-        " ".join(match.group(0).split())
-        for match in re.finditer(
-            r"^- .*?(?=^- |\Z)",
-            hosted_evidence,
-            flags=re.MULTILINE | re.DOTALL,
-        )
-    )
-    assert hosted_bullets == expected_hosted_bullets
-    assert normalized_hosted_evidence == " ".join(expected_hosted_bullets)
-    hosted_job_bindings = re.findall(
-        r"`(verify|container-smoke)` "
-        r"\(\[job (\d+)\]\((https://github\.com/[^)\s]+/job/\d+)\)\) "
-        r"reported `(PASS)`",
-        hosted_bullets[2],
-    )
-    assert hosted_job_bindings == [
-        (
-            "verify",
-            current_jobs[0],
-            f"{actions_base}/{current_run}/job/{current_jobs[0]}",
-            "PASS",
-        ),
-        (
-            "container-smoke",
-            current_jobs[1],
-            f"{actions_base}/{current_run}/job/{current_jobs[1]}",
-            "PASS",
-        ),
-    ]
+    assert observed_action_urls == []
+    assert "Hosted validation successor:" not in current_evidence
     for required_current_boundary in (
-        "**Verified in GitHub CI** for the exact hosted and packaged-container lanes",
+        "No current Task33 GitHub Actions run or packaged container job has been observed",
+        "**Unverified** for this source/capture checkpoint",
+        "There is no current Task33 hosted-container result",
         "does not prove local Docker",
         "browser capture in CI",
         "public deployment or browser URL",
@@ -369,15 +609,161 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     ):
         assert required_current_boundary in normalized_current_evidence
     for forbidden_current_claim in (
-        "No current Task32 GitHub Actions run or job has been observed.",
-        "No current Task32 packaged container smoke was executed.",
+        "Current Task33 GitHub Actions passed",
+        "Current Task33 hosted CI passed",
+        "Current Task33 packaged container smoke passed",
+        "Current Task33 full canonical gate passed",
+        "Current Task33 backend gate passed",
         "reported `FAILURE`",
         "reported `SKIPPED`",
     ):
         assert forbidden_current_claim not in current_evidence
-    for superseded_identifier in superseded_failed_attempt:
-        assert superseded_identifier not in current_evidence
     assert "CI did not execute the browser capture" in current_evidence
+
+    task32_capture = "a8057a8e0c29bdcc95e35949819c64005e5ee064"
+    task32_activation = "9de054e5131ad3f610902d0a7bd4bd97c5968c7a"
+    task32_digest = (
+        "a5fdc8adc9788f181ace5f4de9cce7974344af02312cef2caa9e123193744503"
+    )
+    task32_pre_ci_successor = "c6c60d4354eba7348aef3245d19e787661544fa7"
+    task32_pre_ci_run = "30588357735"
+    task32_pre_ci_jobs = ("91024909140", "91025281220")
+    task32_final_docs_tip = "abdf644b4c35ecfaee2d22917c4c621f9d123a5b"
+    task32_final_run = "30589435325"
+    task32_final_jobs = ("91028250060", "91028596793")
+    task32_history_heading = (
+        "### SQLite-permission capture and hosted baselines (superseded)"
+    )
+    task32_history_end_heading = (
+        "### JSON-media capture and hosted baselines (superseded)"
+    )
+    assert task32_history_heading in historical_evidence
+    assert task32_history_end_heading in historical_evidence
+    task32_history = historical_evidence.split(
+        task32_history_heading,
+        maxsplit=1,
+    )[1].split(
+        task32_history_end_heading,
+        maxsplit=1,
+    )[0]
+    normalized_task32_history = " ".join(task32_history.split())
+    expected_task32_bullets = (
+        f"- Prior capture source: `{task32_capture}`",
+        f"- Prior evidence activation: `{task32_activation}`",
+        (
+            f"- Prior manifest digest: `{task32_digest}` across 84 runtime paths."
+        ),
+        (
+            "- The prior local exact gate on the pre-CI documentation successor "
+            f"`{task32_pre_ci_successor}` covered 29 capture contracts, "
+            "`capture_manifest_valid`, 19 web test files / 345 tests and "
+            "TypeScript/Vite, Ruff, strict MyPy over 35 source files, 778 / 778 "
+            "Python tests with 3 warnings in 28.51s, deterministic stub and local "
+            "single-process production smokes, OpenAPI verification, and the "
+            "history-aware secret scan."
+        ),
+        (
+            f"- Prior pre-CI GitHub Actions: [run {task32_pre_ci_run}]"
+            f"({actions_base}/{task32_pre_ci_run}), including `verify` "
+            f"([job {task32_pre_ci_jobs[0]}]({actions_base}/{task32_pre_ci_run}/job/"
+            f"{task32_pre_ci_jobs[0]})) and `container-smoke` "
+            f"([job {task32_pre_ci_jobs[1]}]({actions_base}/{task32_pre_ci_run}/job/"
+            f"{task32_pre_ci_jobs[1]}))."
+        ),
+        (
+            "- Both pre-CI jobs passed and both pre-CI job annotation APIs returned "
+            "`[]`."
+        ),
+        f"- Prior final documentation tip: `{task32_final_docs_tip}`",
+        (
+            f"- Prior final-tip GitHub Actions: [run {task32_final_run}]"
+            f"({actions_base}/{task32_final_run}), including `verify` "
+            f"([job {task32_final_jobs[0]}]({actions_base}/{task32_final_run}/job/"
+            f"{task32_final_jobs[0]})) and `container-smoke` "
+            f"([job {task32_final_jobs[1]}]({actions_base}/{task32_final_run}/job/"
+            f"{task32_final_jobs[1]}))."
+        ),
+        (
+            "- Both final-tip jobs passed and both final-tip job annotation APIs "
+            "returned `[]`."
+        ),
+        (
+            "- Final-tip hosted `verify` covered `capture_manifest_valid`, 19 web "
+            "test files / 345 tests, Ruff, strict MyPy over 35 source files, 796 "
+            "Python tests, deterministic stub smoke, OpenAPI verification, and the "
+            "history-aware secret scan."
+        ),
+        (
+            "- Both prior `container-smoke` jobs built the packaged image with "
+            "owner-only `/data` mode `0700`, confirmed runtime user `10001:10001`, "
+            "and passed the offline network-none `deterministic-qa` and "
+            "`deployed-readonly` profiles."
+        ),
+    )
+    task32_bullets = tuple(
+        " ".join(match.group(0).split())
+        for match in re.finditer(
+            r"^- .*?(?=^- |\n\nPrior capture source|\Z)",
+            task32_history,
+            flags=re.MULTILINE | re.DOTALL,
+        )
+    )
+    assert task32_bullets == expected_task32_bullets
+    expected_task32_summary = (
+        "Prior capture source `a8057a8…`; activation `9de054e…`; manifest digest "
+        "`a5fdc8a…`; pre-CI successor `c6c60d4…`; final docs tip `abdf644…`. This "
+        "evidence remains truthful historical proof, but is superseded and is not "
+        "current Task33 source, capture, hosted CI, or container proof."
+    )
+    assert normalized_task32_history == (
+        " ".join(expected_task32_bullets) + " " + expected_task32_summary
+    )
+    for exact_historical_fact in (
+        "29 capture contracts",
+        "`capture_manifest_valid`",
+        "19 web test files / 345 tests",
+        "778 / 778 Python tests with 3 warnings in 28.51s",
+        "Both pre-CI jobs passed and both pre-CI job annotation APIs returned `[]`",
+        "Both final-tip jobs passed and both final-tip job annotation APIs returned `[]`",
+        "796 Python tests",
+        "owner-only `/data` mode `0700`",
+        "runtime user `10001:10001`",
+        "offline network-none `deterministic-qa` and `deployed-readonly` profiles",
+    ):
+        assert exact_historical_fact in normalized_task32_history
+    task32_historical_action_urls = {
+        f"{actions_base}/{task32_pre_ci_run}",
+        *(
+            f"{actions_base}/{task32_pre_ci_run}/job/{job}"
+            for job in task32_pre_ci_jobs
+        ),
+        f"{actions_base}/{task32_final_run}",
+        *(
+            f"{actions_base}/{task32_final_run}/job/{job}"
+            for job in task32_final_jobs
+        ),
+    }
+    assert set(
+        re.findall(
+            r"https://github\.com/[^)\s]+/actions/runs/\d+(?:/job/\d+)?",
+            task32_history,
+        )
+    ) == task32_historical_action_urls
+    for run, jobs in (
+        (task32_pre_ci_run, task32_pre_ci_jobs),
+        (task32_final_run, task32_final_jobs),
+    ):
+        for job in jobs:
+            assert (
+                f"([job {job}]({actions_base}/{run}/job/{job}))"
+                in task32_history
+            )
+        expected_job_binding = (
+            f"including `verify` ([job {jobs[0]}]"
+            f"({actions_base}/{run}/job/{jobs[0]})) and `container-smoke` "
+            f"([job {jobs[1]}]({actions_base}/{run}/job/{jobs[1]}))."
+        )
+        assert expected_job_binding in normalized_task32_history
 
     task31_capture = "c446f05adfb836539ddbaa74a41502034c910092"
     task31_activation = "b4c1bcbd70ff22ce3ac2b8a1de3828b7ce691afe"
@@ -510,6 +896,20 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     for historical_identifier in (
         "85e1e8ec9147242adca311c4ba10ea8c1c3008dc",
         "85e1e8e…",
+        task32_capture,
+        "a8057a8…",
+        task32_activation,
+        "9de054e…",
+        task32_digest,
+        "a5fdc8a…",
+        task32_pre_ci_successor,
+        "c6c60d4…",
+        task32_pre_ci_run,
+        *task32_pre_ci_jobs,
+        task32_final_docs_tip,
+        "abdf644…",
+        task32_final_run,
+        *task32_final_jobs,
         task31_capture,
         "c446f05…",
         task31_activation,
@@ -579,6 +979,20 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     ):
         assert historical_identifier not in current_evidence
     for required_historical_identifier in (
+        task32_capture,
+        "a8057a8…",
+        task32_activation,
+        "9de054e…",
+        task32_digest,
+        "a5fdc8a…",
+        task32_pre_ci_successor,
+        "c6c60d4…",
+        task32_pre_ci_run,
+        *task32_pre_ci_jobs,
+        task32_final_docs_tip,
+        "abdf644…",
+        task32_final_run,
+        *task32_final_jobs,
         task31_capture,
         "c446f05…",
         task31_activation,
@@ -659,6 +1073,22 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     (
         "85e1e8ec9147242adca311c4ba10ea8c1c3008dc",
         "85e1e8e…",
+        "a8057a8e0c29bdcc95e35949819c64005e5ee064",
+        "a8057a8…",
+        "9de054e5131ad3f610902d0a7bd4bd97c5968c7a",
+        "9de054e…",
+        "a5fdc8adc9788f181ace5f4de9cce7974344af02312cef2caa9e123193744503",
+        "a5fdc8a…",
+        "c6c60d4354eba7348aef3245d19e787661544fa7",
+        "c6c60d4…",
+        "30588357735",
+        "91024909140",
+        "91025281220",
+        "abdf644b4c35ecfaee2d22917c4c621f9d123a5b",
+        "abdf644…",
+        "30589435325",
+        "91028250060",
+        "91028596793",
         "c446f05adfb836539ddbaa74a41502034c910092",
         "c446f05…",
         "b4c1bcbd70ff22ce3ac2b8a1de3828b7ce691afe",
@@ -757,17 +1187,12 @@ def test_validation_rejects_superseded_provenance_in_current_evidence(
 @pytest.mark.parametrize(
     "current_identifier",
     (
-        "a8057a8e0c29bdcc95e35949819c64005e5ee064",
-        "a8057a8…",
-        "9de054e5131ad3f610902d0a7bd4bd97c5968c7a",
-        "9de054e…",
-        "c6c60d4354eba7348aef3245d19e787661544fa7",
-        "c6c60d4…",
-        "30588357735",
-        "91024909140",
-        "91025281220",
-        "a5fdc8adc9788f181ace5f4de9cce7974344af02312cef2caa9e123193744503",
-        "a5fdc8a…",
+        "84af413c3a7833daa635e6a0b84e8f331cc1f7f2",
+        "84af413…",
+        "7a8092f9ac0be03274358bb9814db3d8e6a34507",
+        "7a8092f…",
+        "00d4636da32836689202464fc55deb5f4b2a8f5e6ffd02831d27d22a9146bc90",
+        "00d4636…",
     ),
 )
 def test_validation_rejects_current_capture_provenance_in_historical_evidence(
@@ -826,11 +1251,81 @@ def test_validation_rejects_unexpected_current_hosted_provenance(
         _assert_validation_matches_current_capture(polluted_validation)
 
 
-def test_validation_requires_exact_current_hosted_run() -> None:
+@pytest.mark.parametrize(
+    "unqualified_positive_claim",
+    (
+        "Hosted CI passed.",
+        "GitHub Actions verified.",
+        "Backend passed.",
+        "Full canonical verified.",
+        "Container passed.",
+        "Public deployment passed.",
+        "Live OpenAI verified.",
+        "Release passed.",
+        "Provider execution verified.",
+        "Current Task33 full canonical/backend gate returned exit 0.",
+        "Current Task33 hosted CI status: 0.",
+        "Hosted CI validated.",
+        "GitHub Actions confirmed.",
+        "Backend OK.",
+        "Full canonical complete.",
+        "Container operational.",
+        "Public deployment live.",
+        "Live OpenAI approved.",
+        "Provider execution proven.",
+        "Release validated.",
+        "Docs-tip OK.",
+        "Hosted CI.\nPassed.",
+        "Passed.\nGitHub Actions.",
+        "Current Task33 CI.\nA neutral evidence sentence.\nPassed.",
+        (
+            "Hosted CI.\nNeutral evidence one.\nNeutral evidence two.\n"
+            "Neutral evidence three.\nPassed."
+        ),
+        (
+            "Live OpenAI.\nNeutral evidence one.\nNeutral evidence two.\n"
+            "Neutral evidence three.\nStatus: 0."
+        ),
+    ),
+)
+def test_validation_rejects_unqualified_current_positive_claims(
+    unqualified_positive_claim: str,
+) -> None:
     validation = _read("docs/validation.md")
+    historical_heading = "## Superseded historical hosted baseline"
     polluted_validation = validation.replace(
-        "30588357735",
-        "99999999999",
+        historical_heading,
+        f"{unqualified_positive_claim}\n\n{historical_heading}",
+        1,
+    )
+
+    with pytest.raises(AssertionError):
+        _assert_validation_matches_current_capture(polluted_validation)
+
+
+@pytest.mark.parametrize(
+    "generic_positive_claim",
+    (
+        "Passed.",
+        "All checks passed.",
+        "Verified.",
+        "Status: 0.",
+        "All tests work.",
+        "Everything is good.",
+        "The server suite is done.",
+        "The build checks are ready.",
+        "The pipeline is red-free.",
+    ),
+)
+def test_validation_rejects_generic_positive_after_json_media_section(
+    generic_positive_claim: str,
+) -> None:
+    validation = _read("docs/validation.md")
+    next_heading = "## Terminal evidence retry proof boundary"
+    polluted_validation = validation.replace(
+        next_heading,
+        f"{generic_positive_claim}\n\n{next_heading}",
+        1,
     )
 
     with pytest.raises(AssertionError):
@@ -846,16 +1341,23 @@ def test_validation_requires_exact_current_hosted_run() -> None:
         ),
         ("91024909140", "99999999998"),
         ("91025281220", "99999999997"),
-        ("reported `PASS`", "reported `FAILURE`"),
         (
-            "Both current job annotation APIs returned `[]`",
-            "Current job annotations were not inspected",
+            "abdf644b4c35ecfaee2d22917c4c621f9d123a5b",
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
         ),
-        ("778 Python tests with 1 warning in 43.35s", "777 Python tests"),
+        ("91028250060", "99999999996"),
+        ("91028596793", "99999999995"),
         (
-            "`install -d -m 0700 -o backchannel -g backchannel /data`",
-            "`install -d /data`",
+            "Both pre-CI jobs passed and both pre-CI job annotation APIs returned `[]`",
+            "Pre-CI annotations were not inspected",
         ),
+        (
+            "Both final-tip jobs passed and both final-tip job annotation APIs "
+            "returned `[]`",
+            "Final-tip annotations were not inspected",
+        ),
+        ("796 Python tests", "795 Python tests"),
+        ("owner-only `/data` mode `0700`", "`/data` mode was not inspected"),
         ("runtime user `10001:10001`", "runtime user was not inspected"),
         (
             "offline network-none `deterministic-qa` and `deployed-readonly` profiles",
@@ -863,27 +1365,52 @@ def test_validation_requires_exact_current_hosted_run() -> None:
         ),
     ),
 )
-def test_validation_rejects_current_hosted_fact_mutation(
+def test_validation_rejects_task32_historical_fact_mutation(
     original: str,
     replacement: str,
 ) -> None:
     validation = _read("docs/validation.md")
-    hosted_heading = "## Current Task32 hosted CI and packaged-container evidence"
-    hosted_end_heading = "## Per-SHA proof matrix"
-    hosted_evidence = validation.split(hosted_heading, maxsplit=1)[1].split(
-        hosted_end_heading,
+    task32_heading = "### SQLite-permission capture and hosted baselines (superseded)"
+    task32_end_heading = "### JSON-media capture and hosted baselines (superseded)"
+    task32_evidence = validation.split(task32_heading, maxsplit=1)[1].split(
+        task32_end_heading,
         maxsplit=1,
     )[0]
     original_pattern = re.compile(re.escape(original).replace(r"\ ", r"\s+"))
-    assert original_pattern.search(hosted_evidence)
-    polluted_hosted_evidence = original_pattern.sub(
+    assert original_pattern.search(task32_evidence)
+    polluted_task32_evidence = original_pattern.sub(
         replacement,
-        hosted_evidence,
+        task32_evidence,
         count=1,
     )
     polluted_validation = validation.replace(
-        hosted_evidence,
-        polluted_hosted_evidence,
+        task32_evidence,
+        polluted_task32_evidence,
+        1,
+    )
+
+    with pytest.raises(AssertionError):
+        _assert_validation_matches_current_capture(polluted_validation)
+
+
+@pytest.mark.parametrize(
+    "contradiction",
+    (
+        "The pre-CI verify job failed.",
+        "The final container-smoke job was skipped.",
+        "The hosted verify gate covered 344 web tests.",
+        "The final hosted gate covered 795 Python tests.",
+        "The local exact gate completed in 29.51s.",
+    ),
+)
+def test_validation_rejects_task32_historical_contradictions(
+    contradiction: str,
+) -> None:
+    validation = _read("docs/validation.md")
+    task32_end_heading = "### JSON-media capture and hosted baselines (superseded)"
+    polluted_validation = validation.replace(
+        task32_end_heading,
+        f"{contradiction}\n\n{task32_end_heading}",
         1,
     )
 
@@ -894,19 +1421,19 @@ def test_validation_rejects_current_hosted_fact_mutation(
 @pytest.mark.parametrize(
     "unsupported_positive_claim",
     (
-        "Public deployment passed.",
-        "Live OpenAI passed.",
-        "Container restart and replacement persistence passed.",
+        "Current Task33 public deployment passed.",
+        "Current Task33 live OpenAI passed.",
+        "Current Task33 container restart and replacement persistence passed.",
     ),
 )
-def test_validation_rejects_extra_positive_claim_in_current_hosted_section(
+def test_validation_rejects_extra_positive_claim_in_current_checkpoint(
     unsupported_positive_claim: str,
 ) -> None:
     validation = _read("docs/validation.md")
-    hosted_end_heading = "## Per-SHA proof matrix"
+    historical_heading = "## Superseded historical hosted baseline"
     polluted_validation = validation.replace(
-        hosted_end_heading,
-        f"- {unsupported_positive_claim}\n\n{hosted_end_heading}",
+        historical_heading,
+        f"- {unsupported_positive_claim}\n\n{historical_heading}",
         1,
     )
 
@@ -914,25 +1441,25 @@ def test_validation_rejects_extra_positive_claim_in_current_hosted_section(
         _assert_validation_matches_current_capture(polluted_validation)
 
 
-def test_validation_rejects_swapped_current_hosted_job_bindings() -> None:
+def test_validation_rejects_swapped_task32_historical_job_bindings() -> None:
     validation = _read("docs/validation.md")
-    hosted_heading = "## Current Task32 hosted CI and packaged-container evidence"
-    hosted_end_heading = "## Per-SHA proof matrix"
-    hosted_evidence = validation.split(hosted_heading, maxsplit=1)[1].split(
-        hosted_end_heading,
+    task32_heading = "### SQLite-permission capture and hosted baselines (superseded)"
+    task32_end_heading = "### JSON-media capture and hosted baselines (superseded)"
+    task32_evidence = validation.split(task32_heading, maxsplit=1)[1].split(
+        task32_end_heading,
         maxsplit=1,
     )[0]
     verify_job = "91024909140"
     container_job = "91025281220"
-    swapped_hosted_evidence = (
-        hosted_evidence.replace(verify_job, "__VERIFY_JOB__")
+    swapped_task32_evidence = (
+        task32_evidence.replace(verify_job, "__VERIFY_JOB__")
         .replace(container_job, verify_job)
         .replace("__VERIFY_JOB__", container_job)
     )
-    assert swapped_hosted_evidence != hosted_evidence
+    assert swapped_task32_evidence != task32_evidence
     polluted_validation = validation.replace(
-        hosted_evidence,
-        swapped_hosted_evidence,
+        task32_evidence,
+        swapped_task32_evidence,
         1,
     )
 
@@ -943,46 +1470,51 @@ def test_validation_rejects_swapped_current_hosted_job_bindings() -> None:
 @pytest.mark.parametrize(
     "unexpected_positive_claim",
     (
-        "Current Task32 CI passed.",
-        "Current Task32 CI. Passed.",
-        "Current Task32 CI.\nPassed.",
-        "Passed. Current Task32 CI.",
-        "Current Task32 container job passed.",
-        "Current Task32 verify job passed.",
-        "Task32 GitHub Actions passed successfully.",
-        "The current Task32 GitHub workflow passed.",
-        "Task32 container smoke. Result: verified.",
-        "Task32 container smoke.\nResult: verified.",
-        "Status: verified. Task32 container smoke.",
-        "Healthy. Current Task32 workflow.",
-        "Completed cleanly. Current Task32 packaged Docker.",
-        "No failures. Current Task32 verify job.",
-        "Current Task32 CI completed cleanly.",
-        "Current Task32 CI is passing.",
-        "Current Task32 workflow is healthy.",
-        "Current Task32 container smoke completed without failures.",
-        "Current Task32 CI has no failures.",
-        "Current Task32 CI has zero failures.",
-        "Current Task32 CI is error-free.",
+        "Current Task33 CI passed.",
+        "Current Task33 CI. Passed.",
+        "Current Task33 CI.\nPassed.",
+        "Passed. Current Task33 CI.",
+        "Current Task33 container job passed.",
+        "Current Task33 verify job passed.",
+        "Task33 GitHub Actions passed successfully.",
+        "The current Task33 GitHub workflow passed.",
+        "Task33 container smoke. Result: verified.",
+        "Task33 container smoke.\nResult: verified.",
+        "Status: verified. Task33 container smoke.",
+        "Healthy. Current Task33 workflow.",
+        "Completed cleanly. Current Task33 packaged Docker.",
+        "No failures. Current Task33 verify job.",
+        "Current Task33 CI completed cleanly.",
+        "Current Task33 CI is passing.",
+        "Current Task33 workflow is healthy.",
+        "Current Task33 container smoke completed without failures.",
+        "Current Task33 CI has no failures.",
+        "Current Task33 CI has zero failures.",
+        "Current Task33 CI is error-free.",
         (
-            "- No current Task32 GitHub Actions run or job has been observed.\n"
+            "- No current Task33 full canonical/backend, GitHub Actions, "
+            "or packaged container result has been observed.\n"
             "Passed."
         ),
         (
             "Passed.\n"
-            "- No current Task32 GitHub Actions run or job has been observed."
+            "- No current Task33 full canonical/backend, GitHub Actions, "
+            "or packaged container result has been observed."
         ),
         "The full Python suite passed all 718 tests.",
         "Canonical backend: 718 passed.",
-        "Current Task32 GitHub Actions passed successfully.",
-        "Current Task32 GitHub Actions run is green.",
-        "Current Task32 hosted CI succeeded.",
-        "Current Task32 packaged container smoke passed successfully.",
-        "Current Task32 container-smoke job is green.",
-        "Current Task32 container smoke succeeded.",
-        "Current Task32 workflow green.",
-        "Current Task32 packaged Docker successful.",
-        "Current Task32 container-smoke verified.",
+        "Current Task33 GitHub Actions passed successfully.",
+        "Current Task33 GitHub Actions run is green.",
+        "Current Task33 hosted CI succeeded.",
+        "Current Task33 packaged container smoke passed successfully.",
+        "Current Task33 container-smoke job is green.",
+        "Current Task33 container smoke succeeded.",
+        "Current Task33 workflow green.",
+        "Current Task33 packaged Docker successful.",
+        "Current Task33 container-smoke verified.",
+        "Current Task33 full canonical gate passed 799 tests.",
+        "Current Task33 backend gate succeeded.",
+        "Current Task33 docs-tip workflow passed.",
         "Full canonical Python gate passed 718 tests.",
         "Full canonical gate succeeded with 718 tests.",
         "Final full canonical gate passed 718 tests.",
@@ -1008,24 +1540,24 @@ def test_validation_rejects_generic_current_positive_claims(
     ("bullet_prefix", "original", "replacement"),
     (
         (
-            "Pre-capture Task32 gates on clean source",
-            "P0-P3 findings.",
-            "P0-P3 findings and 778 passed.",
+            "Pre-capture Task33 gates on clean source",
+            "focused client matrix passed 144 / 144 tests",
+            "focused client matrix passed 143 / 144 tests",
         ),
         (
-            "Local exact clean gate on hosted validation successor",
-            "778 / 778 Python tests with 3 warnings in 28.51s",
-            "777 / 778 Python tests with 3 warnings in 28.51s",
+            "Pre-capture Task33 gates on clean source",
+            "full web source gate passed 369 / 369 tests",
+            "full web source gate passed 368 / 369 tests",
         ),
         (
-            "Local exact clean gate on hosted validation successor",
-            "c6c60d4354eba7348aef3245d19e787661544fa7",
-            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            "Independent Task33 specification and quality reviews",
+            "fully valid pending-approval fixture",
+            "placeholder fixture",
         ),
         (
-            "Local exact clean gate on hosted validation successor",
-            "deterministic stub and local single-process production smokes",
-            "deterministic stub smoke only",
+            "No current Task33 full canonical/backend",
+            "result has been observed",
+            "result passed",
         ),
     ),
 )
@@ -1046,6 +1578,93 @@ def test_validation_rejects_evidence_timing_mutation(
     assert original_pattern.search(bullet)
     polluted_bullet = original_pattern.sub(replacement, bullet, count=1)
     polluted_validation = validation.replace(bullet, polluted_bullet, 1)
+
+    with pytest.raises(AssertionError):
+        _assert_validation_matches_current_capture(polluted_validation)
+
+
+@pytest.mark.parametrize(
+    ("original", "replacement"),
+    (
+        (
+            "only at terminal `currentStep: 5`",
+            "at any `currentStep`",
+        ),
+        (
+            "terminal statuses is rejected at steps 0 through 4",
+            "terminal statuses remain accepted at steps 0 through 4",
+        ),
+        (
+            "terminal snapshots continue to reject even a structurally valid pending "
+            "approval",
+            "terminal snapshots accept a pending approval",
+        ),
+        (
+            "Nonterminal `in_progress` and `pending_approval` snapshots retain their "
+            "previously valid steps",
+            "nonterminal snapshots are also forced to step 5",
+        ),
+        ("fully valid pending-consent fixture", "placeholder pending consent"),
+        ("focused 144-test client matrix", "an unspecified focused client matrix"),
+        (
+            "every terminal status at every step 0 through 5",
+            "one terminal status at step 5",
+        ),
+        (
+            "full web source gate covered 369 tests plus the TypeScript/Vite build",
+            "a partial web run",
+        ),
+    ),
+)
+def test_validation_rejects_terminal_snapshot_contract_mutation(
+    original: str,
+    replacement: str,
+) -> None:
+    validation = _read("docs/validation.md")
+    terminal_heading = "## Terminal snapshot consistency proof boundary"
+    terminal_end_heading = "## SQLite file-permission proof boundary"
+    terminal_evidence = validation.split(terminal_heading, maxsplit=1)[1].split(
+        terminal_end_heading,
+        maxsplit=1,
+    )[0]
+    original_pattern = re.compile(re.escape(original).replace(r"\ ", r"\s+"))
+    assert original_pattern.search(terminal_evidence)
+    polluted_terminal_evidence = original_pattern.sub(
+        replacement,
+        terminal_evidence,
+        count=1,
+    )
+    polluted_validation = validation.replace(
+        terminal_evidence,
+        polluted_terminal_evidence,
+        1,
+    )
+
+    with pytest.raises(AssertionError):
+        _assert_validation_matches_current_capture(polluted_validation)
+
+
+@pytest.mark.parametrize(
+    "contradiction",
+    (
+        "Terminal steps 0 through 4 are accepted.",
+        "`completed` at `currentStep: 2` is valid.",
+        "Terminal snapshots may retain a pending approval.",
+        "Nonterminal snapshots are forced to `currentStep: 5`.",
+        "The matrix covers only `completed` at step 5.",
+        "The full web source gate failed.",
+    ),
+)
+def test_validation_rejects_terminal_snapshot_contradictions(
+    contradiction: str,
+) -> None:
+    validation = _read("docs/validation.md")
+    terminal_end_heading = "## SQLite file-permission proof boundary"
+    polluted_validation = validation.replace(
+        terminal_end_heading,
+        f"{contradiction}\n\n{terminal_end_heading}",
+        1,
+    )
 
     with pytest.raises(AssertionError):
         _assert_validation_matches_current_capture(polluted_validation)
