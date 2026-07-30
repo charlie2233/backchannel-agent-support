@@ -32,30 +32,44 @@ results from any sibling branch.
 - Independent Task31 review: specification and quality reviews passed with no
   P0-P3; 28 adversarial cases with zero mismatches; visual review passed with no
   P0-P3.
-- No green current Task31 GitHub Actions run or job has been observed.
-- No current Task31 packaged container smoke was executed.
+- Hosted validation successor:
+  `62c37d6261257ea3800335257e43ae45ed839c47`
+- GitHub Actions:
+  [run 30501109833](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30501109833)
+- Result: `verify`
+  ([job 90740755548](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30501109833/job/90740755548))
+  reported `PASS`; `container-smoke`
+  ([job 90741063564](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30501109833/job/90741063564))
+  reported `PASS`. Both job annotation APIs returned `[]`.
+- Hosted `verify` passed `capture_manifest_valid`, 19 web test files / 345 tests,
+  the TypeScript/Vite build, Ruff, strict MyPy over 35 source files, 695 Python
+  tests with 1 warning in 43.09s, deterministic stub smoke, OpenAPI verification,
+  and the history-aware secret scan.
+- Hosted `container-smoke` built the packaged Docker image, confirmed runtime user
+  `10001:10001`, and passed the offline network-none `deterministic-qa` and
+  `deployed-readonly` profiles.
 
 ## Per-SHA proof matrix
 
 | Lane | Exact evidence | Status and boundary |
 | --- | --- | --- |
-| Local source and tests | Focused/full web gates on source `c446f05…`; post-activation canonical current-tree gate above | **Verified locally** in the exact lanes described above; hosted CI, container, browser deployment, live OpenAI, and release remain unverified |
+| Local source and tests | Focused/full web gates on source `c446f05…`; post-activation canonical current-tree gate above | **Verified locally** in the exact lanes described above; hosted evidence is separate and neither lane proves browser deployment, live OpenAI, or release |
 | Local final-build captures | [`docs/assets/final/manifest.json`](assets/final/manifest.json); six provenance-checked PNGs under [`docs/assets/final`](assets/final) | **Verified locally** on capture source `c446f05…` in Google Chrome at 1440×1024 and 390×844; not container, deployment, live OpenAI, or release proof |
 | Live OpenAI | [`live-validation.md`](live-validation.md) records only a redacted invalid-key result | **Blocked / Unverified**; no valid `OPENAI_API_KEY`, one-run trace, or three consecutive successes |
 | Local Docker | No Docker-family runtime is installed on this Mac | **Unverified locally** |
-| GitHub CI/container | No current Task31 run or packaged container job has been observed | **Unverified** for this source/capture checkpoint; superseded Task30 proof is retained only below and is not inherited |
+| GitHub CI/container | Run 30501109833; `verify` and packaged `container-smoke` | **Verified** on hosted successor `62c37d6…`; both jobs passed with empty annotations, but this is not local Docker, browser capture, public deployment, live OpenAI, or release proof |
 | Public deployment | No public application origin | **Blocked / Unverified** |
 | Tag/release | No release tag or GitHub release | **Blocked / Unverified** |
 
 ## Hosted container evidence boundary
 
-There is no current Task31 hosted-container result. The superseded historical section
-records prior packaged Docker evidence, but it is not current for this source/capture
-checkpoint. Current local source and capture evidence does not prove local Docker,
-browser capture in CI, public deployment or browser URL, live OpenAI, real provider
-execution, container replacement or restart, long-lived `/data` volume persistence,
-target-host durability/networking, abrupt host-loss or backup, concurrent
-multi-container SQLite, tag or release.
+The current hosted container job proves a packaged Docker image build, runtime user
+`10001:10001`, and the offline network-none `deterministic-qa` and
+`deployed-readonly` profiles. It does not prove local Docker, browser capture in CI,
+public deployment or browser URL, live OpenAI, real provider execution, container
+replacement or restart, long-lived `/data` volume persistence, target-host
+durability/networking, abrupt host-loss or backup, concurrent multi-container SQLite,
+tag or release.
 
 ## Capture contract
 
