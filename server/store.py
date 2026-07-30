@@ -5,8 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 import sqlite3
+import stat
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -49,6 +51,8 @@ from server.providers.quota_simulator import QuotaGrantResult
 
 SQLITE_BUSY_TIMEOUT_SECONDS = 3.0
 SQLITE_PROCESS_LOCK_TIMEOUT_SECONDS = 1.0
+SQLITE_PRIVATE_FILE_MODE = stat.S_IRUSR | stat.S_IWUSR
+SQLITE_SIDECAR_SUFFIXES = ("-journal", "-wal", "-shm")
 SDK_STUB_RECEIPT_BOUNDARY = (
     "Deterministic Agents SDK model and demo hotel adapter only; "
     "no OpenAI model call, real booking, or payment change."
@@ -83,6 +87,17 @@ QUOTA_TERMINAL_SUMMARY = (
 
 class SQLiteStoreContentionError(RetryableStoreAccessError):
     """Raised when the process-local reentrant store lock cannot be acquired."""
+
+
+class SQLiteStoreFileSecurityError(RuntimeError):
+    """Raised when SQLite state cannot be kept in owner-only regular files."""
+
+
+def _secure_sqlite_filesystem_primitives_available() -> bool:
+    return os.name == "posix" and all(
+        hasattr(os, primitive)
+        for primitive in ("O_CLOEXEC", "O_NONBLOCK", "O_NOFOLLOW", "fchmod", "geteuid")
+    )
 
 
 class _BoundedRLock:
@@ -514,10 +529,31 @@ class SQLiteStore:
     """Small connection-per-transaction store safe for FastAPI worker threads."""
 
     def __init__(self, database_path: str | Path) -> None:
-        self._database_path = Path(database_path)
+        if not _secure_sqlite_filesystem_primitives_available():
+            raise SQLiteStoreFileSecurityError(
+                "SQLite owner-only file enforcement requires supported POSIX primitives"
+            )
+        requested_database_path = Path(database_path)
         self._lock = _BoundedRLock(SQLITE_PROCESS_LOCK_TIMEOUT_SECONDS)
         self._closed = False
-        self._database_path.parent.mkdir(parents=True, exist_ok=True)
+        requested_database_path.parent.mkdir(parents=True, exist_ok=True)
+        self._database_path = (
+            requested_database_path.parent.resolve(strict=True)
+            / requested_database_path.name
+        )
+        self._validate_database_parent()
+        database_identity = self._inspect_regular_file(
+            self._database_path,
+            create=True,
+            repair=True,
+        )
+        if database_identity is None:
+            raise SQLiteStoreFileSecurityError(
+                "SQLite state must use an owner-only regular file"
+            )
+        self._database_identity = database_identity
+        self._database_uri = f"{self._database_path.as_uri()}?mode=rw"
+        self._inspect_existing_sidecars(repair=True)
         with self._connect() as connection:
             connection.executescript(SCHEMA)
             self._migrate_task2_recovery_constraints(connection)
@@ -557,6 +593,116 @@ class SQLiteStore:
             self._migrate_task6_receipts(connection)
             self._migrate_task7_receipt_provenance(connection)
             self._migrate_task8_inert_replay_fixtures(connection)
+
+    def _validate_database_parent(self) -> None:
+        trusted_owners = {0, os.geteuid()}
+        protected_descendant = False
+        for directory in (
+            self._database_path.parent,
+            *self._database_path.parent.parents,
+        ):
+            try:
+                directory_status = directory.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise SQLiteStoreFileSecurityError(
+                    "SQLite database parent must be a protected directory"
+                ) from exc
+            writable_by_others = bool(
+                directory_status.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+            )
+            protected_sticky_ancestor = bool(
+                protected_descendant
+                and directory_status.st_uid == 0
+                and directory_status.st_mode & stat.S_ISVTX
+            )
+            if (
+                not stat.S_ISDIR(directory_status.st_mode)
+                or directory_status.st_uid not in trusted_owners
+                or writable_by_others
+                and not protected_sticky_ancestor
+            ):
+                raise SQLiteStoreFileSecurityError(
+                    "SQLite database parent must be a protected directory"
+                )
+            if not writable_by_others:
+                protected_descendant = True
+
+    @staticmethod
+    def _inspect_regular_file(
+        path: Path,
+        *,
+        create: bool,
+        repair: bool,
+        expected_identity: tuple[int, int] | None = None,
+    ) -> tuple[int, int] | None:
+        open_flags = (
+            os.O_RDONLY
+            | os.O_CLOEXEC
+            | os.O_NONBLOCK
+            | os.O_NOFOLLOW
+        )
+        file_descriptor: int | None = None
+        try:
+            try:
+                file_descriptor = os.open(path, open_flags)
+            except FileNotFoundError:
+                if not create:
+                    return None
+                try:
+                    file_descriptor = os.open(
+                        path,
+                        open_flags | os.O_CREAT | os.O_EXCL,
+                        SQLITE_PRIVATE_FILE_MODE,
+                    )
+                except FileExistsError:
+                    file_descriptor = os.open(path, open_flags)
+            file_status = os.fstat(file_descriptor)
+            identity = (file_status.st_dev, file_status.st_ino)
+            if expected_identity is not None and identity != expected_identity:
+                raise SQLiteStoreFileSecurityError(
+                    "SQLite database changed while SQLite opened it"
+                )
+            if (
+                not stat.S_ISREG(file_status.st_mode)
+                or file_status.st_uid != os.geteuid()
+            ):
+                raise SQLiteStoreFileSecurityError(
+                    "SQLite state must use an owner-only regular file"
+                )
+            if stat.S_IMODE(file_status.st_mode) != SQLITE_PRIVATE_FILE_MODE:
+                if not repair:
+                    raise SQLiteStoreFileSecurityError(
+                        "SQLite state must use an owner-only regular file"
+                    )
+                os.fchmod(file_descriptor, SQLITE_PRIVATE_FILE_MODE)
+            secured_status = os.fstat(file_descriptor)
+            if (
+                not stat.S_ISREG(secured_status.st_mode)
+                or secured_status.st_uid != os.geteuid()
+                or (secured_status.st_dev, secured_status.st_ino) != identity
+                or stat.S_IMODE(secured_status.st_mode) != SQLITE_PRIVATE_FILE_MODE
+            ):
+                raise SQLiteStoreFileSecurityError(
+                    "SQLite state must use an owner-only regular file"
+                )
+            return (secured_status.st_dev, secured_status.st_ino)
+        except SQLiteStoreFileSecurityError:
+            raise
+        except OSError as exc:
+            raise SQLiteStoreFileSecurityError(
+                "SQLite state must use an owner-only regular file"
+            ) from exc
+        finally:
+            if file_descriptor is not None:
+                os.close(file_descriptor)
+
+    def _inspect_existing_sidecars(self, *, repair: bool) -> None:
+        for suffix in SQLITE_SIDECAR_SUFFIXES:
+            self._inspect_regular_file(
+                Path(f"{self._database_path}{suffix}"),
+                create=False,
+                repair=repair,
+            )
 
     @staticmethod
     def _recovery_access_schema_is_exact(connection: sqlite3.Connection) -> bool:
@@ -2292,10 +2438,37 @@ class SQLiteStore:
     def _connect(self) -> sqlite3.Connection:
         if self._closed:
             raise RuntimeError("SQLiteStore is closed")
-        connection = sqlite3.connect(
+        database_identity = self._inspect_regular_file(
             self._database_path,
-            timeout=SQLITE_BUSY_TIMEOUT_SECONDS,
+            create=False,
+            repair=False,
+            expected_identity=self._database_identity,
         )
+        if database_identity != self._database_identity:
+            raise SQLiteStoreFileSecurityError(
+                "SQLite database changed while SQLite opened it"
+            )
+        self._inspect_existing_sidecars(repair=False)
+        connection = sqlite3.connect(
+            self._database_uri,
+            timeout=SQLITE_BUSY_TIMEOUT_SECONDS,
+            uri=True,
+        )
+        try:
+            database_identity = self._inspect_regular_file(
+                self._database_path,
+                create=False,
+                repair=False,
+                expected_identity=self._database_identity,
+            )
+            if database_identity != self._database_identity:
+                raise SQLiteStoreFileSecurityError(
+                    "SQLite database changed while SQLite opened it"
+                )
+            self._inspect_existing_sidecars(repair=False)
+        except BaseException:
+            connection.close()
+            raise
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         return connection

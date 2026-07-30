@@ -45,6 +45,25 @@ admission and bounded SSE fanout therefore remain authoritative for that topolog
 packaged image runs as non-root UID/GID `10001:10001`, serves the built React bundle,
 and stores its SQLite database below the mounted `/data` volume.
 
+The image creates `/data` as `0700`. At store construction, the runtime atomically
+creates the main SQLite file as `0600`, or hardens an existing regular file owned by
+the effective runtime UID to that exact mode, before SQLite can read it. Existing
+rollback-journal, WAL, and shared-memory sidecars are hardened under the same startup
+policy; sidecars created later inherit the main file's `0600` mode. Every later open
+validates the owner, mode, regular-file type, and original database inode without
+repair, and uses SQLite `mode=rw` so a deletion race cannot create a replacement.
+Symlink and non-regular database or sidecar paths fail closed.
+
+The canonical database directory and its relevant ancestry must be owned by root or
+the effective runtime UID and protected from group/world replacement. The runtime does
+not chmod that directory or unrelated files.
+
+This is a POSIX single-host at-rest access boundary, not volume encryption. Operators
+remain responsible for host access, encrypted storage where required, private backups,
+and restoring files with the runtime UID as owner. Another process running as that same
+UID remains inside the trust boundary. Startup fails closed on platforms that do not
+provide effective-UID, descriptor-chmod, and no-follow file-opening primitives.
+
 The hosted CI container job proves image build, non-root identity, and two offline
 packaged smoke profiles. It does not prove a long-lived volume, abrupt host-loss,
 backup restore, target-host networking, or concurrent multi-container SQLite writes.

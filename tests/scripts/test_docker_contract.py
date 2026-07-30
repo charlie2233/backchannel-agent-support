@@ -31,7 +31,7 @@ def test_runtime_defaults_are_deployed_non_root_and_durable() -> None:
     assert "BACKCHANNEL_DB_PATH=/data/backchannel.sqlite3" in dockerfile
     assert "BACKCHANNEL_DEPLOYED=true" in dockerfile
     assert "BACKCHANNEL_FRONTEND_DIST_PATH=/app/web/dist" in dockerfile
-    assert "install -d -o backchannel -g backchannel /data" in dockerfile
+    assert "install -d -m 0700 -o backchannel -g backchannel /data" in dockerfile
     assert "USER 10001:10001" in dockerfile
     assert "EXPOSE 8000" in dockerfile
 

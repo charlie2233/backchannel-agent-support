@@ -38,7 +38,7 @@ ENV BACKCHANNEL_DB_PATH=/data/backchannel.sqlite3 \
 
 RUN groupadd --gid 10001 backchannel \
     && useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin backchannel \
-    && install -d -o backchannel -g backchannel /data
+    && install -d -m 0700 -o backchannel -g backchannel /data
 
 WORKDIR /app
 COPY --from=python-dependencies /app/.venv ./.venv
