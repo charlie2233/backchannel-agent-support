@@ -660,7 +660,9 @@ _DECISION_RESUME_UNPROCESSABLE_RESPONSE: dict[str, Any] = {
 _EVENT_STREAM_DESCRIPTION = (
     f"{_PRIVATE_RECOVERY_DESCRIPTION} Streams are admitted by bounded, "
     "process-local capacity. At capacity, the endpoint returns a finite "
-    "stream.capacity control event with a native EventSource retry interval."
+    "stream.capacity control event with a native EventSource retry interval. "
+    "An admitted stream is bound to the exact verified signed-session expiry "
+    "and emits no later buffered events, polled events, or heartbeats."
 )
 _EVENT_STREAM_HEADERS = {
     "Cache-Control": "no-cache",
@@ -1960,7 +1962,8 @@ def create_app(
     ) -> Response:
         recovery_key = str(recovery_id)
         _require_recovery_access(request, recovery_store, recovery_key)
-        session_key = cast(ClientIdentity, request.state.demo_identity).session_key
+        identity = cast(ClientIdentity, request.state.demo_identity)
+        session_key = identity.session_key
         try:
             cursor_values = request.headers.getlist("last-event-id")
             if len(cursor_values) > 1:
@@ -2004,6 +2007,7 @@ def create_app(
                     initial_batch=initial_batch,
                     public_session_key=session_key,
                     public_replay_scenarios=public_replay_scenarios,
+                    public_session_expires_at=identity.session_expires_at,
                 ),
                 lease,
             ),

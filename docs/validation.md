@@ -181,11 +181,15 @@ The event-stream admission suites prove atomic global/per-recovery caps under th
 idempotent cleanup, finite exact capacity framing without a polling loop, privacy and cursor
 ordering while saturated, expiry-before-admission, replay preservation, and reacquisition after
 normal completion, cancellation, iterator failure, ASGI send failure, and response construction
-failure. Browser coverage proves exact named-control validation, native retry remaining open,
-one-shot preservation of the capacity status at stream EOF, transient error clearing, and
-unchanged terminal closure. These tests prove at most the configured polling loops in this
-application process. They do not prove a shared limit across workers or containers;
-`scripts/start.py` is separately asserted to launch one worker.
+failure. Signed-session deadline coverage binds the route to the exact verified cookie expiry,
+suppresses an already-buffered event when iteration begins expired, suppresses a batch whose
+public-ledger read crosses expiry, prevents later events and heartbeats, caps idle sleep to the
+remaining lifetime, and proves lease release and reacquisition. Browser coverage proves exact
+named-control validation, native retry remaining open, one-shot preservation of the capacity
+status at stream EOF, transient error clearing, and unchanged terminal closure. These tests
+prove at most the configured polling loops in this application process. They do not prove a
+shared limit across workers or containers; `scripts/start.py` is separately asserted to launch
+one worker.
 The terminal-read integrity suite proves public snapshot, receipt, and initial SSE authorization
 precedes any targeted expiry mutation inside the same SQLite transaction; a stale outer access
 result cannot close another session's recovery. It proves rollback-safe validation before stream

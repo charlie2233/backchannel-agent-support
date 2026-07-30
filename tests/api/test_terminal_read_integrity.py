@@ -1267,6 +1267,7 @@ def test_public_sse_revalidates_integrity_after_admission(
             initial_batch=initial_batch,
             public_session_key=session_key,
             public_replay_scenarios=replay_scenarios,
+            public_session_expires_at=datetime.now(UTC) + timedelta(minutes=1),
         )
         for _event in initial_batch[0]:
             await anext(stream)

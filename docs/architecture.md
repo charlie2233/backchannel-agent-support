@@ -43,6 +43,14 @@ loop. The browser validates that exact control envelope, presents its message as
 leaves native `EventSource` reconnection active. A later durable recovery event clears the
 message, while a terminal event still closes the source.
 
+An admitted stream retains only the already verified opaque session correlation plus its exact
+UTC cookie expiry. The generator rechecks that deadline around public-ledger reads and directly
+before event and heartbeat emission, caps idle waits to the remaining lifetime, and closes
+silently when a deadline check reaches expiry. Buffered or newly committed owner evidence is
+never emitted at or after the deadline, and the lease wrapper releases the process-local slot.
+Native reconnect then crosses the ordinary cookie verification boundary; a newly issued session
+receives the same generic recovery `404` rather than an expiry-specific disclosure.
+
 A live-ready page load is deliberately idle. **Start live recovery** is the only UI action that
 creates an `openai_live` hotel run, and an in-flight guard coalesces rapid activation before
 React can re-render the disabled control. Same-tab `sessionStorage` may hold the canonical UUID
@@ -327,10 +335,11 @@ The server applies request-size limits, exact CORS configuration, generic public
 redacted server logging, per-IP and per-session live cooldowns, a live concurrency cap, a
 configurable daily admission budget, terminal-record TTL cleanup, and an HttpOnly demo-session
 cookie. Long-lived event streams add configurable process and per-recovery caps plus a bounded
-retry interval. Admission leases are released idempotently after terminal completion, client
-disconnect, cancellation, iterator/store/encoding failure, ASGI send failure, or response
-construction failure; zero-count recovery entries are removed. Deployed mode additionally
-requires an exact HTTPS origin allowlist and an explicit
+retry interval and are bound to the verified signed-session expiry. Admission leases are
+released idempotently after session expiry, terminal completion, client disconnect,
+cancellation, iterator/store/encoding failure, ASGI send failure, or response construction
+failure; zero-count recovery entries are removed. Deployed mode additionally requires an exact
+HTTPS origin allowlist and an explicit
 32-byte-or-longer identity-hash secret. Proxy headers are ignored unless the direct peer is in
 an explicit trusted CIDR allowlist.
 

@@ -647,12 +647,16 @@ def test_demo_reset_documents_unresolved_creation_conflict() -> None:
 def test_event_stream_success_response_is_documented_as_sse() -> None:
     schema = json.loads(_exporter().render_openapi())
 
-    content = schema["paths"]["/api/recoveries/{recovery_id}/events"]["get"]["responses"]["200"][
-        "content"
-    ]
+    operation = schema["paths"]["/api/recoveries/{recovery_id}/events"]["get"]
+    content = operation["responses"]["200"]["content"]
 
     assert "text/event-stream" in content
     assert "application/json" not in content
+    assert (
+        "An admitted stream is bound to the exact verified signed-session expiry "
+        "and emits no later buffered events, polled events, or heartbeats."
+        in operation["description"]
+    )
 
 
 def test_event_stream_documents_exact_cursor_grammar_range_and_error() -> None:

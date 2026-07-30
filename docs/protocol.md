@@ -171,6 +171,16 @@ existing durable replay, polling, heartbeat, disconnect, and terminal rules. The
 lease is also released on cancellation, iterator/store/encoding errors, response construction
 failure, and ASGI send failure.
 
+Every admitted public stream is also bound to the exact UTC expiry verified from its signed
+session cookie. The generator checks that deadline before consuming the buffered admission
+batch, before and after every later public-ledger read, immediately before each event or
+heartbeat emission, and after the disconnect probe. Idle sleeps are capped to the remaining
+session lifetime. Once a deadline check reaches expiry, the stream closes without an expiry
+control frame; no buffered, polled, or heartbeat data is emitted at or after the deadline, and
+its admission lease is released. A native reconnect with the expired cookie receives a fresh
+session identity and the same generic `404` boundary for the former recovery; session expiry is
+not disclosed separately.
+
 This is not a fleet-wide limit. Every worker or container would have independent counters. The
 production launcher uses one Uvicorn worker, so the configured defaults cap polling loops only
 in that one process; horizontal scaling requires a separate shared-admission design.

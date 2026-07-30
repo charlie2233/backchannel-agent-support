@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from datetime import UTC, datetime, timedelta
 from threading import Lock
 from time import monotonic
 
@@ -152,6 +153,20 @@ def encode_sse_event(event: RecoveryEvent) -> str:
     return f"id: {event.seq}\ndata: {payload}\n\n"
 
 
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _seconds_until_session_expiry(
+    expires_at: datetime,
+    session_clock: Callable[[], datetime],
+) -> float:
+    current = session_clock()
+    if current.tzinfo is None or current.utcoffset() != timedelta(0):
+        raise ValueError("Public event session clock must return a UTC timestamp")
+    return (expires_at - current).total_seconds()
+
+
 async def stream_recovery_events(
     store: SQLiteStore,
     recovery_id: str,
@@ -165,17 +180,47 @@ async def stream_recovery_events(
     public_replay_scenarios: (
         Mapping[ScenarioId, ReplayScenarioDefinition] | None
     ) = None,
+    public_session_expires_at: datetime | None = None,
+    session_clock: Callable[[], datetime] = _utc_now,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> AsyncIterator[str]:
     """Replay durable events first, then poll for newly committed events."""
 
-    if (public_session_key is None) is not (public_replay_scenarios is None):
+    public_options = (
+        public_session_key is not None,
+        public_replay_scenarios is not None,
+        public_session_expires_at is not None,
+    )
+    if any(public_options) and not all(public_options):
         raise ValueError(
-            "Public event validation requires both session and replay definitions"
+            "Public event validation requires session, replay definitions, and expiry"
         )
+    if (
+        public_session_expires_at is not None
+        and (
+            public_session_expires_at.tzinfo is None
+            or public_session_expires_at.utcoffset() != timedelta(0)
+        )
+    ):
+        raise ValueError("Public event session expiry must be a UTC timestamp")
+
+    def session_is_active() -> bool:
+        if public_session_expires_at is None:
+            return True
+        return (
+            _seconds_until_session_expiry(
+                public_session_expires_at,
+                session_clock,
+            )
+            > 0
+        )
+
     cursor = after_seq
     last_emission = monotonic()
     pending_initial_batch = initial_batch
     while True:
+        if not session_is_active():
+            return
         if pending_initial_batch is not None:
             persisted, recovery_status = pending_initial_batch
             pending_initial_batch = None
@@ -194,19 +239,42 @@ async def stream_recovery_events(
                 recovery_id,
                 after_seq=cursor,
             )
+        if not session_is_active():
+            return
         for event in persisted:
-            yield encode_sse_event(event)
+            encoded_event = encode_sse_event(event)
+            if not session_is_active():
+                return
+            yield encoded_event
             cursor = event.seq
             last_emission = monotonic()
 
         if recovery_status.terminal:
             return
+        if not session_is_active():
+            return
         if await is_disconnected():
+            return
+        if not session_is_active():
             return
 
         elapsed = monotonic() - last_emission
         if elapsed >= heartbeat_seconds:
+            if not session_is_active():
+                return
             yield ": heartbeat\n\n"
             last_emission = monotonic()
             continue
-        await asyncio.sleep(min(poll_interval_seconds, heartbeat_seconds - elapsed))
+        sleep_seconds = min(
+            poll_interval_seconds,
+            heartbeat_seconds - elapsed,
+        )
+        if public_session_expires_at is not None:
+            remaining_session_seconds = _seconds_until_session_expiry(
+                public_session_expires_at,
+                session_clock,
+            )
+            if remaining_session_seconds <= 0:
+                return
+            sleep_seconds = min(sleep_seconds, remaining_session_seconds)
+        await sleep(sleep_seconds)
