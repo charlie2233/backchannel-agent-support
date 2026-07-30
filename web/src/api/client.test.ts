@@ -11,6 +11,7 @@ import {
   PublicApiError,
   readRecoveryEventStreamFailure,
 } from "./client";
+import type { PendingApproval } from "../domain/recovery";
 
 const recoveryId = "11111111-2222-4333-8444-555555555555";
 const digest = `sha256:${"a".repeat(64)}` as `sha256:${string}`;
@@ -1771,33 +1772,112 @@ describe("decision and receipt contracts", () => {
     });
   });
 
-  it("recognizes both terminal snapshot statuses without accepting pending consent", () => {
-    const base = {
-      recoveryId,
-      scenarioId: "hotel",
-      executionMode: "sdk_stub",
-      currentStep: 5,
-      currentStepSummary: "Terminal server state.",
-      createdAt: "2026-07-18T20:00:00Z",
-      updatedAt: "2026-07-18T20:00:03Z",
-      pendingApproval: null,
-      rootTraceId: "qa_trace_11111111111111111111111111111111",
-      modelIds: [],
-      sdkVersion: "0.18.3",
-      protocolVersion: "backchannel.approval.v1",
-      agentGraphVersion: "backchannel.hotel-agent.v1",
-      promptToolSchemaHash: "b".repeat(64),
-    };
-    expect(isRecoverySnapshot({ ...base, status: "closed_without_action" })).toBe(true);
-    expect(isRecoverySnapshot({ ...base, status: "outcome_unknown" })).toBe(true);
+  const terminalSnapshotBase = {
+    recoveryId,
+    scenarioId: "hotel",
+    executionMode: "sdk_stub",
+    currentStepSummary: "Terminal server state.",
+    createdAt: "2026-07-18T20:00:00Z",
+    updatedAt: "2026-07-18T20:00:03Z",
+    pendingApproval: null,
+    rootTraceId: "qa_trace_11111111111111111111111111111111",
+    modelIds: [],
+    sdkVersion: "0.18.3",
+    protocolVersion: "backchannel.approval.v1",
+    agentGraphVersion: "backchannel.hotel-agent.v1",
+    promptToolSchemaHash: "b".repeat(64),
+  };
+  const validPendingApproval = {
+    remedyId: "remedy-terminal-consent",
+    remedyDigest: digest,
+    terms: {
+      bookingId: "booking-terminal-consent",
+      action: "replace_room",
+      replacement: {
+        fromRoomType: "King",
+        toRoomType: "Double Queen",
+      },
+      stay: {
+        checkIn: "2026-07-19",
+        checkOut: "2026-07-20",
+      },
+      currency: "USD",
+    },
+    costDeltaMinor: 0,
+    changedFields: ["roomType"],
+    providerCommitments: ["No provider dispatch before consent."],
+    expiry: "2026-07-18T20:05:00Z",
+    hardConstraintSatisfied: true,
+    delegatedAuthoritySatisfied: true,
+    toolCallId: "call-terminal-consent",
+    executionStarted: false,
+  } satisfies PendingApproval;
+  const terminalStepMatrix = (
+    ["completed", "closed_without_action", "outcome_unknown"] as const
+  ).flatMap((status) =>
+    [0, 1, 2, 3, 4, 5].map((currentStep) => ({
+      status,
+      currentStep,
+      expected: currentStep === 5,
+    })),
+  );
+
+  it.each(terminalStepMatrix)(
+    "validates terminal snapshot status $status at step $currentStep as $expected",
+    ({ status, currentStep, expected }) => {
+      expect(
+        isRecoverySnapshot({
+          ...terminalSnapshotBase,
+          status,
+          currentStep,
+        }),
+      ).toBe(expected);
+    },
+  );
+
+  it.each([
+    { status: "in_progress", currentStep: 0 },
+    { status: "in_progress", currentStep: 2 },
+    { status: "pending_approval", currentStep: 3 },
+  ])(
+    "retains valid nonterminal snapshot status $status at step $currentStep",
+    ({ status, currentStep }) => {
+      expect(
+        isRecoverySnapshot({
+          ...terminalSnapshotBase,
+          status,
+          currentStep,
+          currentStepSummary: "Recovery still active.",
+        }),
+      ).toBe(true);
+    },
+  );
+
+  it("accepts fully valid pending consent on a pending-approval snapshot", () => {
     expect(
       isRecoverySnapshot({
-        ...base,
-        status: "outcome_unknown",
-        pendingApproval: { impossible: true },
+        ...terminalSnapshotBase,
+        status: "pending_approval",
+        currentStep: 3,
+        currentStepSummary: "Exact approval pending.",
+        pendingApproval: validPendingApproval,
       }),
-    ).toBe(false);
+    ).toBe(true);
   });
+
+  it.each(["completed", "closed_without_action", "outcome_unknown"] as const)(
+    "rejects fully valid pending consent on terminal snapshot status %s",
+    (status) => {
+      expect(
+        isRecoverySnapshot({
+          ...terminalSnapshotBase,
+          status,
+          currentStep: 5,
+          pendingApproval: validPendingApproval,
+        }),
+      ).toBe(false);
+    },
+  );
 
   it("accepts server-returned live provenance without hard-coded model aliases", () => {
     expect(

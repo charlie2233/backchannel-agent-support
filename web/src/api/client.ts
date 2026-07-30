@@ -598,6 +598,11 @@ export function isRecoverySnapshot(value: unknown): value is RecoverySnapshot {
     value.status === "completed" ||
     value.status === "closed_without_action" ||
     value.status === "outcome_unknown";
+  const terminalStepIsValid =
+    (value.status !== "completed" &&
+      value.status !== "closed_without_action" &&
+      value.status !== "outcome_unknown") ||
+    value.currentStep === 5;
   const approvalIsValid =
     value.pendingApproval === null || isPendingApproval(value.pendingApproval);
   const provenanceIsValid =
@@ -628,6 +633,7 @@ export function isRecoverySnapshot(value: unknown): value is RecoverySnapshot {
     Number.isInteger(value.currentStep) &&
     Number(value.currentStep) >= 0 &&
     Number(value.currentStep) <= 5 &&
+    terminalStepIsValid &&
     typeof value.currentStepSummary === "string" &&
     isUtcTimestamp(value.createdAt) &&
     isUtcTimestamp(value.updatedAt) &&
