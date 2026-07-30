@@ -21,38 +21,56 @@ results from any sibling branch.
   `a8057a8e0c29bdcc95e35949819c64005e5ee064`: the focused SQLite permission
   matrix passed 23 tests, and an independent security review passed with no
   P0-P3 findings.
-- After activation `9de054e5131ad3f610902d0a7bd4bd97c5968c7a`, every observed
-  non-document canonical lane passed: 29 capture contracts,
+- Local exact clean gate on hosted validation successor
+  `c6c60d4354eba7348aef3245d19e787661544fa7`: 29 capture contracts,
   `capture_manifest_valid`, 19 web test files / 345 tests and the TypeScript/Vite
-  build, Ruff, and strict MyPy over 35 source files. The backend run recorded
-  717 passed plus one expected stale validation-doc contract failure and 3
-  warnings. This does not establish a final full-suite canonical result.
+  build, Ruff, strict MyPy over 35 source files, 778 / 778 Python tests with 3
+  warnings in 28.51s, deterministic stub and local single-process production
+  smokes, OpenAPI verification, and the history-aware secret scan all passed.
 - Independent Task32 visual review passed with no P0-P3 findings.
-- Hosted verification is intentionally excluded from this local evidence block.
-- No current Task32 GitHub Actions run or job has been observed.
-- No current Task32 packaged container smoke was executed.
+
+## Current Task32 hosted CI and packaged-container evidence
+
+- Hosted validation successor:
+  `c6c60d4354eba7348aef3245d19e787661544fa7`
+- GitHub Actions:
+  [run 30588357735](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30588357735).
+- Result: `verify`
+  ([job 91024909140](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30588357735/job/91024909140))
+  reported `PASS`; `container-smoke`
+  ([job 91025281220](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30588357735/job/91025281220))
+  reported `PASS`.
+- Both current job annotation APIs returned `[]`.
+- Hosted `verify` passed `capture_manifest_valid`, 19 web test files / 345
+  tests, Ruff, strict MyPy over 35 source files, 778 Python tests with 1 warning
+  in 43.35s, deterministic stub smoke, OpenAPI verification, and the
+  history-aware secret scan.
+- Hosted `container-smoke` built the packaged image with
+  `install -d -m 0700 -o backchannel -g backchannel /data`, confirmed runtime
+  user `10001:10001`, and passed the offline network-none `deterministic-qa` and
+  `deployed-readonly` profiles.
 
 ## Per-SHA proof matrix
 
 | Lane | Exact evidence | Status and boundary |
 | --- | --- | --- |
-| Local source and tests | Focused SQLite permission tests on source `a8057a8…`; post-activation non-document canonical lanes above | **Local evidence only** in the named lanes; the final full canonical gate, hosted CI, container, browser deployment, live OpenAI, and release remain unverified |
+| Local source and tests | Focused SQLite permission tests on source `a8057a8…`; exact clean canonical gate on successor `c6c60d4…` | **Verified locally** in the named lanes; not local Docker, browser deployment, live OpenAI, or release proof |
 | Local final-build captures | [`docs/assets/final/manifest.json`](assets/final/manifest.json); six provenance-checked PNGs under [`docs/assets/final`](assets/final) | **Local capture evidence only** on source `a8057a8…` in Google Chrome at 1440×1024 and 390×844; not container, deployment, live OpenAI, or release proof |
 | Live OpenAI | [`live-validation.md`](live-validation.md) records only a redacted invalid-key result | **Blocked / Unverified**; no valid `OPENAI_API_KEY`, one-run trace, or three consecutive successes |
 | Local Docker | No Docker-family runtime is installed on this Mac | **Unverified locally** |
-| GitHub CI/container | No current Task32 run or packaged container job has been observed | **Unverified** for this source/capture checkpoint; superseded Task31 proof is retained only below and is not inherited |
+| GitHub CI/container | Exact successor `c6c60d4…`; run `30588357735`; `verify` job `91024909140`; `container-smoke` job `91025281220` | **Verified in GitHub CI** for the exact hosted and packaged-container lanes above; not local Docker, browser capture in CI, public deployment, live OpenAI, or release proof |
 | Public deployment | No public application origin | **Blocked / Unverified** |
 | Tag/release | No release tag or GitHub release | **Blocked / Unverified** |
 
 ## Hosted container evidence boundary
 
-There is no current Task32 hosted-container result. The superseded historical section
-records prior packaged Docker evidence, but it is not current for this source/capture
-checkpoint. Current local source and capture evidence does not prove local Docker,
+The exact current hosted result proves the named GitHub `verify` and packaged
+`container-smoke` lanes on successor `c6c60d4…`. It does not prove local Docker,
 browser capture in CI, public deployment or browser URL, live OpenAI, real provider
 execution, container replacement or restart, long-lived `/data` volume persistence,
 target-host durability/networking, abrupt host-loss or backup, concurrent
-multi-container SQLite, tag or release.
+multi-container SQLite, tag or release. The browser capture remained local; CI did
+not execute the browser capture.
 
 ## Capture contract
 

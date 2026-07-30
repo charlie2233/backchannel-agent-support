@@ -38,6 +38,24 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     normalized_current_evidence = " ".join(current_evidence.split())
     assert "718" not in current_evidence
 
+    hosted_heading = "## Current Task32 hosted CI and packaged-container evidence"
+    hosted_end_heading = "## Per-SHA proof matrix"
+    assert hosted_heading in current_evidence
+    assert hosted_end_heading in current_evidence
+    current_before_hosted, current_from_hosted = current_evidence.split(
+        hosted_heading,
+        maxsplit=1,
+    )
+    hosted_evidence, current_after_hosted = current_from_hosted.split(
+        hosted_end_heading,
+        maxsplit=1,
+    )
+    normalized_hosted_evidence = " ".join(hosted_evidence.split())
+    current_without_hosted = (
+        current_before_hosted + hosted_end_heading + current_after_hosted
+    )
+    normalized_current_without_hosted = " ".join(current_without_hosted.split())
+
     hosted_scope_pattern = re.compile(
         r"\b(?:CI|GitHub\s+Actions|workflow|verify\s+job|"
         r"container(?:-smoke|\s+smoke|\s+job)?|packaged\s+Docker)\b",
@@ -53,26 +71,23 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
         flags=re.IGNORECASE,
     )
     current_evidence_sequences = (
-        tuple(line.strip() for line in current_evidence.splitlines() if line.strip()),
+        tuple(
+            line.strip()
+            for line in current_without_hosted.splitlines()
+            if line.strip()
+        ),
         tuple(
             sentence.strip()
-            for sentence in re.split(r"(?<=[.!?])\s+", normalized_current_evidence)
+            for sentence in re.split(
+                r"(?<=[.!?])\s+",
+                normalized_current_without_hosted,
+            )
             if sentence.strip()
         ),
     )
-    sanctioned_negative_units = (
-        "- No current Task32 GitHub Actions run or job has been observed.",
-        "- No current Task32 packaged container smoke was executed.",
-    )
-    for sanctioned_negative_unit in sanctioned_negative_units:
-        assert current_evidence.count(sanctioned_negative_unit) == 1
     task32_pattern = re.compile(r"\bTask32\b", flags=re.IGNORECASE)
     for evidence_sequence in current_evidence_sequences:
         for index, evidence_unit in enumerate(evidence_sequence):
-            assert not (
-                hosted_scope_pattern.search(evidence_unit)
-                and positive_word_pattern.search(evidence_unit)
-            ), f"positive hosted-evidence claim: {evidence_unit.strip()}"
             if (
                 task32_pattern.search(evidence_unit)
                 and hosted_scope_pattern.search(evidence_unit)
@@ -86,6 +101,9 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
 
     assert manifest["sourceCommit"] in current_evidence
     current_activation = "9de054e5131ad3f610902d0a7bd4bd97c5968c7a"
+    current_hosted_successor = "c6c60d4354eba7348aef3245d19e787661544fa7"
+    current_run = "30588357735"
+    current_jobs = ("91024909140", "91025281220")
     superseded_failed_attempt = (
         "30206582233",
         "89805619343",
@@ -98,6 +116,10 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
         "a8057a8…",
         current_activation,
         "9de054e…",
+        current_hosted_successor,
+        "c6c60d4…",
+        current_run,
+        *current_jobs,
         runtime_input["digest"],
         "a5fdc8a…",
     ):
@@ -140,7 +162,8 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     ):
         assert pre_capture_fact in pre_capture_gate
     for post_activation_only_fact in (
-        "717 passed",
+        "778 passed",
+        "778 / 778 Python tests",
         "3 warnings",
         "Ruff",
         "strict MyPy",
@@ -148,22 +171,24 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     ):
         assert post_activation_only_fact not in pre_capture_gate
 
-    post_activation_gate = current_bullet("After activation")
-    assert current_activation in post_activation_gate
-    for post_activation_fact in (
-        "every observed non-document canonical lane passed",
+    local_exact_gate = current_bullet(
+        "Local exact clean gate on hosted validation successor"
+    )
+    assert current_hosted_successor in local_exact_gate
+    for local_exact_fact in (
         "29 capture contracts",
         "`capture_manifest_valid`",
         "19 web test files / 345 tests",
         "TypeScript/Vite build",
         "Ruff",
         "strict MyPy over 35 source files",
-        "717 passed plus one expected stale validation-doc contract failure",
-        "3 warnings",
-        "does not establish a final full-suite canonical result",
+        "778 / 778 Python tests with 3 warnings in 28.51s",
+        "deterministic stub and local single-process production smokes",
+        "OpenAPI verification",
+        "history-aware secret scan all passed",
     ):
-        assert post_activation_fact in post_activation_gate
-    assert "focused SQLite permission matrix passed 23 tests" not in post_activation_gate
+        assert local_exact_fact in local_exact_gate
+    assert "focused SQLite permission matrix passed 23 tests" not in local_exact_gate
 
     review_gate = current_bullet("Independent Task32 visual review")
     assert "passed with no P0-P3 findings" in review_gate
@@ -260,47 +285,100 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
         r"https://github\.com/[^)\s]+/actions/runs/\d+(?:/job/\d+)?",
         current_evidence,
     )
-    assert observed_action_urls == []
-    assert re.findall(r"/actions/runs/(\d+)", current_evidence) == []
-    assert re.findall(r"/job/(\d+)", current_evidence) == []
+    actions_base = (
+        "https://github.com/charlie2233/backchannel-agent-support/actions/runs"
+    )
+    assert observed_action_urls == [
+        f"{actions_base}/{current_run}",
+        f"{actions_base}/{current_run}/job/{current_jobs[0]}",
+        f"{actions_base}/{current_run}/job/{current_jobs[1]}",
+    ]
     hosted_successor_matches = re.findall(
         r"Hosted validation successor:\s+`([0-9a-f]{40})`",
         current_evidence,
     )
-    assert hosted_successor_matches == []
+    assert hosted_successor_matches == [current_hosted_successor]
+    expected_hosted_bullets = (
+        f"- Hosted validation successor: `{current_hosted_successor}`",
+        f"- GitHub Actions: [run {current_run}]({actions_base}/{current_run}).",
+        (
+            f"- Result: `verify` ([job {current_jobs[0]}]"
+            f"({actions_base}/{current_run}/job/{current_jobs[0]})) "
+            "reported `PASS`; `container-smoke` "
+            f"([job {current_jobs[1]}]"
+            f"({actions_base}/{current_run}/job/{current_jobs[1]})) "
+            "reported `PASS`."
+        ),
+        "- Both current job annotation APIs returned `[]`.",
+        (
+            "- Hosted `verify` passed `capture_manifest_valid`, 19 web test files / "
+            "345 tests, Ruff, strict MyPy over 35 source files, 778 Python tests "
+            "with 1 warning in 43.35s, deterministic stub smoke, OpenAPI "
+            "verification, and the history-aware secret scan."
+        ),
+        (
+            "- Hosted `container-smoke` built the packaged image with "
+            "`install -d -m 0700 -o backchannel -g backchannel /data`, confirmed "
+            "runtime user `10001:10001`, and passed the offline network-none "
+            "`deterministic-qa` and `deployed-readonly` profiles."
+        ),
+    )
+    hosted_bullets = tuple(
+        " ".join(match.group(0).split())
+        for match in re.finditer(
+            r"^- .*?(?=^- |\Z)",
+            hosted_evidence,
+            flags=re.MULTILINE | re.DOTALL,
+        )
+    )
+    assert hosted_bullets == expected_hosted_bullets
+    assert normalized_hosted_evidence == " ".join(expected_hosted_bullets)
+    hosted_job_bindings = re.findall(
+        r"`(verify|container-smoke)` "
+        r"\(\[job (\d+)\]\((https://github\.com/[^)\s]+/job/\d+)\)\) "
+        r"reported `(PASS)`",
+        hosted_bullets[2],
+    )
+    assert hosted_job_bindings == [
+        (
+            "verify",
+            current_jobs[0],
+            f"{actions_base}/{current_run}/job/{current_jobs[0]}",
+            "PASS",
+        ),
+        (
+            "container-smoke",
+            current_jobs[1],
+            f"{actions_base}/{current_run}/job/{current_jobs[1]}",
+            "PASS",
+        ),
+    ]
     for required_current_boundary in (
-        "No current Task32 GitHub Actions run or job has been observed.",
-        "No current Task32 packaged container smoke was executed.",
-        "**Unverified** for this source/capture checkpoint",
-    ):
-        assert required_current_boundary in current_evidence
-    for forbidden_current_claim in (
-        "Both job annotation APIs returned `[]`",
-        "reported `PASS`",
-        "reported `FAILURE`",
-        "reported `SKIPPED`",
-        "Hosted validation successor:",
-    ):
-        assert forbidden_current_claim not in current_evidence
-    for superseded_identifier in superseded_failed_attempt:
-        assert superseded_identifier not in current_evidence
-    for unproved_current_boundary in (
+        "**Verified in GitHub CI** for the exact hosted and packaged-container lanes",
         "does not prove local Docker",
+        "browser capture in CI",
         "public deployment or browser URL",
         "live OpenAI",
         "real provider execution",
         "container replacement or restart",
         "long-lived `/data` volume persistence",
+        "target-host durability/networking",
         "abrupt host-loss or backup",
         "concurrent multi-container SQLite",
         "tag or release",
     ):
-        assert unproved_current_boundary in normalized_current_evidence
+        assert required_current_boundary in normalized_current_evidence
+    for forbidden_current_claim in (
+        "No current Task32 GitHub Actions run or job has been observed.",
+        "No current Task32 packaged container smoke was executed.",
+        "reported `FAILURE`",
+        "reported `SKIPPED`",
+    ):
+        assert forbidden_current_claim not in current_evidence
+    for superseded_identifier in superseded_failed_attempt:
+        assert superseded_identifier not in current_evidence
     assert "CI did not execute the browser capture" in current_evidence
 
-    actions_base = (
-        "https://github.com/charlie2233/backchannel-agent-support/actions/runs"
-    )
     task31_capture = "c446f05adfb836539ddbaa74a41502034c910092"
     task31_activation = "b4c1bcbd70ff22ce3ac2b8a1de3828b7ce691afe"
     task31_digest = (
@@ -683,6 +761,11 @@ def test_validation_rejects_superseded_provenance_in_current_evidence(
         "a8057a8…",
         "9de054e5131ad3f610902d0a7bd4bd97c5968c7a",
         "9de054e…",
+        "c6c60d4354eba7348aef3245d19e787661544fa7",
+        "c6c60d4…",
+        "30588357735",
+        "91024909140",
+        "91025281220",
         "a5fdc8adc9788f181ace5f4de9cce7974344af02312cef2caa9e123193744503",
         "a5fdc8a…",
     ),
@@ -743,11 +826,114 @@ def test_validation_rejects_unexpected_current_hosted_provenance(
         _assert_validation_matches_current_capture(polluted_validation)
 
 
-def test_validation_requires_current_hosted_lane_to_remain_unverified_pre_ci() -> None:
+def test_validation_requires_exact_current_hosted_run() -> None:
     validation = _read("docs/validation.md")
     polluted_validation = validation.replace(
-        "No current Task32 GitHub Actions run or job has been observed.",
-        "A green current Task32 GitHub Actions run has been observed.",
+        "30588357735",
+        "99999999999",
+    )
+
+    with pytest.raises(AssertionError):
+        _assert_validation_matches_current_capture(polluted_validation)
+
+
+@pytest.mark.parametrize(
+    ("original", "replacement"),
+    (
+        (
+            "c6c60d4354eba7348aef3245d19e787661544fa7",
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        ),
+        ("91024909140", "99999999998"),
+        ("91025281220", "99999999997"),
+        ("reported `PASS`", "reported `FAILURE`"),
+        (
+            "Both current job annotation APIs returned `[]`",
+            "Current job annotations were not inspected",
+        ),
+        ("778 Python tests with 1 warning in 43.35s", "777 Python tests"),
+        (
+            "`install -d -m 0700 -o backchannel -g backchannel /data`",
+            "`install -d /data`",
+        ),
+        ("runtime user `10001:10001`", "runtime user was not inspected"),
+        (
+            "offline network-none `deterministic-qa` and `deployed-readonly` profiles",
+            "one online profile",
+        ),
+    ),
+)
+def test_validation_rejects_current_hosted_fact_mutation(
+    original: str,
+    replacement: str,
+) -> None:
+    validation = _read("docs/validation.md")
+    hosted_heading = "## Current Task32 hosted CI and packaged-container evidence"
+    hosted_end_heading = "## Per-SHA proof matrix"
+    hosted_evidence = validation.split(hosted_heading, maxsplit=1)[1].split(
+        hosted_end_heading,
+        maxsplit=1,
+    )[0]
+    original_pattern = re.compile(re.escape(original).replace(r"\ ", r"\s+"))
+    assert original_pattern.search(hosted_evidence)
+    polluted_hosted_evidence = original_pattern.sub(
+        replacement,
+        hosted_evidence,
+        count=1,
+    )
+    polluted_validation = validation.replace(
+        hosted_evidence,
+        polluted_hosted_evidence,
+        1,
+    )
+
+    with pytest.raises(AssertionError):
+        _assert_validation_matches_current_capture(polluted_validation)
+
+
+@pytest.mark.parametrize(
+    "unsupported_positive_claim",
+    (
+        "Public deployment passed.",
+        "Live OpenAI passed.",
+        "Container restart and replacement persistence passed.",
+    ),
+)
+def test_validation_rejects_extra_positive_claim_in_current_hosted_section(
+    unsupported_positive_claim: str,
+) -> None:
+    validation = _read("docs/validation.md")
+    hosted_end_heading = "## Per-SHA proof matrix"
+    polluted_validation = validation.replace(
+        hosted_end_heading,
+        f"- {unsupported_positive_claim}\n\n{hosted_end_heading}",
+        1,
+    )
+
+    with pytest.raises(AssertionError):
+        _assert_validation_matches_current_capture(polluted_validation)
+
+
+def test_validation_rejects_swapped_current_hosted_job_bindings() -> None:
+    validation = _read("docs/validation.md")
+    hosted_heading = "## Current Task32 hosted CI and packaged-container evidence"
+    hosted_end_heading = "## Per-SHA proof matrix"
+    hosted_evidence = validation.split(hosted_heading, maxsplit=1)[1].split(
+        hosted_end_heading,
+        maxsplit=1,
+    )[0]
+    verify_job = "91024909140"
+    container_job = "91025281220"
+    swapped_hosted_evidence = (
+        hosted_evidence.replace(verify_job, "__VERIFY_JOB__")
+        .replace(container_job, verify_job)
+        .replace("__VERIFY_JOB__", container_job)
+    )
+    assert swapped_hosted_evidence != hosted_evidence
+    polluted_validation = validation.replace(
+        hosted_evidence,
+        swapped_hosted_evidence,
+        1,
     )
 
     with pytest.raises(AssertionError):
@@ -824,22 +1010,22 @@ def test_validation_rejects_generic_current_positive_claims(
         (
             "Pre-capture Task32 gates on clean source",
             "P0-P3 findings.",
-            "P0-P3 findings and 717 passed.",
+            "P0-P3 findings and 778 passed.",
         ),
         (
-            "After activation",
-            "717 passed plus one expected stale validation-doc contract failure",
-            "718 passed",
+            "Local exact clean gate on hosted validation successor",
+            "778 / 778 Python tests with 3 warnings in 28.51s",
+            "777 / 778 Python tests with 3 warnings in 28.51s",
         ),
         (
-            "After activation",
-            "9de054e5131ad3f610902d0a7bd4bd97c5968c7a",
+            "Local exact clean gate on hosted validation successor",
+            "c6c60d4354eba7348aef3245d19e787661544fa7",
             "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
         ),
         (
-            "After activation",
-            "does not establish a final full-suite canonical result",
-            "establishes a final full-suite canonical result",
+            "Local exact clean gate on hosted validation successor",
+            "deterministic stub and local single-process production smokes",
+            "deterministic stub smoke only",
         ),
     ),
 )
