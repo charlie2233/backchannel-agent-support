@@ -3,7 +3,7 @@ import json
 import logging
 import re
 from collections.abc import AsyncIterator
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from unittest.mock import Mock
 from uuid import uuid4
 
@@ -443,6 +443,7 @@ def test_admitted_response_releases_lease_after_asgi_send_error() -> None:
     response = _build_admitted_event_stream_response(
         lease_event_stream(source(), lease),
         lease,
+        session_expires_at=datetime.now(UTC) + timedelta(minutes=1),
     )
 
     async def receive() -> dict[str, str]:
@@ -498,5 +499,6 @@ def test_response_construction_failure_releases_admission(
         _build_admitted_event_stream_response(
             lease_event_stream(source(), lease),
             lease,
+            session_expires_at=datetime.now(UTC) + timedelta(minutes=1),
         )
     assert controller.active_count == 0

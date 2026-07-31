@@ -1626,7 +1626,7 @@
     },
     "/api/recoveries/{recovery_id}/events": {
       "get": {
-        "description": "Requires the signed opaque demo session issued when the recovery was created. Missing, expired, tampered, unrelated, and unknown sessions receive the same generic not-found response. Streams are admitted by bounded, process-local capacity. At capacity, the endpoint returns a finite stream.capacity control event with a native EventSource retry interval. An admitted stream is bound to the exact verified signed-session expiry and emits no later buffered events, polled events, or heartbeats.",
+        "description": "Requires the signed opaque demo session issued when the recovery was created. Missing, expired, tampered, unrelated, and unknown sessions receive the same generic not-found response. Streams are admitted by bounded, process-local capacity. At capacity, the endpoint returns a finite stream.capacity control event with a native EventSource retry interval. An admitted stream is bound to the exact verified signed-session expiry and emits no later buffered events, polled events, or heartbeats. A non-empty ASGI body send still blocked at expiry is cancelled before completion; final teardown is bounded.",
         "operationId": "recovery_events_api_recoveries__recovery_id__events_get",
         "parameters": [
           {

@@ -184,12 +184,18 @@ normal completion, cancellation, iterator failure, ASGI send failure, and respon
 failure. Signed-session deadline coverage binds the route to the exact verified cookie expiry,
 suppresses an already-buffered event when iteration begins expired, suppresses a batch whose
 public-ledger read crosses expiry, prevents later events and heartbeats, caps idle sleep to the
-remaining lifetime, and proves lease release and reacquisition. Browser coverage proves exact
-named-control validation, native retry remaining open, one-shot preservation of the capacity
-status at stream EOF, transient error clearing, and unchanged terminal closure. These tests
-prove at most the configured polling loops in this application process. They do not prove a
-shared limit across workers or containers; `scripts/start.py` is separately asserted to launch
-one worker.
+remaining lifetime, and proves lease release and reacquisition. Actual leased-response coverage
+blocks the response-start handoff across expiry under ASGI 2.3 and 2.4, proves the lease releases
+without cancelling that owner-evidence-free send, then suppresses every non-empty body after it
+completes. It separately blocks both an event-frame and heartbeat send across expiry, proves
+cancellation before the test transport completes either body send, bounds a blocked final empty
+body, and reacquires the released slot. The test does not claim that ASGI can recall bytes
+already accepted by a real transport or bound a response-start task after its admission lease
+has been released. Browser coverage proves exact named-control validation, native retry
+remaining open, one-shot preservation of the capacity status at stream EOF, transient error
+clearing, and unchanged terminal closure. These tests prove at most the configured polling loops
+in this application process. They do not prove a shared limit across workers or containers;
+`scripts/start.py` is separately asserted to launch one worker.
 The terminal-read integrity suite proves public snapshot, receipt, and initial SSE authorization
 precedes any targeted expiry mutation inside the same SQLite transaction; a stale outer access
 result cannot close another session's recovery. It proves rollback-safe validation before stream

@@ -654,7 +654,9 @@ def test_event_stream_success_response_is_documented_as_sse() -> None:
     assert "application/json" not in content
     assert (
         "An admitted stream is bound to the exact verified signed-session expiry "
-        "and emits no later buffered events, polled events, or heartbeats."
+        "and emits no later buffered events, polled events, or heartbeats. A "
+        "non-empty ASGI body send still blocked at expiry is cancelled before "
+        "completion; final teardown is bounded."
         in operation["description"]
     )
 

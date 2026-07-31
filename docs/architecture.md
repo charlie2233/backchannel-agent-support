@@ -51,6 +51,19 @@ never emitted at or after the deadline, and the lease wrapper releases the proce
 Native reconnect then crosses the ordinary cookie verification boundary; a newly issued session
 receives the same generic recovery `404` rather than an expiry-specific disclosure.
 
+The response layer also tracks the ASGI response-start handoff against the remaining session
+lifetime. Response start contains no owner evidence and Starlette does not consume the stream
+source until that handoff completes. If it remains transport-backpressured at expiry, the
+process-local admission lease is released so another polling loop can enter, but the header send
+is not cancelled: Uvicorn can otherwise synthesize a fallback response outside the application
+deadline. When the header handoff eventually completes, the expired response suppresses every
+non-empty body. A body frame that had already begun sending is cancelled at expiry before send
+completion; the generator then terminates and releases its lease before the empty closing body.
+That final teardown send has a 100-millisecond grace instead of an unbounded wait. This is the
+application/ASGI handoff boundary: a response-start task may remain blocked after it stops
+counting as an admitted polling loop, and bytes already accepted by the transport before expiry
+cannot be recalled if the network delivers them later.
+
 A live-ready page load is deliberately idle. **Start live recovery** is the only UI action that
 creates an `openai_live` hotel run, and an in-flight guard coalesces rapid activation before
 React can re-render the disabled control. Same-tab `sessionStorage` may hold the canonical UUID
@@ -337,9 +350,9 @@ configurable daily admission budget, terminal-record TTL cleanup, and an HttpOnl
 cookie. Long-lived event streams add configurable process and per-recovery caps plus a bounded
 retry interval and are bound to the verified signed-session expiry. Admission leases are
 released idempotently after session expiry, terminal completion, client disconnect,
-cancellation, iterator/store/encoding failure, ASGI send failure, or response construction
-failure; zero-count recovery entries are removed. Deployed mode additionally requires an exact
-HTTPS origin allowlist and an explicit
+cancellation, iterator/store/encoding failure, blocked-send expiry, ASGI send failure, or
+response construction failure; zero-count recovery entries are removed. Deployed mode
+additionally requires an exact HTTPS origin allowlist and an explicit
 32-byte-or-longer identity-hash secret. Proxy headers are ignored unless the direct peer is in
 an explicit trusted CIDR allowlist.
 

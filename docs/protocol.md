@@ -181,6 +181,21 @@ its admission lease is released. A native reconnect with the expired cookie rece
 session identity and the same generic `404` boundary for the former recovery; session expiry is
 not disclosed separately.
 
+The leased response independently tracks the ASGI response-start handoff against the same UTC
+deadline and applies the remaining lifetime to every non-empty body send. Response start
+contains no owner evidence, and the stream source is not consumed until it completes. If server
+flow control still blocks that handoff at expiry, the admission lease is released without
+cancelling the header send; cancellation before Uvicorn records response start could trigger an
+unbounded fallback response outside this wrapper. If the handoff later completes, every
+non-empty body is suppressed because the session is already expired. A body send that was
+already in progress at expiry is cancelled before completion. Control returns to the generator,
+which terminates at its next expiry or terminal check and releases the admission lease before
+the ordinary empty final body. That final teardown send is attempted for at most 100
+milliseconds. Expiry does not become a public error. This application/ASGI boundary can leave
+an uncounted response-start task blocked until transport progress or disconnect, and ASGI cannot
+recall bytes a transport already accepted before the deadline merely because network delivery
+completes later.
+
 This is not a fleet-wide limit. Every worker or container would have independent counters. The
 production launcher uses one Uvicorn worker, so the configured defaults cap polling loops only
 in that one process; horizontal scaling requires a separate shared-admission design.

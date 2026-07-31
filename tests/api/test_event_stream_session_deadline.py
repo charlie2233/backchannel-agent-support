@@ -8,6 +8,7 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 
+from server import main as server_main
 from server.config import RuntimeSettings
 from server.main import create_app
 from server.store import SQLiteStore
@@ -40,6 +41,7 @@ def test_event_stream_receives_exact_verified_session_expiry_and_releases_lease(
     )
     app = create_app(settings, store=store)
     captured_options: dict[str, object] = {}
+    captured_response_options: dict[str, object] = {}
 
     async def finite_stream(
         *_args: object,
@@ -49,6 +51,16 @@ def test_event_stream_receives_exact_verified_session_expiry_and_releases_lease(
         yield ""
 
     monkeypatch.setattr("server.main.stream_recovery_events", finite_stream)
+    original_response_builder = server_main._build_admitted_event_stream_response
+
+    def capture_response_deadline(*args, **options):
+        captured_response_options.update(options)
+        return original_response_builder(*args, **options)
+
+    monkeypatch.setattr(
+        "server.main._build_admitted_event_stream_response",
+        capture_response_deadline,
+    )
 
     try:
         with TestClient(app) as client:
@@ -78,6 +90,10 @@ def test_event_stream_receives_exact_verified_session_expiry_and_releases_lease(
             assert response.text == ""
             assert app.state.event_stream_admission.active_count == 0
             assert captured_options.get("public_session_expires_at") == expected_session_expiry
+            assert (
+                captured_response_options.get("session_expires_at")
+                == expected_session_expiry
+            )
     finally:
         store.close()
 

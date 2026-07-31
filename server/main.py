@@ -7,7 +7,7 @@ import re
 import sqlite3
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Lock
 from time import monotonic
@@ -662,12 +662,15 @@ _EVENT_STREAM_DESCRIPTION = (
     "process-local capacity. At capacity, the endpoint returns a finite "
     "stream.capacity control event with a native EventSource retry interval. "
     "An admitted stream is bound to the exact verified signed-session expiry "
-    "and emits no later buffered events, polled events, or heartbeats."
+    "and emits no later buffered events, polled events, or heartbeats. A "
+    "non-empty ASGI body send still blocked at expiry is cancelled before "
+    "completion; final teardown is bounded."
 )
 _EVENT_STREAM_HEADERS = {
     "Cache-Control": "no-cache",
     "X-Accel-Buffering": "no",
 }
+_EVENT_STREAM_FINAL_SEND_GRACE_SECONDS = 0.1
 _MAX_EVENT_CURSOR = 2**63 - 1
 _MAX_EVENT_CURSOR_TEXT = str(_MAX_EVENT_CURSOR)
 _EVENT_CURSOR_PATTERN = re.compile(r"^[0-9]+$")
@@ -762,7 +765,7 @@ def _inline_local_schema_definitions(schema: dict[str, Any]) -> dict[str, Any]:
 
 
 class _LeaseReleasingStreamingResponse(StreamingResponse):
-    """Release an admitted stream even when the ASGI send path fails."""
+    """Bind evidence sends to session expiry and always release admission."""
 
     media_type = "text/event-stream"
 
@@ -772,20 +775,117 @@ class _LeaseReleasingStreamingResponse(StreamingResponse):
         *,
         lease: EventStreamLease,
         headers: Mapping[str, str],
+        session_expires_at: datetime,
+        session_clock: Callable[[], datetime],
     ) -> None:
+        if (
+            session_expires_at.tzinfo is None
+            or session_expires_at.utcoffset() != timedelta(0)
+        ):
+            raise ValueError("Event stream session expiry must be a UTC timestamp")
         self._event_stream_lease = lease
+        self._session_expires_at = session_expires_at
+        self._session_clock = session_clock
         super().__init__(content, media_type=self.media_type, headers=headers)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         try:
-            await super().__call__(scope, receive, send)
+            session_expired = self._remaining_session_seconds() <= 0
+
+            async def send_before_session_expiry(message: dict[str, Any]) -> None:
+                nonlocal session_expired
+                if message["type"] == "http.response.start":
+                    remaining_seconds = self._remaining_session_seconds()
+                    if remaining_seconds <= 0:
+                        session_expired = True
+                        self._event_stream_lease.release()
+                        await send(message)
+                        return
+
+                    async def forward_response_start() -> None:
+                        await send(message)
+
+                    send_task = asyncio.create_task(forward_response_start())
+                    deadline_task = asyncio.create_task(
+                        asyncio.sleep(remaining_seconds)
+                    )
+                    try:
+                        completed, _pending = await asyncio.wait(
+                            (send_task, deadline_task),
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if send_task in completed:
+                            await send_task
+                            return
+                        session_expired = True
+                        self._event_stream_lease.release()
+                        await send_task
+                    finally:
+                        for task in (send_task, deadline_task):
+                            if not task.done():
+                                task.cancel()
+                        await asyncio.gather(
+                            send_task,
+                            deadline_task,
+                            return_exceptions=True,
+                        )
+                    return
+                body = message.get("body", b"")
+                if message["type"] != "http.response.body":
+                    await send(message)
+                    return
+                if (
+                    isinstance(body, bytes | memoryview)
+                    and not body
+                    and message.get("more_body") is False
+                ):
+                    try:
+                        async with asyncio.timeout(
+                            _EVENT_STREAM_FINAL_SEND_GRACE_SECONDS
+                        ):
+                            await send(message)
+                    except TimeoutError:
+                        return
+                    return
+                if session_expired:
+                    return
+                remaining_seconds = self._remaining_session_seconds()
+                if remaining_seconds <= 0:
+                    session_expired = True
+                    return
+                try:
+                    async with asyncio.timeout(remaining_seconds):
+                        await send(message)
+                except TimeoutError:
+                    if self._remaining_session_seconds() > 0:
+                        raise
+                    session_expired = True
+
+            await super().__call__(
+                scope,
+                receive,
+                cast(Send, send_before_session_expiry),
+            )
         finally:
             self._event_stream_lease.release()
+
+    def _remaining_session_seconds(self) -> float:
+        current = self._session_clock()
+        if current.tzinfo is None or current.utcoffset() != timedelta(0):
+            raise ValueError("Event stream session clock must return a UTC timestamp")
+        return (self._session_expires_at - current).total_seconds()
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
 
 
 def _build_admitted_event_stream_response(
     content: AsyncIterator[str],
     lease: EventStreamLease,
+    *,
+    session_expires_at: datetime,
+    session_clock: Callable[[], datetime] = _utc_now,
 ) -> StreamingResponse:
     """Construct a leased response without leaking admission on failure."""
 
@@ -794,6 +894,8 @@ def _build_admitted_event_stream_response(
             content,
             lease=lease,
             headers=_EVENT_STREAM_HEADERS,
+            session_expires_at=session_expires_at,
+            session_clock=session_clock,
         )
     except BaseException:
         lease.release()
@@ -2012,6 +2114,7 @@ def create_app(
                 lease,
             ),
             lease,
+            session_expires_at=identity.session_expires_at,
         )
 
     @application.get(
