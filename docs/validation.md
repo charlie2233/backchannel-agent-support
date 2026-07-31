@@ -9,72 +9,49 @@ results from any sibling branch.
 ## Current capture and evidence activation
 
 - Capture source / frozen runtime:
-  `84af413c3a7833daa635e6a0b84e8f331cc1f7f2`
+  `8942517f43045a124e11a8e79296f6e4de875936`
 - Evidence activation:
-  `7a8092f9ac0be03274358bb9814db3d8e6a34507`
+  `4ca13252e05357ff98023f9290375cd1718bcce6`
 - `npm run test:e2e` reported `29 passed` against the clean capture source
   in Google Chrome 150.0.7871.187 and produced six manifest-bound PNGs at
   1440×1024 and 390×844. The run covered 29 capture contracts.
-- Five PNGs changed and `mobile-consent.png` remained byte-identical against the
-  immediately prior capture set.
-- Pre-capture Task33 gates on clean source
-  `84af413c3a7833daa635e6a0b84e8f331cc1f7f2`: the focused client matrix passed
-  144 / 144 tests, and the full web source gate passed 369 / 369 tests plus the
-  TypeScript/Vite build.
-- Independent Task33 specification and quality reviews passed with no P0-P3
-  findings after the quality loop replaced one vacuous pending-consent test with
-  a fully valid pending-approval fixture.
-- Independent Task33 combined before/after visual review passed with no P0-P3
-  findings.
-- Local exact clean gate on hosted validation successor
-  `0dee3af822edc164b06be6cff61441023ae703dc`: 29 capture contracts,
-  `capture_manifest_valid`, 19 web test files / 369 tests and the TypeScript/Vite
-  build, Ruff, strict MyPy over 35 source files, 866 / 866 Python tests with 3
-  warnings in 24.98s, deterministic stub and local
-  production/SSE/reconnect/shutdown smokes, OpenAPI verification, and the
-  history-aware secret scan all passed.
-
-## Current Task33 hosted CI and packaged-container evidence
-
-- Hosted validation successor:
-  `0dee3af822edc164b06be6cff61441023ae703dc`
-- GitHub Actions:
-  [run 30591690973](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30591690973).
-- Result: `verify`
-  ([job 91035189804](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30591690973/job/91035189804))
-  reported `PASS`; `container-smoke`
-  ([job 91035490238](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30591690973/job/91035490238))
-  reported `PASS`.
-- Both current job annotation APIs returned `[]`.
-- Hosted `verify` passed `capture_manifest_valid`, 19 web test files / 369
-  tests, Ruff, strict MyPy over 35 source files, 866 Python tests with 1 warning
-  in 42.00s, deterministic stub smoke, OpenAPI verification, and the
-  history-aware secret scan.
-- Hosted `container-smoke` built the packaged image with owner-only `/data` mode
-  `0700`, confirmed runtime user `10001:10001`, and passed the offline
-  network-none `deterministic-qa` and `deployed-readonly` profiles.
+- All six exact combined before/after Chrome comparisons passed independent
+  Task34 visual review with no P0-P3 findings.
+- Pre-capture Task34 gates on clean source
+  `8942517f43045a124e11a8e79296f6e4de875936`: the new model/store matrix passed
+  51 / 51 tests, the combined focused model/store/OpenAPI gate passed 63 / 63,
+  and the full Python suite passed 935 / 935 tests with 3 warnings in 24.53s.
+  Ruff, strict MyPy over 31 source files, OpenAPI verification, and the diff
+  check also passed.
+- Independent Task34 specification and security/quality reviews passed with no
+  P0-P3 findings.
+- Hosted verification and a full canonical gate are intentionally excluded from
+  this activation checkpoint.
+- No current Task34 full canonical, GitHub Actions, or packaged container result
+  has been observed.
 
 ## Per-SHA proof matrix
 
 | Lane | Exact evidence | Status and boundary |
 | --- | --- | --- |
-| Local source and tests | Focused web source gate on `84af413…`; exact clean canonical gate on successor `0dee3af…` | **Verified locally** in the named lanes; not local Docker, browser deployment, live OpenAI, or release proof |
-| Local final-build captures | [`docs/assets/final/manifest.json`](assets/final/manifest.json); six provenance-checked PNGs under [`docs/assets/final`](assets/final) | **Local capture evidence only** on source `84af413…` in Google Chrome at 1440×1024 and 390×844; not container, deployment, live OpenAI, or release proof |
+| Local source and tests | Focused and full Python source gates on `8942517…`; no current full canonical result | **Verified locally** only in the named server/model/store/OpenAPI lanes; not full canonical, hosted CI, container, browser deployment, live OpenAI, or release proof |
+| Local final-build captures | [`docs/assets/final/manifest.json`](assets/final/manifest.json); six provenance-checked PNGs under [`docs/assets/final`](assets/final) | **Local capture evidence only** on source `8942517…` in Google Chrome at 1440×1024 and 390×844; not container, deployment, live OpenAI, or release proof |
 | Live OpenAI | [`live-validation.md`](live-validation.md) records only a redacted invalid-key result | **Blocked / Unverified**; no valid `OPENAI_API_KEY`, one-run trace, or three consecutive successes |
 | Local Docker | No Docker-family runtime is installed on this Mac | **Unverified locally** |
-| GitHub CI/container | Exact successor `0dee3af…`; run `30591690973`; `verify` job `91035189804`; `container-smoke` job `91035490238` | **Verified in GitHub CI** for the exact hosted and packaged-container lanes above; not local Docker, browser capture in CI, public deployment, live OpenAI, or release proof |
+| GitHub CI/container | No current Task34 GitHub Actions run or packaged container job has been observed | **Unverified** for this source/capture checkpoint; superseded Task33 proof is retained only below and is not inherited |
 | Public deployment | No public application origin | **Blocked / Unverified** |
 | Tag/release | No release tag or GitHub release | **Blocked / Unverified** |
 
 ## Hosted container evidence boundary
 
-The exact current hosted result proves the named GitHub `verify` and packaged
-`container-smoke` lanes on successor `0dee3af…`. It does not prove local Docker,
-browser capture in CI, public deployment or browser URL, live OpenAI, real provider
-execution, container replacement or restart, long-lived `/data` volume persistence,
-target-host durability/networking, abrupt host-loss or backup, concurrent
-multi-container SQLite, tag or release. The browser capture remained local; CI did
-not execute the browser capture.
+There is no current Task34 hosted-container result. The superseded historical
+section records prior packaged Docker evidence, but it is not current for this
+source/capture checkpoint. Current local source and capture evidence does not prove
+local Docker, browser capture in CI, public deployment or browser URL, live OpenAI,
+real provider execution, container replacement or restart, long-lived `/data`
+volume persistence, target-host durability/networking, abrupt host-loss or backup,
+concurrent multi-container SQLite, tag or release. The browser capture remained
+local; CI did not execute the browser capture.
 
 ## Capture contract
 
@@ -85,37 +62,44 @@ validates API and DOM provenance before each viewport screenshot.
 
 The tracked [`docs/assets/final/manifest.json`](assets/final/manifest.json) is schema
 v1 and binds the full capture source SHA above, runtime SHA-256 digest
-`00d4636da32836689202464fc55deb5f4b2a8f5e6ffd02831d27d22a9146bc90`
+`e208c767646af920d90aa9396f441fb328c999c3235aff646ac20a5611543f27`
 across 84 runtime paths, capture profile `keyless_sdk_stub`, environment
 `en-US` / `UTC` / `reduce` / `light`, and all six artifact hashes, states, and
 dimensions.
 
-Capture source `84af413…`; evidence activation `7a8092f…`; runtime digest
-`00d4636…`. The browser capture was
+Capture source `8942517…`; evidence activation `4ca1325…`; runtime digest
+`e208c76…`. The browser capture was
 produced against the clean source SHA, and the activation successor added the captured
 files. CI did not execute the browser capture. The six images prove only the local keyless
 SDK-stub final build; they do not prove live OpenAI, a public deployment, a container,
 a release, or a real provider mutation.
 
 A later documentation-only successor does not inherit a new browser claim. Keep the
-capture lane bound to `84af413…` unless `npm run test:e2e` is observed again on a
+capture lane bound to `8942517…` unless `npm run test:e2e` is observed again on a
 different clean frozen tree.
 
 ## Terminal snapshot consistency proof boundary
 
-The Task33 client validator accepts `completed`, `closed_without_action`, and
-`outcome_unknown` recovery snapshots only at terminal `currentStep: 5`. Each of
-those terminal statuses is rejected at steps 0 through 4, and all terminal
-snapshots continue to reject even a structurally valid pending approval.
-Nonterminal `in_progress` and `pending_approval` snapshots retain their previously
-valid steps, including a fully valid pending-consent fixture.
+The Task34 server model accepts `completed`, `closed_without_action`, and
+`outcome_unknown` recovery snapshots only at terminal `currentStep: 5`; every one
+of those statuses is rejected at steps 0 through 4. Nonterminal `in_progress` and
+`pending_approval` snapshots remain valid at step 5.
 
-The focused 144-test client matrix covers every terminal status at every step 0
-through 5, the retained nonterminal cases, and the valid-pending-consent boundary.
-The full web source gate covered 369 tests plus the TypeScript/Vite build.
-This is local source/test evidence only. It does not prove a backend, hosted,
-container, public-network, live OpenAI, or release result, and the ordinary final
-state screenshots do not exercise malformed terminal snapshots.
+`record_transition` checks the same one-way invariant before clock access,
+serialization, locking, connection, transaction, row update, event insertion,
+receipt insertion, or pending-approval mutation. Invalid transitions leave the
+recovery row and event ledger unchanged. Hydrating a malformed legacy terminal row
+fails closed without rewriting it, and the OpenAPI `RecoverySnapshot` schema
+publishes the exact conditional: if `status` is one of the three terminal enum
+values, then `currentStep` is constant `5`.
+
+The new model/store matrix covered 51 tests; the combined focused
+model/store/OpenAPI gate covered 63 tests; and the full Python suite covered 935
+tests. Ruff, strict MyPy over 31 source files, OpenAPI freshness, and the diff check
+also passed. This is local source/test evidence only. It is not a current full
+canonical, hosted CI, container, public-network, live OpenAI, or release result, and
+the ordinary final-state screenshots do not exercise malformed terminal snapshots
+or invalid transition mutation attempts.
 
 ## SQLite file-permission proof boundary
 
@@ -169,7 +153,7 @@ timing, public latency, or hosted behavior.
 
 The current source retains the bounded-worker SQLite design. The superseded Task29
 section below records the exact focused, full, and hosted evidence for that earlier
-checkpoint; the current Task33 local gate does not promote it into current hosted or
+checkpoint; the current Task34 local gate does not promote it into current hosted or
 container proof. It does not prove multi-process or concurrent multi-container SQLite,
 target-host scheduling, abrupt host loss, public latency, or live provider behavior.
 
@@ -189,7 +173,7 @@ and global limits. Its tests cover atomic race admission, rollback on an injecte
 second/third write failure, validation-before-charge, live-ledger separation, reset
 and restart persistence, bounded retention, and the generic `429`/`Retry-After`
 contract. This source/test evidence does not change the final-build capture lane from
-`84af413…` and is not public deployment, live OpenAI, container-host durability, tag,
+`8942517…` and is not public deployment, live OpenAI, container-host durability, tag,
 or release proof.
 
 ## Live deadline proof boundary
@@ -205,6 +189,60 @@ source/test evidence only; it is not a real OpenAI trace, hard
 process-termination proof, public deployment, or release claim.
 
 ## Superseded historical hosted baseline
+
+### Client-terminal capture and hosted baselines (superseded)
+
+- Prior capture source:
+  `84af413c3a7833daa635e6a0b84e8f331cc1f7f2`
+- Prior evidence activation:
+  `7a8092f9ac0be03274358bb9814db3d8e6a34507`
+- Prior manifest digest:
+  `00d4636da32836689202464fc55deb5f4b2a8f5e6ffd02831d27d22a9146bc90`
+  across 84 runtime paths.
+- The prior Task33 source gate covered the 144 / 144 focused client matrix,
+  369 / 369 web tests, and the TypeScript/Vite build. Independent
+  specification, quality, and combined before/after visual reviews passed with
+  no P0-P3 findings.
+- The prior local exact gate on the pre-CI documentation successor
+  `0dee3af822edc164b06be6cff61441023ae703dc` covered 29 capture
+  contracts, `capture_manifest_valid`, 19 web test files / 369 tests and
+  TypeScript/Vite, Ruff, strict MyPy over 35 source files, 866 / 866 Python
+  tests with 3 warnings in 24.98s, deterministic stub and local
+  production/SSE/reconnect/shutdown smokes, OpenAPI verification, and the
+  history-aware secret scan.
+- Prior pre-CI GitHub Actions:
+  [run 30591690973](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30591690973),
+  including `verify`
+  ([job 91035189804](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30591690973/job/91035189804))
+  and `container-smoke`
+  ([job 91035490238](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30591690973/job/91035490238)).
+- Both pre-CI jobs passed and both pre-CI job annotation APIs returned `[]`.
+- Pre-CI hosted `verify` covered `capture_manifest_valid`, 19 web test files /
+  369 tests, Ruff, strict MyPy over 35 source files, 866 Python tests with 1
+  warning in 42.00s, deterministic stub smoke, OpenAPI verification, and the
+  history-aware secret scan.
+- Prior final documentation tip:
+  `d02ed41e25d1ffa8a43ee8d74583a1008a4d8026`
+- Prior final-tip GitHub Actions:
+  [run 30592336018](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30592336018),
+  including `verify`
+  ([job 91037154486](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30592336018/job/91037154486))
+  and `container-smoke`
+  ([job 91037472406](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30592336018/job/91037472406)).
+- Both final-tip jobs passed and both final-tip job annotation APIs returned
+  `[]`.
+- Final-tip hosted `verify` covered `capture_manifest_valid`, 19 web test files
+  / 369 tests, Ruff, strict MyPy over 35 source files, 884 Python tests with 1
+  warning in 43.91s, deterministic stub smoke, OpenAPI verification, and the
+  history-aware secret scan.
+- Both prior `container-smoke` jobs built the packaged image with owner-only
+  `/data` mode `0700`, confirmed runtime user `10001:10001`, and passed the
+  offline network-none `deterministic-qa` and `deployed-readonly` profiles.
+
+Prior capture source `84af413…`; activation `7a8092f…`; manifest digest
+`00d4636…`; pre-CI successor `0dee3af…`; final docs tip `d02ed41…`. This
+evidence remains truthful historical proof, but is superseded and is not current
+Task34 source, capture, hosted CI, or container proof.
 
 ### SQLite-permission capture and hosted baselines (superseded)
 
@@ -247,7 +285,7 @@ process-termination proof, public deployment, or release claim.
 
 Prior capture source `a8057a8…`; activation `9de054e…`; manifest digest
 `a5fdc8a…`; pre-CI successor `c6c60d4…`; final docs tip `abdf644…`. This evidence
-remains truthful historical proof, but is superseded and is not current Task33
+remains truthful historical proof, but is superseded and is not current Task34
 source, capture, hosted CI, or container proof.
 
 ### JSON-media capture and hosted baselines (superseded)
@@ -290,7 +328,7 @@ source, capture, hosted CI, or container proof.
 
 Prior capture source `c446f05…`; activation `b4c1bcb…`; manifest digest
 `3bb9737…`; pre-CI successor `62c37d6…`; final docs tip `3abd059…`. This evidence
-remains truthful historical proof, but is superseded and is not current Task33
+remains truthful historical proof, but is superseded and is not current Task34
 source, capture, hosted CI, or container proof.
 
 ### Terminal-retry capture and hosted baselines (superseded)
@@ -328,7 +366,7 @@ source, capture, hosted CI, or container proof.
 
 Prior capture source `96543ff…`; activation `98dae41…`; manifest digest
 `e22c420…`; pre-CI successor `a3e3179…`; final docs tip `9e19b12…`. This evidence
-remains truthful historical proof, but is superseded and is not current Task33
+remains truthful historical proof, but is superseded and is not current Task34
 source, capture, hosted CI, or container proof.
 
 ### Async SQLite capture and hosted baseline (superseded)
@@ -363,7 +401,7 @@ source, capture, hosted CI, or container proof.
 
 Prior capture source `8d0a896…`; activation `cca97a8…`; hosted successor
 `e188202…`; manifest digest `a1e0eca…`. This evidence remains truthful historical
-proof, but is superseded and is not current Task33 source, capture, hosted CI, or
+proof, but is superseded and is not current Task34 source, capture, hosted CI, or
 container proof.
 
 ### Request-boundary capture and hosted baseline (superseded)
