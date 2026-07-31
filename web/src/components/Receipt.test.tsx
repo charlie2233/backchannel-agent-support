@@ -34,6 +34,7 @@ function receipt(overrides: Partial<RecoveryReceipt> = {}): RecoveryReceipt {
     permissionRevoked: true,
     scopeClosed: true,
     approvedRemedyDigest: digest,
+    terminalReason: null,
     quotaEvidence: null,
     ...overrides,
   };
@@ -55,6 +56,7 @@ describe("Receipt", () => {
     expect(within(region).getByText("b".repeat(64))).toBeVisible();
     expect(within(region).getByText("Matched approved digest")).toBeVisible();
     expect(within(region).getByText("Temporary permission revoked after terminal completion.")).toBeVisible();
+    expect(within(region).queryByText("Terminal reason")).not.toBeInTheDocument();
   });
 
   it("proves a declined remedy executed zero times and never began provider dispatch", () => {
@@ -87,6 +89,87 @@ describe("Receipt", () => {
     expect(within(region).getByText("executionCount = 0")).toBeVisible();
     expect(within(region).getByText("Exact interruption rejected.")).toBeVisible();
     expect(within(region).getByText("Cancellation receipt sealed.")).toBeVisible();
+  });
+
+  it("renders expired approval before dispatch without decline or cancellation claims", () => {
+    render(
+      <Receipt
+        receipt={receipt({
+          status: "closed_without_action",
+          providerExecution: false,
+          providerResult:
+            "Authorization expired before demo-provider dispatch; no provider action began.",
+          authorizationSource:
+            "Operator approved the exact pending remedy before expiry.",
+          verificationResults: [
+            "Authorization expired before demo-provider dispatch.",
+            "No provider action began.",
+            "Temporary permission revoked.",
+          ],
+          decision: "approved",
+          executionCount: 0,
+          providerDispatchStarted: false,
+          exactInterruptionRejected: false,
+          approvedRemedyDigest: null,
+          terminalReason: "authorization_expired_before_dispatch",
+        })}
+      />,
+    );
+
+    const region = screen.getByRole("complementary", {
+      name: "Authorization expired",
+    });
+    expect(
+      within(region).getByText(
+        "The exact approval was recorded before expiry, but its authorization expired before provider dispatch.",
+      ),
+    ).toBeVisible();
+    expect(
+      within(region).getByText(
+        "This receipt proves no provider action began before authorization expired.",
+      ),
+    ).toBeVisible();
+    expect(within(region).getByText("Terminal reason").nextSibling).toHaveTextContent(
+      "authorization_expired_before_dispatch",
+    );
+    expect(within(region).queryByText(/declined/i)).not.toBeInTheDocument();
+    expect(within(region).queryByText(/cancellation/i)).not.toBeInTheDocument();
+  });
+
+  it("renders unresolved expired approval without generic cancellation wording", () => {
+    render(
+      <Receipt
+        receipt={receipt({
+          status: "outcome_unknown",
+          providerExecution: false,
+          providerResult:
+            "Dispatch evidence exists, but no terminal demo-provider result can be proved.",
+          authorizationSource:
+            "Operator approved the exact pending remedy before expiry.",
+          verificationResults: [
+            "Authorization expired after dispatch evidence began.",
+            "Manual reconciliation required.",
+          ],
+          decision: "approved",
+          executionCount: 1,
+          providerDispatchStarted: true,
+          exactInterruptionRejected: false,
+          approvedRemedyDigest: null,
+          terminalReason: "authorization_expired_with_unresolved_dispatch",
+        })}
+      />,
+    );
+
+    const region = screen.getByRole("complementary", {
+      name: "Authorization expired with unresolved dispatch",
+    });
+    expect(
+      within(region).getByText(
+        "Authorization expired after dispatch evidence was recorded, but no terminal demo-provider result can be proved.",
+      ),
+    ).toBeVisible();
+    expect(within(region).queryByText(/cancellation/i)).not.toBeInTheDocument();
+    expect(within(region).queryByText(/declined/i)).not.toBeInTheDocument();
   });
 
   it("renders the authoritative quota currency and revocation evidence kind", () => {

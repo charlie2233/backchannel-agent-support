@@ -92,6 +92,9 @@ def build_commit_remedy_tool() -> FunctionTool:
             idempotency_key=idempotency_key,
             tool_call_id=tool_context.tool_call_id,
             remedy_digest=remedy_digest,
+            action_digest=action_digest,
+            resume_owner_id=resume_owner_id,
+            resume_generation=resume_generation,
         )
         # Preserve the established stub crash/reconciliation seam. The live lane
         # finalizes after the resumed broker response so every returned model ID is

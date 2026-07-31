@@ -36,6 +36,46 @@ def _decline_request(pending, decision_id: str) -> ApprovalDecisionRequest:
     )
 
 
+def _insert_decline_dispatch_evidence(
+    store: SQLiteStore,
+    *,
+    recovery_id: str,
+    request: ApprovalDecisionRequest,
+    evidence_id: str,
+) -> None:
+    observed_at = store._now().isoformat()
+    with sqlite3.connect(store._database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO executions (
+                id, recovery_id, idempotency_key, status, provider_execution,
+                request_digest, tool_call_id, remedy_digest, result_json,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, 'completed', 1, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                evidence_id,
+                recovery_id,
+                evidence_id,
+                "a" * 64,
+                request.tool_call_id,
+                request.remedy_digest,
+                json.dumps(
+                    {
+                        "dispatch_id": evidence_id,
+                        "status": "confirmed",
+                        "simulated": True,
+                        "provider_result": "Durable dispatch evidence.",
+                    },
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+                observed_at,
+                observed_at,
+            ),
+        )
+
+
 def _downgrade_pending_envelopes_to_task6(database_path) -> None:
     with sqlite3.connect(database_path) as connection:
         receipt_rows = connection.execute(
@@ -624,19 +664,11 @@ def test_current_decline_receipt_narrative_claims_match_durable_evidence(
     recovery_id = pending.recovery.recovery_id
     request = _decline_request(pending, f"decline-{terminal_kind}-{field}")
     if terminal_kind == "outcome_unknown":
-        store.record_completed_execution(
-            execution_id=f"execution-{field}",
+        _insert_decline_dispatch_evidence(
+            store,
             recovery_id=recovery_id,
-            idempotency_key=f"idempotency-{field}",
-            request_digest="request-digest",
-            tool_call_id=request.tool_call_id,
-            remedy_digest=request.remedy_digest,
-            result_json={
-                "dispatch_id": f"dispatch-{field}",
-                "status": "confirmed",
-                "simulated": True,
-                "provider_result": "Durable dispatch evidence.",
-            },
+            request=request,
+            evidence_id=f"execution-{field}",
         )
     asyncio.run(orchestrator.decline_decision(recovery_id, request))
     store.close()

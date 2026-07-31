@@ -34,6 +34,8 @@ import {
 } from "./domain/session";
 import {
   hotelReplayCompletedPresentation,
+  hotelSdkAuthorizationExpiredPresentation,
+  hotelSdkAuthorizationUnknownPresentation,
   hotelSdkClosedPresentation,
   hotelSdkCompletedPresentation,
   quotaReplayCompletedPresentation,
@@ -534,12 +536,20 @@ export default function App() {
               : recovery.snapshot.executionMode === "sdk_stub" &&
                   recovery.snapshot.status === "completed"
                 ? hotelSdkCompletedPresentation
-                : recovery.snapshot.executionMode === "sdk_stub" &&
-                    recovery.snapshot.status === "closed_without_action"
-                  ? hotelSdkClosedPresentation
-                  : {}),
+                : recovery.snapshot.executionMode !== "replay_fixture" &&
+                    recovery.receipt?.terminalReason ===
+                      "authorization_expired_before_dispatch"
+                  ? hotelSdkAuthorizationExpiredPresentation
+                  : recovery.snapshot.executionMode !== "replay_fixture" &&
+                      recovery.receipt?.terminalReason ===
+                        "authorization_expired_with_unresolved_dispatch"
+                    ? hotelSdkAuthorizationUnknownPresentation
+                    : recovery.snapshot.executionMode === "sdk_stub" &&
+                        recovery.snapshot.status === "closed_without_action"
+                      ? hotelSdkClosedPresentation
+                      : {}),
           },
-    [hotelScenario, recovery.snapshot],
+    [hotelScenario, recovery.receipt?.terminalReason, recovery.snapshot],
   );
   const quotaScenarioView = useMemo<RecoveryScenario>(
     () =>

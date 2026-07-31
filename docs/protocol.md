@@ -45,14 +45,32 @@ Approval has three meaningful outcomes:
 
 - `completed`: approval matched, one idempotent demo-provider dispatch completed,
   and the receipt sealed the result;
-- `closed_without_action`: decline rejected the exact interruption, provider dispatch
-  never began, and the permission scope was revoked;
+- `closed_without_action`: either decline rejected the exact interruption or an
+  already-claimed approval expired before provider dispatch. Provider dispatch never
+  began and the permission scope was revoked;
 - `outcome_unknown`: dispatch may have begun but a terminal provider result cannot be
-  proved. The system must not relabel this state as a safe decline.
+  proved, including evidence that crosses the immutable approval expiry. The system
+  must not relabel this state as a safe decline.
+
+An approval claim does not extend consent. The store samples time after acquiring the
+SQLite write lock. At or after the exact expiry it atomically revokes the scope and
+returns one durable approval response with either
+`authorization_expired_before_dispatch` or
+`authorization_expired_with_unresolved_dispatch`. Same-ID retries replay that exact
+response; opposite-action or new-ID retries retain the established conflict rules.
+Cancellation after a submitted claim cannot strand it: the joined mutation wakes the
+lifecycle reconciler before propagating cancellation.
 
 Provider adapters require an idempotency key and persist one result per key. The
 receipt distinguishes `providerDispatchStarted`, `providerExecution`, and
-`executionCount`; these are not inferred from HTTP success.
+`executionCount`; these are not inferred from HTTP success. The demo hotel adapter
+derives its request digest, idempotency key, execution ID, dispatch ID, and fixed
+provider result from the exact recovery, remedy, interruption, and consent digest.
+Authorization validation and the completed-result insert share one transaction.
+Startup/expiry reconciliation validates that entire contract before a completed row
+can win. Owner snapshot, receipt, and SSE reads revalidate the complete sealed graph
+inside one read transaction; malformed, forged, or pre-authorization execution
+evidence fails closed without rewriting or exposing terminal public state.
 
 ## Events and reconnection
 

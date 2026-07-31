@@ -89,6 +89,7 @@ describe("strict API quota receipt transport", () => {
 
       await expect(getReceipt(recoveryId)).resolves.toMatchObject({
         executionMode: mode,
+        terminalReason: null,
         quotaEvidence: quotaEvidence(
           mode === "sdk_stub" ? "sdk_simulator" : "recorded_fixture",
         ),

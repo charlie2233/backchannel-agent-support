@@ -98,6 +98,37 @@ export const hotelSdkClosedPresentation = {
   },
 } as const satisfies Pick<RecoveryScenario, "summary" | "lifecycleDetails">;
 
+export const hotelSdkAuthorizationExpiredPresentation = {
+  summary:
+    "The exact approval expired before demo-provider dispatch and closed without provider action.",
+  lifecycleDetails: {
+    Detect: "The recovery detected the booking conflict.",
+    Prove: "Consumer and demo-provider evidence was verified.",
+    Negotiate: "One exact replacement remedy was prepared.",
+    Authorize:
+      "The operator approved the exact remedy, but its authorization expired before dispatch.",
+    Execute: "No provider action executed; dispatch did not begin.",
+    "Verify & seal":
+      "Authorization-expiry receipt sealed; permission revoked and scope closed.",
+  },
+} as const satisfies Pick<RecoveryScenario, "summary" | "lifecycleDetails">;
+
+export const hotelSdkAuthorizationUnknownPresentation = {
+  summary:
+    "Authorization expired with unresolved dispatch evidence; the provider outcome needs manual reconciliation.",
+  lifecycleDetails: {
+    Detect: "The recovery detected the booking conflict.",
+    Prove: "Consumer and demo-provider evidence was verified.",
+    Negotiate: "One exact replacement remedy was prepared.",
+    Authorize:
+      "The operator approved the exact remedy, but its authorization expired before completion was proved.",
+    Execute:
+      "Dispatch-start evidence exists, but no terminal demo-provider result can be proved.",
+    "Verify & seal":
+      "Outcome-unknown receipt sealed; permission revoked and scope closed.",
+  },
+} as const satisfies Pick<RecoveryScenario, "summary" | "lifecycleDetails">;
+
 export const quotaSdkCompletedPresentation = {
   summary: "One local deterministic SDK trace verified a temporary quota grant.",
   lifecycleDetails: {

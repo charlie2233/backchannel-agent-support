@@ -178,6 +178,99 @@
         "title": "ExecutionMode",
         "type": "string"
       },
+      "ExpiredApprovalDecisionResponse": {
+        "additionalProperties": false,
+        "description": "Truthful terminal replay when claimed approval outlives its authorization.",
+        "oneOf": [
+          {
+            "properties": {
+              "executionStarted": {
+                "const": false
+              },
+              "status": {
+                "const": "closed_without_action"
+              },
+              "terminalReason": {
+                "const": "authorization_expired_before_dispatch"
+              }
+            },
+            "required": [
+              "status",
+              "executionStarted",
+              "terminalReason"
+            ]
+          },
+          {
+            "properties": {
+              "executionStarted": {
+                "const": true
+              },
+              "status": {
+                "const": "outcome_unknown"
+              },
+              "terminalReason": {
+                "const": "authorization_expired_with_unresolved_dispatch"
+              }
+            },
+            "required": [
+              "status",
+              "executionStarted",
+              "terminalReason"
+            ]
+          }
+        ],
+        "properties": {
+          "clientDecisionId": {
+            "title": "Clientdecisionid",
+            "type": "string"
+          },
+          "decision": {
+            "const": "approve",
+            "title": "Decision",
+            "type": "string"
+          },
+          "decisionRemedyDigest": {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "title": "Decisionremedydigest",
+            "type": "string"
+          },
+          "executionStarted": {
+            "title": "Executionstarted",
+            "type": "boolean"
+          },
+          "recoveryId": {
+            "title": "Recoveryid",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "closed_without_action",
+              "outcome_unknown"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "terminalReason": {
+            "enum": [
+              "authorization_expired_before_dispatch",
+              "authorization_expired_with_unresolved_dispatch"
+            ],
+            "title": "Terminalreason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "clientDecisionId",
+          "recoveryId",
+          "decision",
+          "status",
+          "decisionRemedyDigest",
+          "executionStarted",
+          "terminalReason"
+        ],
+        "title": "ExpiredApprovalDecisionResponse",
+        "type": "object"
+      },
       "HealthResponse": {
         "additionalProperties": false,
         "properties": {
@@ -773,6 +866,21 @@
             "title": "Status",
             "type": "string"
           },
+          "terminalReason": {
+            "anyOf": [
+              {
+                "enum": [
+                  "authorization_expired_before_dispatch",
+                  "authorization_expired_with_unresolved_dispatch"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Terminalreason"
+          },
           "verificationResults": {
             "items": {
               "type": "string"
@@ -1286,6 +1394,9 @@
                   "anyOf": [
                     {
                       "$ref": "#/components/schemas/ApprovalDecisionResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ExpiredApprovalDecisionResponse"
                     },
                     {
                       "$ref": "#/components/schemas/DeclineDecisionResponse"

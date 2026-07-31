@@ -95,7 +95,10 @@ function responseMatchesRequest(
   ) {
     return false;
   }
-  return response.decision === "approve"
+  if (response.decision !== "approve") {
+    return response.decisionRemedyDigest === request.remedyDigest;
+  }
+  return "approvedRemedyDigest" in response
     ? response.approvedRemedyDigest === request.remedyDigest
     : response.decisionRemedyDigest === request.remedyDigest;
 }

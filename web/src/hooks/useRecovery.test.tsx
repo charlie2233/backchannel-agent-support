@@ -126,6 +126,7 @@ function declinedReceipt(): RecoveryReceipt {
     permissionRevoked: true,
     scopeClosed: true,
     approvedRemedyDigest: null,
+    terminalReason: null,
     quotaEvidence: null,
   };
 }
@@ -181,6 +182,7 @@ function quotaTerminalReceipt(
     permissionRevoked: runtime,
     scopeClosed: runtime,
     approvedRemedyDigest: null,
+    terminalReason: null,
     quotaEvidence: {
       providerCeilingRpm: 1000,
       recordedDemandRpm: 1200,

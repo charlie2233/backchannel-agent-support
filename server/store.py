@@ -34,6 +34,7 @@ from server.models import (
     DecisionResponse,
     DeclineDecisionResponse,
     ExecutionMode,
+    ExpiredApprovalDecisionResponse,
     HotelRemedyTerms,
     PendingApprovalView,
     RecoveryEvent,
@@ -48,6 +49,7 @@ from server.policy import (
     evaluate_hotel_policy,
     exact_hotel_terms,
 )
+from server.providers.hotel_contract import durable_hotel_dispatch_contract
 from server.providers.quota_simulator import QuotaGrantResult
 
 SQLITE_BUSY_TIMEOUT_SECONDS = 3.0
@@ -185,6 +187,29 @@ DECLINED_UNKNOWN_VERIFICATIONS = (
     "Remedy declined by operator.",
     "Exact interruption rejected.",
     "Provider dispatch evidence requires manual reconciliation.",
+    "Temporary permission revoked.",
+    "Outcome-unknown receipt sealed.",
+)
+EXPIRED_APPROVAL_AUTHORIZATION = (
+    "Operator approved the exact pending remedy before expiry."
+)
+EXPIRED_APPROVAL_CLOSED_PROVIDER_RESULT = (
+    "Authorization expired before demo-provider dispatch; no provider action began."
+)
+EXPIRED_APPROVAL_CLOSED_VERIFICATIONS = (
+    "Human consent approved the exact remedy before expiry.",
+    "Authorization expired before demo-provider dispatch.",
+    "No provider dispatch evidence exists.",
+    "Temporary permission revoked.",
+    "Authorization-expiry receipt sealed.",
+)
+EXPIRED_APPROVAL_UNKNOWN_PROVIDER_RESULT = (
+    "Dispatch evidence exists, but no terminal demo-provider result can be proved."
+)
+EXPIRED_APPROVAL_UNKNOWN_VERIFICATIONS = (
+    "Human consent approved the exact remedy before expiry.",
+    "Nonterminal demo-provider dispatch evidence exists.",
+    "No terminal demo-provider result can be proved.",
     "Temporary permission revoked.",
     "Outcome-unknown receipt sealed.",
 )
@@ -1521,6 +1546,7 @@ class SQLiteStore:
             SELECT pending_approvals.*, recoveries.status AS recovery_status,
                    approval_decisions.decision AS decision_action,
                    approval_decisions.status AS decision_status,
+                   approval_decisions.claimed_at AS decision_claimed_at,
                    EXISTS (
                        SELECT 1 FROM executions
                        WHERE executions.recovery_id = pending_approvals.recovery_id
@@ -1537,8 +1563,13 @@ class SQLiteStore:
         ).fetchall()
         for row in pending_rows:
             decision = cast(str | None, row["decision_action"])
+            decision_claimed_at = cast(str | None, row["decision_claimed_at"])
             recovery_status = cast(str, row["recovery_status"])
             has_execution = bool(cast(int, row["has_execution"]))
+            if decision == "approve" and decision_claimed_at is None:
+                raise RuntimeError(
+                    "Approved legacy decision is missing its claim timestamp"
+                )
             if (
                 recovery_status
                 in {
@@ -1550,11 +1581,11 @@ class SQLiteStore:
                 or cast(str, row["status"]) == "completed"
             ):
                 scope_status = "revoked"
-                activated_at = cast(str, row["updated_at"]) if decision == "approve" else None
+                activated_at = decision_claimed_at if decision == "approve" else None
                 revoked_at = cast(str, row["updated_at"])
             elif decision == "approve":
                 scope_status = "active"
-                activated_at = cast(str, row["updated_at"])
+                activated_at = decision_claimed_at
                 revoked_at = None
             else:
                 scope_status = "pending"
@@ -2037,6 +2068,129 @@ class SQLiteStore:
 
         decision_status = cast(str, decision_row["status"])
         if request.decision == "approve":
+            if isinstance(claim.response, ExpiredApprovalDecisionResponse):
+                expired_response = claim.response
+                if (
+                    phase != "sealed"
+                    or decision_status != "completed"
+                    or receipt.decision != "approved"
+                    or receipt.status != expired_response.status
+                    or receipt.status != cast(str, recovery["status"])
+                    or receipt.decision_remedy_digest != consent_digest
+                    or expired_response.recovery_id != receipt.recovery_id
+                    or expired_response.decision_remedy_digest != consent_digest
+                    or receipt.execution_count != len(execution_rows)
+                    or receipt.provider_dispatch_started
+                    != expired_response.execution_started
+                    or receipt.exact_interruption_rejected
+                    or not receipt.permission_revoked
+                    or not receipt.scope_closed
+                    or receipt.approved_remedy_digest is not None
+                    or receipt.terminal_reason != expired_response.terminal_reason
+                    or receipt.authorization_source
+                    != EXPIRED_APPROVAL_AUTHORIZATION
+                    or cast(str, pending["status"]) != "expired"
+                    or cast(str, scope["status"]) != "revoked"
+                    or scope["revoked_at"] is None
+                    or cast(str, remedy["status"]) != "expired"
+                ):
+                    raise ReceiptTransitionError(
+                        "Stored receipt expired approval evidence mismatch"
+                    )
+                if len(execution_rows) > 1:
+                    raise ReceiptTransitionError(
+                        "Stored receipt expired approval execution is ambiguous"
+                    )
+                consent = cls._remedy_consent_from_row(remedy)
+                authorization_started_at = cls._approval_authorized_at(
+                    decision=decision_row,
+                    pending=pending,
+                    scope=scope,
+                    consent_expiry=consent.expiry,
+                    expected_pending_status="expired",
+                    expected_scope_status="revoked",
+                    scope_settled=True,
+                )
+                execution_state: Literal["none", "completed", "unresolved"]
+                if execution_rows:
+                    execution_state = cls._validate_expiry_execution_row(
+                        execution_rows[0],
+                        claim=claim,
+                        consent=consent,
+                        authorization_started_at=authorization_started_at,
+                    )
+                    provider_execution = bool(
+                        cast(int, execution_rows[0]["provider_execution"])
+                    )
+                else:
+                    execution_state = "none"
+                    provider_execution = False
+                if (
+                    expired_response.status
+                    == RecoveryStatus.CLOSED_WITHOUT_ACTION.value
+                ):
+                    expected_reason = "authorization_expired_before_dispatch"
+                    expected_provider_result = (
+                        EXPIRED_APPROVAL_CLOSED_PROVIDER_RESULT
+                    )
+                    expected_verifications: tuple[str, ...] = (
+                        EXPIRED_APPROVAL_CLOSED_VERIFICATIONS
+                    )
+                    expected_terminal_type = "recovery.closed_without_action"
+                    if execution_state != "none":
+                        raise ReceiptTransitionError(
+                            "Stored receipt expired approval execution mismatch"
+                        )
+                else:
+                    expected_reason = (
+                        "authorization_expired_with_unresolved_dispatch"
+                    )
+                    expected_provider_result = (
+                        EXPIRED_APPROVAL_UNKNOWN_PROVIDER_RESULT
+                    )
+                    expected_verifications = (
+                        EXPIRED_APPROVAL_UNKNOWN_VERIFICATIONS
+                    )
+                    expected_terminal_type = "recovery.outcome_unknown"
+                    if execution_state != "unresolved":
+                        raise ReceiptTransitionError(
+                            "Stored receipt expired approval execution mismatch"
+                        )
+                if (
+                    expired_response.terminal_reason != expected_reason
+                    or receipt.provider_execution != provider_execution
+                    or receipt.provider_dispatch_started
+                    != (execution_state == "unresolved")
+                    or receipt.provider_result != expected_provider_result
+                    or tuple(receipt.verification_results)
+                    != expected_verifications
+                ):
+                    raise ReceiptTransitionError(
+                        "Stored receipt expired approval narrative mismatch"
+                    )
+                expected_terminal = {
+                    "decision": "approved",
+                    "decisionRemedyDigest": consent_digest,
+                    "executionCount": len(execution_rows),
+                    "exactInterruptionRejected": False,
+                    "permissionRevoked": True,
+                    "providerDispatchStarted": execution_state == "unresolved",
+                    "providerExecution": provider_execution,
+                    "scopeClosed": True,
+                    "terminalReason": expected_reason,
+                }
+                if (
+                    cast(str, terminal_rows[0]["type"])
+                    != expected_terminal_type
+                    or any(
+                        terminal_data.get(key) != value
+                        for key, value in expected_terminal.items()
+                    )
+                ):
+                    raise ReceiptTransitionError(
+                        "Stored receipt expired approval terminal mismatch"
+                    )
+                return
             if receipt.decision != "approved" or (
                 receipt.status != RecoveryStatus.COMPLETED.value
                 or not receipt.provider_execution
@@ -2046,6 +2200,7 @@ class SQLiteStore:
                 or not receipt.permission_revoked
                 or not receipt.scope_closed
                 or receipt.approved_remedy_digest != consent_digest
+                or receipt.terminal_reason is not None
                 or receipt.authorization_source != APPROVED_RECEIPT_AUTHORIZATION
                 or tuple(receipt.verification_results)
                 != APPROVED_RECEIPT_VERIFICATIONS
@@ -2054,6 +2209,32 @@ class SQLiteStore:
             if len(execution_rows) != 1:
                 raise ReceiptTransitionError("Stored receipt execution evidence mismatch")
             execution = execution_rows[0]
+            consent = cls._remedy_consent_from_row(remedy)
+            authorization_started_at = cls._approval_authorized_at(
+                decision=decision_row,
+                pending=pending,
+                scope=scope,
+                consent_expiry=consent.expiry,
+                expected_pending_status=(
+                    "completed" if phase == "sealed" else "approved"
+                ),
+                expected_scope_status=(
+                    "revoked" if phase == "sealed" else "active"
+                ),
+                scope_settled=phase == "sealed",
+            )
+            if (
+                cls._validate_expiry_execution_row(
+                    execution,
+                    claim=claim,
+                    consent=consent,
+                    authorization_started_at=authorization_started_at,
+                )
+                != "completed"
+            ):
+                raise ReceiptTransitionError(
+                    "Stored receipt execution evidence mismatch"
+                )
             try:
                 result = json.loads(cast(str, execution["result_json"]))
             except (TypeError, ValueError):
@@ -2070,11 +2251,13 @@ class SQLiteStore:
             ):
                 raise ReceiptTransitionError("Stored receipt execution evidence mismatch")
             if decision_status == "completed":
-                response = claim.response
-                if not isinstance(response, ApprovalDecisionResponse) or (
-                    response.recovery_id != receipt.recovery_id
-                    or response.approved_remedy_digest != consent_digest
-                    or not response.execution_started
+                approval_response = claim.response
+                if not isinstance(
+                    approval_response, ApprovalDecisionResponse
+                ) or (
+                    approval_response.recovery_id != receipt.recovery_id
+                    or approval_response.approved_remedy_digest != consent_digest
+                    or not approval_response.execution_started
                 ):
                     raise ReceiptTransitionError(
                         "Stored receipt decision evidence mismatch"
@@ -2119,8 +2302,8 @@ class SQLiteStore:
 
         if receipt.decision != "declined" or decision_status != "completed":
             raise ReceiptTransitionError("Stored receipt decision evidence mismatch")
-        response = claim.response
-        if not isinstance(response, DeclineDecisionResponse):
+        decline_response = claim.response
+        if not isinstance(decline_response, DeclineDecisionResponse):
             raise ReceiptTransitionError("Stored receipt decision evidence mismatch")
         execution_count = len(execution_rows)
         provider_execution = any(
@@ -2143,10 +2326,10 @@ class SQLiteStore:
         if (
             phase != "sealed"
             or receipt.status != cast(str, recovery["status"])
-            or receipt.status != response.status
-            or response.recovery_id != receipt.recovery_id
-            or response.decision_remedy_digest != consent_digest
-            or response.execution_started != provider_dispatch_started
+            or receipt.status != decline_response.status
+            or decline_response.recovery_id != receipt.recovery_id
+            or decline_response.decision_remedy_digest != consent_digest
+            or decline_response.execution_started != provider_dispatch_started
             or receipt.execution_count != execution_count
             or receipt.provider_execution != provider_execution
             or receipt.provider_dispatch_started != provider_dispatch_started
@@ -2154,6 +2337,7 @@ class SQLiteStore:
             or not receipt.permission_revoked
             or not receipt.scope_closed
             or receipt.approved_remedy_digest is not None
+            or receipt.terminal_reason is not None
             or receipt.provider_result != expected_provider_result
             or receipt.authorization_source != DECLINED_RECEIPT_AUTHORIZATION
             or tuple(receipt.verification_results) != expected_verifications
@@ -2181,6 +2365,44 @@ class SQLiteStore:
             terminal_data.get(key) != value for key, value in expected_terminal.items()
         ):
             raise ReceiptTransitionError("Stored receipt terminal evidence mismatch")
+
+    @classmethod
+    def _validate_public_terminal_evidence(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        recovery_id: str,
+        recovery_status: RecoveryStatus,
+    ) -> None:
+        """Fail closed before exposing any owner-scoped terminal evidence."""
+
+        if recovery_status not in TERMINAL_RECOVERY_STATUSES:
+            return
+        receipt_row = connection.execute(
+            "SELECT receipt_json FROM receipts WHERE recovery_id = ?",
+            (recovery_id,),
+        ).fetchone()
+        if receipt_row is None:
+            raise ReceiptTransitionError(
+                "Public terminal recovery is missing its receipt evidence"
+            )
+        try:
+            receipt = RecoveryReceipt.model_validate_json(
+                cast(str, receipt_row["receipt_json"])
+            )
+        except (TypeError, ValueError):
+            raise ReceiptTransitionError(
+                "Public terminal receipt evidence is invalid"
+            ) from None
+        if receipt.recovery_id != recovery_id or receipt.status != recovery_status.value:
+            raise ReceiptTransitionError(
+                "Public terminal receipt evidence mismatch"
+            )
+        cls._validate_durable_receipt_evidence(
+            connection,
+            receipt,
+            phase="sealed",
+        )
 
     @classmethod
     def _migrate_task7_receipt_provenance(cls, connection: sqlite3.Connection) -> None:
@@ -2634,7 +2856,12 @@ class SQLiteStore:
             if not isinstance(raw_response, dict):
                 raise ValueError("Decision response must be a JSON object")
             if raw_response.get("decision") == "approve":
-                response = ApprovalDecisionResponse.model_validate(raw_response)
+                if raw_response.get("status") == "completed":
+                    response = ApprovalDecisionResponse.model_validate(raw_response)
+                else:
+                    response = ExpiredApprovalDecisionResponse.model_validate(
+                        raw_response
+                    )
             elif raw_response.get("decision") == "decline":
                 response = DeclineDecisionResponse.model_validate(raw_response)
             else:
@@ -3743,6 +3970,7 @@ class SQLiteStore:
     ) -> RecoverySnapshot:
         self._require_public_identity_hash(session_hash)
         with self._lock, self._connect() as connection:
+            connection.execute("BEGIN")
             row = connection.execute(
                 """
                 SELECT recoveries.* FROM recoveries
@@ -3774,6 +4002,12 @@ class SQLiteStore:
                 if envelope_row is not None
                 else None
             )
+            self._validate_public_terminal_evidence(
+                connection,
+                recovery_id=recovery_id,
+                recovery_status=RecoveryStatus(cast(str, row["status"])),
+            )
+            connection.commit()
         return self._recovery_from_row(
             row,
             pending_approval=pending_view,
@@ -4319,6 +4553,470 @@ class SQLiteStore:
                 )
             self._validate_approval_policy(recovery_id, consent, now=observed_at)
 
+    @staticmethod
+    def _approval_authorized_at(
+        *,
+        decision: sqlite3.Row,
+        pending: sqlite3.Row,
+        scope: sqlite3.Row,
+        consent_expiry: datetime,
+        expected_pending_status: str,
+        expected_scope_status: str,
+        scope_settled: bool,
+    ) -> datetime:
+        """Validate the one durable instant that activated exact authorization."""
+
+        try:
+            claimed_at = datetime.fromisoformat(cast(str, decision["claimed_at"]))
+            pending_created_at = datetime.fromisoformat(
+                cast(str, pending["created_at"])
+            )
+            pending_updated_at = datetime.fromisoformat(
+                cast(str, pending["updated_at"])
+            )
+            scope_created_at = datetime.fromisoformat(cast(str, scope["created_at"]))
+            scope_activated_at = datetime.fromisoformat(
+                cast(str, scope["activated_at"])
+            )
+            scope_updated_at = datetime.fromisoformat(cast(str, scope["updated_at"]))
+        except (TypeError, ValueError):
+            raise ReceiptTransitionError(
+                "Approval authorization timestamps are invalid"
+            ) from None
+        timestamps = (
+            claimed_at,
+            pending_created_at,
+            pending_updated_at,
+            scope_created_at,
+            scope_activated_at,
+            scope_updated_at,
+        )
+        if any(
+            timestamp.tzinfo is None
+            or timestamp.utcoffset() != timedelta(0)
+            for timestamp in timestamps
+        ):
+            raise ReceiptTransitionError(
+                "Approval authorization timestamps are invalid"
+            )
+        if (
+            cast(str, decision["decision"]) != "approve"
+            or cast(str, pending["status"]) != expected_pending_status
+            or cast(str, scope["status"]) != expected_scope_status
+            or claimed_at != scope_activated_at
+            or pending_created_at > claimed_at
+            or scope_created_at > claimed_at
+            or claimed_at >= consent_expiry
+            or pending_updated_at < claimed_at
+            or (
+                scope_updated_at < claimed_at
+                if scope_settled
+                else scope_updated_at != claimed_at
+            )
+        ):
+            raise ReceiptTransitionError(
+                "Approval authorization chronology mismatch"
+            )
+        return claimed_at
+
+    @staticmethod
+    def _validate_expiry_execution_row(
+        row: sqlite3.Row,
+        *,
+        claim: ApprovalDecisionClaim,
+        consent: RemedyConsentRecord,
+        authorization_started_at: datetime,
+    ) -> Literal["completed", "unresolved"]:
+        expected = durable_hotel_dispatch_contract(
+            recovery_id=claim.recovery_id,
+            remedy=consent.evidence.remedy,
+            tool_call_id=claim.request.tool_call_id,
+            remedy_digest=claim.request.remedy_digest,
+        )
+        if (
+            cast(str, row["id"]) != expected.execution_id
+            or cast(str, row["idempotency_key"]) != expected.idempotency_key
+            or cast(str | None, row["request_digest"]) != expected.request_digest
+            or cast(str | None, row["tool_call_id"])
+            != claim.request.tool_call_id
+            or cast(str | None, row["remedy_digest"])
+            != claim.request.remedy_digest
+        ):
+            raise ReceiptTransitionError(
+                "Expired approval dispatch evidence mismatch"
+            )
+        try:
+            created_at = datetime.fromisoformat(cast(str, row["created_at"]))
+            updated_at = datetime.fromisoformat(cast(str, row["updated_at"]))
+        except (TypeError, ValueError):
+            raise ReceiptTransitionError(
+                "Expired approval dispatch evidence mismatch"
+            ) from None
+        if (
+            created_at.tzinfo is None
+            or created_at.utcoffset() != timedelta(0)
+            or updated_at.tzinfo is None
+            or updated_at.utcoffset() != timedelta(0)
+            or updated_at < created_at
+            or created_at < authorization_started_at
+        ):
+            raise ReceiptTransitionError(
+                "Expired approval dispatch evidence chronology mismatch"
+            )
+        status = cast(str, row["status"])
+        if status == "dispatch_started":
+            if bool(cast(int, row["provider_execution"])) or row["result_json"] is not None:
+                raise ReceiptTransitionError(
+                    "Expired approval dispatch evidence mismatch"
+                )
+            return "unresolved"
+        if status != "completed" or not bool(cast(int, row["provider_execution"])):
+            raise ReceiptTransitionError(
+                "Expired approval dispatch evidence mismatch"
+            )
+        try:
+            result = json.loads(cast(str, row["result_json"]))
+        except (TypeError, ValueError):
+            raise ReceiptTransitionError(
+                "Expired approval dispatch evidence mismatch"
+            ) from None
+        if (
+            not isinstance(result, dict)
+            or result != expected.result_json
+        ):
+            raise ReceiptTransitionError(
+                "Expired approval dispatch evidence mismatch"
+            )
+        if created_at >= consent.expiry or updated_at >= consent.expiry:
+            return "unresolved"
+        return "completed"
+
+    def reconcile_expired_approval_claim(
+        self,
+        claim: ApprovalDecisionClaim,
+    ) -> tuple[ApprovalDecisionClaim, datetime | None]:
+        """Schedule or atomically terminalize one expired claimed approval."""
+
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            observed_at = self._now()
+            decision_row = connection.execute(
+                "SELECT * FROM approval_decisions WHERE recovery_id = ?",
+                (claim.recovery_id,),
+            ).fetchone()
+            if decision_row is None:
+                raise ApprovalDecisionError(
+                    "decision_unavailable", claim.recovery_id, status_code=409
+                )
+            durable_claim = self._decision_claim_from_row(decision_row)
+            self._assert_claim_matches_row(claim, durable_claim)
+            if durable_claim.response is not None:
+                return durable_claim, None
+            if durable_claim.request.decision != "approve":
+                return durable_claim, None
+
+            receipt_row = connection.execute(
+                "SELECT receipt_json FROM receipts WHERE recovery_id = ?",
+                (claim.recovery_id,),
+            ).fetchone()
+            if receipt_row is not None:
+                try:
+                    receipt = RecoveryReceipt.model_validate_json(
+                        cast(str, receipt_row["receipt_json"])
+                    )
+                except (TypeError, ValueError):
+                    raise ReceiptTransitionError(
+                        "Stored receipt is invalid during approval reconciliation"
+                    ) from None
+                self._validate_durable_receipt_evidence(
+                    connection,
+                    receipt,
+                    phase="sealed",
+                )
+                if (
+                    receipt.status != RecoveryStatus.COMPLETED.value
+                    or receipt.decision != "approved"
+                ):
+                    raise ReceiptTransitionError(
+                        "Unexpected receipt before approval expiry finalization"
+                    )
+                return durable_claim, None
+
+            pending, consent = self._validate_decision_identity(
+                connection,
+                claim.recovery_id,
+                claim.request,
+            )
+            pending_row = connection.execute(
+                "SELECT * FROM pending_approvals WHERE recovery_id = ?",
+                (claim.recovery_id,),
+            ).fetchone()
+            scope = connection.execute(
+                "SELECT * FROM permission_scopes WHERE recovery_id = ?",
+                (claim.recovery_id,),
+            ).fetchone()
+            if pending_row is None or pending.status != "approved":
+                raise ApprovalDecisionError(
+                    "resume_incompatible", claim.recovery_id, status_code=409
+                )
+            if scope is None or (
+                cast(str, scope["status"]) != "active"
+                or cast(str, scope["tool_call_id"]) != pending.tool_call_id
+                or cast(str, scope["remedy_digest"]) != pending.consent_digest
+                or cast(str, scope["action_digest"]) != pending.action_digest
+            ):
+                raise ApprovalDecisionError(
+                    "resume_incompatible", claim.recovery_id, status_code=409
+                )
+            authorization_started_at = (
+                self._approval_authorized_at(
+                    decision=decision_row,
+                    pending=pending_row,
+                    scope=scope,
+                    consent_expiry=consent.expiry,
+                    expected_pending_status="approved",
+                    expected_scope_status="active",
+                    scope_settled=False,
+                )
+            )
+            execution_rows = connection.execute(
+                "SELECT * FROM executions WHERE recovery_id = ? ORDER BY created_at ASC",
+                (claim.recovery_id,),
+            ).fetchall()
+            if len(execution_rows) > 1:
+                raise ReceiptTransitionError(
+                    "Expired approval dispatch evidence is ambiguous"
+                )
+            execution_state: Literal["none", "completed", "unresolved"] = "none"
+            provider_execution = False
+            if execution_rows:
+                execution_state = self._validate_expiry_execution_row(
+                    execution_rows[0],
+                    claim=durable_claim,
+                    consent=consent,
+                    authorization_started_at=authorization_started_at,
+                )
+                provider_execution = bool(
+                    cast(int, execution_rows[0]["provider_execution"])
+                )
+            if consent.expiry > observed_at:
+                return durable_claim, consent.expiry
+            if connection.execute(
+                "SELECT 1 FROM events WHERE recovery_id = ? AND terminal = 1",
+                (claim.recovery_id,),
+            ).fetchone() is not None:
+                raise ReceiptTransitionError(
+                    "Unexpected terminal event before approval expiry finalization"
+                )
+
+            if execution_state == "completed":
+                return durable_claim, None
+
+            if execution_state == "none":
+                terminal_status = RecoveryStatus.CLOSED_WITHOUT_ACTION
+                response_status: Literal[
+                    "closed_without_action", "outcome_unknown"
+                ] = "closed_without_action"
+                terminal_type = "recovery.closed_without_action"
+                terminal_reason: Literal[
+                    "authorization_expired_before_dispatch",
+                    "authorization_expired_with_unresolved_dispatch",
+                ] = "authorization_expired_before_dispatch"
+                execution_started = False
+                summary = (
+                    "Authorization expired before provider dispatch; "
+                    "closed without action."
+                )
+                provider_result = EXPIRED_APPROVAL_CLOSED_PROVIDER_RESULT
+                verifications = EXPIRED_APPROVAL_CLOSED_VERIFICATIONS
+            else:
+                terminal_status = RecoveryStatus.OUTCOME_UNKNOWN
+                response_status = "outcome_unknown"
+                terminal_type = "recovery.outcome_unknown"
+                terminal_reason = (
+                    "authorization_expired_with_unresolved_dispatch"
+                )
+                execution_started = True
+                summary = (
+                    "Authorization expired with unresolved dispatch evidence; "
+                    "outcome requires manual reconciliation."
+                )
+                provider_result = EXPIRED_APPROVAL_UNKNOWN_PROVIDER_RESULT
+                verifications = EXPIRED_APPROVAL_UNKNOWN_VERIFICATIONS
+
+            response = ExpiredApprovalDecisionResponse(
+                clientDecisionId=claim.request.client_decision_id,
+                recoveryId=claim.recovery_id,
+                decision="approve",
+                status=response_status,
+                decisionRemedyDigest=claim.request.remedy_digest,
+                executionStarted=execution_started,
+                terminalReason=terminal_reason,
+            )
+            receipt = RecoveryReceipt(
+                recoveryId=claim.recovery_id,
+                executionMode=pending.execution_mode,
+                status=terminal_status.value,
+                simulated=True,
+                providerExecution=provider_execution,
+                modelIds=list(
+                    dict.fromkeys(
+                        item.returned_model for item in pending.model_metadata
+                    )
+                ),
+                rootTraceId=pending.root_trace_id,
+                sdkVersion=pending.sdk_version,
+                protocolVersion=pending.protocol_version,
+                agentGraphVersion=pending.agent_graph_version,
+                promptToolSchemaHash=pending.definition_digest,
+                boundary=non_replay_receipt_boundary(pending.execution_mode),
+                providerResult=provider_result,
+                authorizationSource=EXPIRED_APPROVAL_AUTHORIZATION,
+                verificationResults=list(verifications),
+                decision="approved",
+                decisionRemedyDigest=claim.request.remedy_digest,
+                executionCount=len(execution_rows),
+                providerDispatchStarted=execution_started,
+                exactInterruptionRejected=False,
+                permissionRevoked=True,
+                scopeClosed=True,
+                approvedRemedyDigest=None,
+                terminalReason=terminal_reason,
+            )
+            next_sequence = cast(
+                int,
+                connection.execute(
+                    "SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE recovery_id = ?",
+                    (claim.recovery_id,),
+                ).fetchone()[0],
+            )
+            terminal_data: dict[str, JsonValue] = {
+                "decision": "approved",
+                "decisionRemedyDigest": claim.request.remedy_digest,
+                "executionCount": len(execution_rows),
+                "exactInterruptionRejected": False,
+                "permissionRevoked": True,
+                "phase": "Verify & seal",
+                "providerDispatchStarted": execution_started,
+                "providerExecution": provider_execution,
+                "scopeClosed": True,
+                "summary": summary,
+                "terminalReason": terminal_reason,
+            }
+            connection.execute(
+                """
+                INSERT INTO receipts (recovery_id, receipt_json, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (
+                    claim.recovery_id,
+                    receipt.model_dump_json(by_alias=True, exclude_none=True),
+                    observed_at.isoformat(),
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO events (
+                    recovery_id, seq, type, terminal, data_json, created_at
+                ) VALUES (?, ?, ?, 1, ?, ?)
+                """,
+                (
+                    claim.recovery_id,
+                    next_sequence,
+                    terminal_type,
+                    json.dumps(terminal_data, separators=(",", ":"), sort_keys=True),
+                    observed_at.isoformat(),
+                ),
+            )
+            recovery_cursor = connection.execute(
+                """
+                UPDATE recoveries
+                SET status = ?, current_step = 5, current_step_summary = ?,
+                    updated_at = ?
+                WHERE id = ? AND status = 'pending_approval'
+                """,
+                (
+                    terminal_status.value,
+                    summary,
+                    observed_at.isoformat(),
+                    claim.recovery_id,
+                ),
+            )
+            pending_cursor = connection.execute(
+                """
+                UPDATE pending_approvals
+                SET status = 'expired', updated_at = ?
+                WHERE recovery_id = ? AND status = 'approved'
+                """,
+                (observed_at.isoformat(), claim.recovery_id),
+            )
+            remedy_cursor = connection.execute(
+                """
+                UPDATE remedies
+                SET status = 'expired'
+                WHERE recovery_id = ? AND id = ? AND status = 'pending'
+                """,
+                (claim.recovery_id, claim.request.remedy_id),
+            )
+            scope_cursor = connection.execute(
+                """
+                UPDATE permission_scopes
+                SET status = 'revoked', revoked_at = ?, updated_at = ?
+                WHERE recovery_id = ? AND status = 'active'
+                """,
+                (
+                    observed_at.isoformat(),
+                    observed_at.isoformat(),
+                    claim.recovery_id,
+                ),
+            )
+            decision_cursor = connection.execute(
+                """
+                UPDATE approval_decisions
+                SET status = 'completed', result_json = ?, completed_at = ?,
+                    resume_owner_id = NULL, resume_lease_expires_at = NULL,
+                    resume_heartbeat_at = NULL
+                WHERE recovery_id = ? AND status = 'claimed'
+                """,
+                (
+                    response.model_dump_json(by_alias=True),
+                    observed_at.isoformat(),
+                    claim.recovery_id,
+                ),
+            )
+            if any(
+                cursor.rowcount != 1
+                for cursor in (
+                    recovery_cursor,
+                    pending_cursor,
+                    remedy_cursor,
+                    scope_cursor,
+                    decision_cursor,
+                )
+            ):
+                raise ApprovalDecisionError(
+                    "resume_incompatible", claim.recovery_id, status_code=409
+                )
+            self._validate_durable_receipt_evidence(
+                connection,
+                receipt,
+                phase="sealed",
+            )
+            connection.execute(
+                """
+                INSERT INTO receipt_provenance_migrations (recovery_id, migrated_at)
+                VALUES (?, ?)
+                """,
+                (claim.recovery_id, observed_at.isoformat()),
+            )
+            row = connection.execute(
+                "SELECT * FROM approval_decisions WHERE recovery_id = ?",
+                (claim.recovery_id,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("Expired approval decision did not persist")
+            return self._decision_claim_from_row(row), None
+
     def complete_decision(
         self,
         claim: ApprovalDecisionClaim,
@@ -4339,6 +5037,10 @@ class SQLiteStore:
             )
         if isinstance(response, ApprovalDecisionResponse):
             response_digest = response.approved_remedy_digest
+        elif isinstance(response, ExpiredApprovalDecisionResponse):
+            raise ValueError(
+                "Expired approvals must use atomic authorization finalization"
+            )
         else:
             response_digest = response.decision_remedy_digest
         if response_digest != claim.request.remedy_digest:
@@ -5442,11 +6144,30 @@ class SQLiteStore:
         request_digest: str,
         tool_call_id: str,
         remedy_digest: str,
+        action_digest: str,
+        resume_owner_id: str,
+        resume_generation: int,
         result_json: dict[str, JsonValue],
     ) -> tuple[DurableExecution, bool]:
-        """Atomically persist or replay one completed idempotent provider result."""
+        """Authorize and record the SQLite-backed demo-adapter result atomically."""
 
-        now = self._now()
+        if (
+            not execution_id.strip()
+            or not idempotency_key.strip()
+            or re.fullmatch(r"[0-9a-f]{64}", request_digest) is None
+        ):
+            raise ValueError("Execution identity and request digest must be canonical")
+        if (
+            set(result_json)
+            != {"dispatch_id", "provider_result", "simulated", "status"}
+            or not isinstance(result_json.get("dispatch_id"), str)
+            or not cast(str, result_json["dispatch_id"]).strip()
+            or not isinstance(result_json.get("provider_result"), str)
+            or not cast(str, result_json["provider_result"]).strip()
+            or result_json.get("simulated") is not True
+            or result_json.get("status") != "confirmed"
+        ):
+            raise ValueError("Execution result must be a canonical demo-provider result")
         serialized_result = json.dumps(
             result_json,
             ensure_ascii=False,
@@ -5455,57 +6176,143 @@ class SQLiteStore:
         )
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            now = self._now()
             existing = connection.execute(
                 "SELECT * FROM executions WHERE idempotency_key = ?",
                 (idempotency_key,),
             ).fetchone()
-            dispatched = False
-            if existing is None:
-                connection.execute(
-                    """
-                    INSERT INTO executions (
-                        id, recovery_id, idempotency_key, status,
-                        provider_execution, request_digest, tool_call_id,
-                        remedy_digest, result_json, created_at, updated_at
-                    ) VALUES (?, ?, ?, 'completed', 1, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        execution_id,
-                        recovery_id,
-                        idempotency_key,
-                        request_digest,
-                        tool_call_id,
-                        remedy_digest,
-                        serialized_result,
-                        now.isoformat(),
-                        now.isoformat(),
-                    ),
+            if existing is not None and (
+                cast(str, existing["recovery_id"]) != recovery_id
+                or cast(str | None, existing["request_digest"]) != request_digest
+                or cast(str | None, existing["tool_call_id"]) != tool_call_id
+                or cast(str | None, existing["remedy_digest"]) != remedy_digest
+            ):
+                raise ExecutionConflictError(
+                    "Idempotency key was already used for a different execution"
                 )
-                dispatched = True
-            else:
+            decision = connection.execute(
+                "SELECT * FROM approval_decisions WHERE recovery_id = ?",
+                (recovery_id,),
+            ).fetchone()
+            if decision is None:
+                raise ApprovalDecisionError(
+                    "decision_unavailable", recovery_id, status_code=409
+                )
+            self._require_resume_owner(
+                decision,
+                recovery_id=recovery_id,
+                resume_owner_id=resume_owner_id,
+                resume_generation=resume_generation,
+                now=now,
+            )
+            claim = self._decision_claim_from_row(decision)
+            if (
+                claim.response is not None
+                or claim.request.decision != "approve"
+                or claim.request.tool_call_id != tool_call_id
+                or claim.request.remedy_digest != remedy_digest
+            ):
+                raise ApprovalDecisionError(
+                    "decision_unavailable", recovery_id, status_code=409
+                )
+            pending, consent = self._validate_decision_identity(
+                connection,
+                recovery_id,
+                claim.request,
+            )
+            self._validate_approval_policy(recovery_id, consent, now=now)
+            expected_dispatch = durable_hotel_dispatch_contract(
+                recovery_id=recovery_id,
+                remedy=consent.evidence.remedy,
+                tool_call_id=tool_call_id,
+                remedy_digest=remedy_digest,
+            )
+            if (
+                execution_id != expected_dispatch.execution_id
+                or idempotency_key != expected_dispatch.idempotency_key
+                or request_digest != expected_dispatch.request_digest
+                or result_json != expected_dispatch.result_json
+            ):
+                raise ExecutionConflictError(
+                    "Execution evidence does not match the canonical demo-provider contract"
+                )
+            scope = connection.execute(
+                "SELECT * FROM permission_scopes WHERE recovery_id = ?",
+                (recovery_id,),
+            ).fetchone()
+            if (
+                pending.action_digest != action_digest
+                or scope is None
+                or cast(str, scope["status"]) != "active"
+                or cast(str, scope["tool_call_id"]) != tool_call_id
+                or cast(str, scope["remedy_digest"]) != remedy_digest
+                or cast(str, scope["action_digest"]) != action_digest
+            ):
+                raise ApprovalDecisionError(
+                    "decision_unavailable", recovery_id, status_code=409
+                )
+            other_execution = connection.execute(
+                """
+                SELECT 1 FROM executions
+                WHERE recovery_id = ? AND idempotency_key <> ?
+                """,
+                (recovery_id, idempotency_key),
+            ).fetchone()
+            if other_execution is not None:
+                raise ExecutionConflictError(
+                    "Recovery already contains different execution evidence"
+                )
+            # Re-sample at the final write boundary so time spent validating the
+            # canonical contract cannot carry an authorization or owner lease
+            # across its exact deadline before the durable result is inserted.
+            commit_now = self._now()
+            self._require_resume_owner(
+                decision,
+                recovery_id=recovery_id,
+                resume_owner_id=resume_owner_id,
+                resume_generation=resume_generation,
+                now=commit_now,
+            )
+            self._validate_approval_policy(
+                recovery_id,
+                consent,
+                now=commit_now,
+            )
+            if existing is not None:
                 if (
-                    cast(str, existing["recovery_id"]) != recovery_id
-                    or cast(str | None, existing["request_digest"]) != request_digest
-                    or cast(str | None, existing["tool_call_id"]) != tool_call_id
-                    or cast(str | None, existing["remedy_digest"]) != remedy_digest
+                    cast(str, existing["id"]) != execution_id
+                    or cast(str, existing["status"]) != "completed"
+                    or not bool(cast(int, existing["provider_execution"]))
+                    or cast(str | None, existing["result_json"])
+                    != serialized_result
                 ):
                     raise ExecutionConflictError(
                         "Idempotency key was already used for a different execution"
                     )
-                if (
-                    cast(str, existing["status"]) != "completed"
-                    or existing["result_json"] is None
-                ):
-                    connection.execute(
-                        """
-                        UPDATE executions
-                        SET status = 'completed', provider_execution = 1,
-                            result_json = ?, updated_at = ?
-                        WHERE idempotency_key = ?
-                        """,
-                        (serialized_result, now.isoformat(), idempotency_key),
-                    )
-                    dispatched = True
+                return self._execution_from_row(existing), False
+
+            dispatched = False
+            connection.execute(
+                """
+                INSERT INTO executions (
+                    id, recovery_id, idempotency_key, status,
+                    provider_execution, request_digest, tool_call_id,
+                    remedy_digest, result_json, created_at, updated_at
+                ) VALUES (?, ?, ?, 'completed', 1, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    execution_id,
+                    recovery_id,
+                    idempotency_key,
+                    request_digest,
+                    tool_call_id,
+                    remedy_digest,
+                    serialized_result,
+                    commit_now.isoformat(),
+                    commit_now.isoformat(),
+                ),
+            )
+            dispatched = True
             row = connection.execute(
                 "SELECT * FROM executions WHERE idempotency_key = ?",
                 (idempotency_key,),
@@ -5878,6 +6685,11 @@ class SQLiteStore:
             if recovery is None:
                 raise RecoveryNotFoundError("Recovery not found")
             recovery_status = RecoveryStatus(cast(str, recovery["status"]))
+            self._validate_public_terminal_evidence(
+                connection,
+                recovery_id=recovery_id,
+                recovery_status=recovery_status,
+            )
             connection.commit()
         return [self._event_from_row(row) for row in rows], recovery_status
 
@@ -5897,6 +6709,7 @@ class SQLiteStore:
     ) -> RecoveryReceipt:
         self._require_public_identity_hash(session_hash)
         with self._lock, self._connect() as connection:
+            connection.execute("BEGIN")
             row = connection.execute(
                 """
                 SELECT receipts.receipt_json FROM receipts
@@ -5906,9 +6719,27 @@ class SQLiteStore:
                 """,
                 (recovery_id, session_hash),
             ).fetchone()
-        if row is None:
-            raise RecoveryNotFoundError("Receipt not found")
-        return RecoveryReceipt.model_validate_json(cast(str, row["receipt_json"]))
+            if row is None:
+                raise RecoveryNotFoundError("Receipt not found")
+            try:
+                receipt = RecoveryReceipt.model_validate_json(
+                    cast(str, row["receipt_json"])
+                )
+            except (TypeError, ValueError):
+                raise ReceiptTransitionError(
+                    "Public terminal receipt evidence is invalid"
+                ) from None
+            if receipt.recovery_id != recovery_id:
+                raise ReceiptTransitionError(
+                    "Public terminal receipt evidence mismatch"
+                )
+            self._validate_durable_receipt_evidence(
+                connection,
+                receipt,
+                phase="sealed",
+            )
+            connection.commit()
+        return receipt
 
     def reset(self) -> None:
         with self._lock, self._connect() as connection:

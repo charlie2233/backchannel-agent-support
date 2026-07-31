@@ -73,6 +73,7 @@ function terminalReceipt(): RecoveryReceipt {
     permissionRevoked: true,
     scopeClosed: true,
     approvedRemedyDigest: null,
+    terminalReason: null,
     quotaEvidence: null,
   };
 }

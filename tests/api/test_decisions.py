@@ -7,6 +7,7 @@ import os
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
 from queue import Empty
 from threading import Barrier
 from typing import Any
@@ -259,6 +260,79 @@ def test_exact_duplicate_replays_stored_response_without_redispatch(sdk_client) 
     assert first.content == second.content
     assert provider.dispatch_count == 1
     assert store.count_executions(recovery_id) == 1
+    assert len([event for event in store.list_events(recovery_id) if event.terminal]) == 1
+
+
+def test_expired_claim_returns_exact_terminal_shape_and_preserves_session_isolation(
+    sdk_client,
+    monkeypatch,
+) -> None:
+    client, store, provider = sdk_client
+    snapshot = create_sdk_recovery(client)
+    recovery_id = str(snapshot["recoveryId"])
+    payload = decision_payload(
+        snapshot,
+        client_decision_id="expired-api-approval",
+    )
+    pending = snapshot["pendingApproval"]
+    assert isinstance(pending, dict)
+    expiry = datetime.fromisoformat(str(pending["expiry"]))
+    monkeypatch.setattr(
+        store,
+        "_now",
+        lambda: expiry - timedelta(microseconds=1),
+    )
+    claim = store.claim_decision(
+        recovery_id,
+        ApprovalDecisionRequest.model_validate(payload),
+    )
+    assert claim.response is None
+    owner_cookie = client.cookies.get("backchannel_demo_session")
+    assert owner_cookie is not None
+    monkeypatch.setattr(store, "_now", lambda: expiry)
+
+    terminal = client.post(
+        f"/api/recoveries/{recovery_id}/decisions",
+        json=payload,
+    )
+
+    assert terminal.status_code == 200
+    assert terminal.headers["cache-control"] == "private, no-store"
+    assert terminal.json() == {
+        "clientDecisionId": "expired-api-approval",
+        "recoveryId": recovery_id,
+        "decision": "approve",
+        "status": "closed_without_action",
+        "decisionRemedyDigest": payload["remedyDigest"],
+        "executionStarted": False,
+        "terminalReason": "authorization_expired_before_dispatch",
+    }
+    receipt = client.get(f"/api/recoveries/{recovery_id}/receipt")
+    assert receipt.status_code == 200
+    assert receipt.json()["terminalReason"] == (
+        "authorization_expired_before_dispatch"
+    )
+    assert receipt.json()["decision"] == "approved"
+    assert provider.dispatch_count == 0
+
+    client.cookies.clear()
+    create_sdk_recovery(client)
+    foreign = client.post(
+        f"/api/recoveries/{recovery_id}/decisions",
+        json=payload,
+    )
+    assert foreign.status_code == 404
+    assert foreign.json()["error"]["code"] == "not_found"
+
+    client.cookies.clear()
+    client.cookies.set("backchannel_demo_session", owner_cookie)
+    replay = client.post(
+        f"/api/recoveries/{recovery_id}/decisions",
+        json=payload,
+    )
+    assert replay.status_code == 200
+    assert replay.content == terminal.content
+    assert provider.dispatch_count == 0
     assert len([event for event in store.list_events(recovery_id) if event.terminal]) == 1
 
 

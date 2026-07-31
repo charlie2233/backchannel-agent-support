@@ -1,7 +1,7 @@
 import asyncio
 import json
 import sqlite3
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -13,6 +13,7 @@ from server.models import (
     ScenarioId,
 )
 from server.orchestrator import RecoveryOrchestrator
+from server.providers.hotel_contract import durable_hotel_dispatch_contract
 from server.providers.hotel_simulator import HotelSimulator
 from server.providers.quota_simulator import QuotaGrantResult
 from server.store import (
@@ -190,36 +191,39 @@ def create_durable_sdk_execution(
     recovery_id = pending.recovery.recovery_id
     approval = pending.recovery.pending_approval
     assert approval is not None
-    claim = store.claim_decision(
-        recovery_id,
-        ApprovalDecisionRequest(
-            decision="approve",
-            clientDecisionId=f"decision-{recovery_id}",
-            remedyId=approval.remedy_id,
-            remedyDigest=approval.remedy_digest,
-            toolCallId=approval.tool_call_id,
-        ),
+    request = ApprovalDecisionRequest(
+        decision="approve",
+        clientDecisionId=f"decision-{recovery_id}",
+        remedyId=approval.remedy_id,
+        remedyDigest=approval.remedy_digest,
+        toolCallId=approval.tool_call_id,
     )
+    claim = store.claim_decision(recovery_id, request)
     owner_id = f"receipt-finalizer-{recovery_id}"
     lease = store.acquire_decision_resume(
         claim,
         resume_owner_id=owner_id,
         lease_duration=timedelta(minutes=1),
     )
-    provider_result = "Bound demo-provider result."
-    execution, dispatched = store.record_completed_execution(
-        execution_id=f"execution-{recovery_id}",
+    contract = durable_hotel_dispatch_contract(
         recovery_id=recovery_id,
-        idempotency_key=f"idempotency-{recovery_id}",
-        request_digest="request-digest",
+        remedy=store.get_remedy_consent(recovery_id).evidence.remedy,
+        tool_call_id=request.tool_call_id,
+        remedy_digest=request.remedy_digest,
+    )
+    provider_result = contract.result_json["provider_result"]
+    assert isinstance(provider_result, str)
+    execution, dispatched = store.record_completed_execution(
+        execution_id=contract.execution_id,
+        recovery_id=recovery_id,
+        idempotency_key=contract.idempotency_key,
+        request_digest=contract.request_digest,
         tool_call_id=approval.tool_call_id,
         remedy_digest=approval.remedy_digest,
-        result_json={
-            "dispatch_id": f"dispatch-{recovery_id}",
-            "status": "confirmed",
-            "simulated": True,
-            "provider_result": provider_result,
-        },
+        action_digest=store.get_pending_approval(recovery_id).action_digest,
+        resume_owner_id=owner_id,
+        resume_generation=lease.resume_generation,
+        result_json=contract.result_json,
     )
     assert dispatched is True
     envelope = store.get_pending_approval(recovery_id)
@@ -598,6 +602,83 @@ def test_finalizer_replays_matching_receipt_and_terminal_evidence_idempotently(
     assert terminal_events[0].data["approvedRemedyDigest"] == (
         expected_receipt.approved_remedy_digest
     )
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    ["request_digest", "pre_authorization_timestamp"],
+)
+def test_owner_terminal_readers_fail_closed_on_tampered_execution_evidence(
+    tmp_path,
+    tamper: str,
+) -> None:
+    database_path = tmp_path / f"public-terminal-{tamper}.sqlite3"
+    store = SQLiteStore(database_path)
+    recovery_id, execution, receipt, owner_id, generation = (
+        create_durable_sdk_execution(store)
+    )
+    assert store.finalize_completed_execution(
+        execution,
+        receipt=receipt,
+        resume_owner_id=owner_id,
+        resume_generation=generation,
+    )
+    session_hash = "hmac-sha256:" + "f" * 64
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO recovery_access (recovery_id, session_hash)
+            VALUES (?, ?)
+            """,
+            (recovery_id, session_hash),
+        )
+
+    assert store.get_recovery_for_session(recovery_id, session_hash).status is (
+        RecoveryStatus.COMPLETED
+    )
+    assert store.get_receipt_for_session(recovery_id, session_hash) == receipt
+    assert store.read_event_batch_for_session(
+        recovery_id,
+        session_hash=session_hash,
+    )[1] is RecoveryStatus.COMPLETED
+
+    with sqlite3.connect(database_path) as connection:
+        if tamper == "request_digest":
+            connection.execute(
+                "UPDATE executions SET request_digest = ? WHERE recovery_id = ?",
+                ("0" * 64, recovery_id),
+            )
+        else:
+            claimed_at_row = connection.execute(
+                """
+                SELECT claimed_at FROM approval_decisions
+                WHERE recovery_id = ?
+                """,
+                (recovery_id,),
+            ).fetchone()
+            assert claimed_at_row is not None
+            before_authorization = (
+                datetime.fromisoformat(str(claimed_at_row[0]))
+                - timedelta(seconds=1)
+            ).isoformat()
+            connection.execute(
+                """
+                UPDATE executions
+                SET created_at = ?, updated_at = ?
+                WHERE recovery_id = ?
+                """,
+                (before_authorization, before_authorization, recovery_id),
+            )
+
+    with pytest.raises(ReceiptTransitionError):
+        store.get_recovery_for_session(recovery_id, session_hash)
+    with pytest.raises(ReceiptTransitionError):
+        store.get_receipt_for_session(recovery_id, session_hash)
+    with pytest.raises(ReceiptTransitionError):
+        store.read_event_batch_for_session(
+            recovery_id,
+            session_hash=session_hash,
+        )
 
 
 def test_finalizer_rejects_incomplete_task7_provenance_without_sealing(

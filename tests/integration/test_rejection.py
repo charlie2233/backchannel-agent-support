@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import sqlite3
 from collections.abc import Mapping
 from datetime import timedelta
 from typing import Any
@@ -36,6 +38,47 @@ def _decision_request(pending, decision_id: str) -> ApprovalDecisionRequest:
         remedyDigest=approval.remedy_digest,
         toolCallId=approval.tool_call_id,
     )
+
+
+def _insert_preexisting_execution_evidence(
+    store: SQLiteStore,
+    *,
+    recovery_id: str,
+    request: ApprovalDecisionRequest,
+    evidence_id: str,
+    provider_result: str,
+) -> None:
+    observed_at = store._now().isoformat()
+    with sqlite3.connect(store._database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO executions (
+                id, recovery_id, idempotency_key, status, provider_execution,
+                request_digest, tool_call_id, remedy_digest, result_json,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, 'completed', 1, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                evidence_id,
+                recovery_id,
+                evidence_id,
+                "a" * 64,
+                request.tool_call_id,
+                request.remedy_digest,
+                json.dumps(
+                    {
+                        "dispatch_id": evidence_id,
+                        "status": "confirmed",
+                        "simulated": True,
+                        "provider_result": provider_result,
+                    },
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+                observed_at,
+                observed_at,
+            ),
+        )
 
 
 async def _run_startup_reconciliation(orchestrator: RecoveryOrchestrator) -> None:
@@ -203,19 +246,12 @@ def test_execution_evidence_forces_decline_to_outcome_unknown(tmp_path) -> None:
     )
     recovery_id = pending.recovery.recovery_id
     request = _decision_request(pending, "unknown-decline")
-    store.record_completed_execution(
-        execution_id="execution-preexisting-evidence",
+    _insert_preexisting_execution_evidence(
+        store,
         recovery_id=recovery_id,
-        idempotency_key="preexisting-dispatch-evidence",
-        request_digest="request-digest-evidence",
-        tool_call_id=request.tool_call_id,
-        remedy_digest=request.remedy_digest,
-        result_json={
-            "dispatch_id": "dispatch-evidence",
-            "status": "confirmed",
-            "simulated": True,
-            "provider_result": "Provider dispatch evidence exists.",
-        },
+        request=request,
+        evidence_id="execution-preexisting-evidence",
+        provider_result="Provider dispatch evidence exists.",
     )
 
     response = asyncio.run(orchestrator.decide(recovery_id, request))
@@ -342,19 +378,12 @@ def test_rejected_decline_with_dispatch_evidence_reopens_as_outcome_unknown(
     )
     recovery_id = pending.recovery.recovery_id
     request = _decision_request(pending, "rejected-with-execution")
-    store.record_completed_execution(
-        execution_id="execution-before-decline-reopen",
+    _insert_preexisting_execution_evidence(
+        store,
         recovery_id=recovery_id,
-        idempotency_key="dispatch-before-decline-reopen",
-        request_digest="dispatch-evidence-digest",
-        tool_call_id=request.tool_call_id,
-        remedy_digest=request.remedy_digest,
-        result_json={
-            "dispatch_id": "dispatch-before-decline-reopen",
-            "status": "confirmed",
-            "simulated": True,
-            "provider_result": "Preexisting dispatch evidence.",
-        },
+        request=request,
+        evidence_id="execution-before-decline-reopen",
+        provider_result="Preexisting dispatch evidence.",
     )
 
     class SimulatedProcessCrash(RuntimeError):

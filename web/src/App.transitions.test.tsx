@@ -78,6 +78,7 @@ function completedReceipt(): RecoveryReceipt {
     permissionRevoked: true,
     scopeClosed: true,
     approvedRemedyDigest: digest,
+    terminalReason: null,
     quotaEvidence: null,
   };
 }
@@ -94,6 +95,29 @@ function closedReceipt(): RecoveryReceipt {
     providerDispatchStarted: false,
     exactInterruptionRejected: true,
     approvedRemedyDigest: null,
+  };
+}
+
+function expiredApprovalReceipt(
+  terminalReason: NonNullable<RecoveryReceipt["terminalReason"]>,
+): RecoveryReceipt {
+  const unresolved =
+    terminalReason === "authorization_expired_with_unresolved_dispatch";
+  return {
+    ...completedReceipt(),
+    status: unresolved ? "outcome_unknown" : "closed_without_action",
+    providerExecution: false,
+    providerResult: unresolved
+      ? "Dispatch evidence exists, but no terminal provider result can be proved."
+      : "Authorization expired before demo-provider dispatch; no provider action began.",
+    authorizationSource:
+      "Operator approved the exact pending remedy before expiry.",
+    decision: "approved",
+    executionCount: unresolved ? 1 : 0,
+    providerDispatchStarted: unresolved,
+    exactInterruptionRejected: false,
+    approvedRemedyDigest: null,
+    terminalReason,
   };
 }
 
@@ -257,6 +281,82 @@ describe("consent surface focus transitions", () => {
       ).not.toHaveTextContent("current");
       expect(lifecycle).not.toHaveTextContent("Not started.");
       expect(lifecycle).not.toHaveTextContent("Waiting for an execution outcome.");
+    },
+    15_000,
+  );
+
+  it.each([
+    [
+      "sdk_stub",
+      "closed_without_action",
+      "authorization_expired_before_dispatch",
+      "Authorization expired",
+      "No provider action executed; dispatch did not begin.",
+      "Authorization-expiry receipt sealed; permission revoked and scope closed.",
+    ],
+    [
+      "sdk_stub",
+      "outcome_unknown",
+      "authorization_expired_with_unresolved_dispatch",
+      "Authorization expired with unresolved dispatch",
+      "Dispatch-start evidence exists, but no terminal demo-provider result can be proved.",
+      "Outcome-unknown receipt sealed; permission revoked and scope closed.",
+    ],
+    [
+      "openai_live",
+      "closed_without_action",
+      "authorization_expired_before_dispatch",
+      "Authorization expired",
+      "No provider action executed; dispatch did not begin.",
+      "Authorization-expiry receipt sealed; permission revoked and scope closed.",
+    ],
+    [
+      "openai_live",
+      "outcome_unknown",
+      "authorization_expired_with_unresolved_dispatch",
+      "Authorization expired with unresolved dispatch",
+      "Dispatch-start evidence exists, but no terminal demo-provider result can be proved.",
+      "Outcome-unknown receipt sealed; permission revoked and scope closed.",
+    ],
+  ] as const)(
+    "renders truthful %s lifecycle copy for %s expired approval evidence",
+    async (
+      executionMode,
+      status,
+      terminalReason,
+      receiptHeading,
+      executeCopy,
+      sealCopy,
+    ) => {
+      installControllableMatchMedia(false);
+      const view = render(<App />);
+      hotelState = state(
+        {
+          ...pendingSnapshot(),
+          executionMode,
+          status,
+          currentStep: 5,
+          currentStepSummary: "Authorization expiry evidence sealed.",
+          pendingApproval: null,
+        },
+        expiredApprovalReceipt(terminalReason),
+      );
+      view.rerender(<App />);
+
+      expect(
+        screen.getByRole("heading", { name: receiptHeading }),
+      ).toBeVisible();
+      const lifecycle = screen.getByRole("list", { name: "Recovery lifecycle" });
+      expect(
+        screen.getByRole("heading", { name: "Authorize" }).closest("li"),
+      ).toHaveTextContent("operator approved the exact remedy");
+      expect(
+        screen.getByRole("heading", { name: "Execute" }).closest("li"),
+      ).toHaveTextContent(executeCopy);
+      expect(
+        screen.getByRole("heading", { name: "Verify & seal" }).closest("li"),
+      ).toHaveTextContent(sealCopy);
+      expect(lifecycle).not.toHaveTextContent(/declined|cancellation/i);
     },
     15_000,
   );

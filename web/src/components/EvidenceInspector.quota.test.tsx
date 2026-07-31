@@ -35,6 +35,7 @@ function quotaReceipt(mode: "sdk_stub" | "replay_fixture"): RecoveryReceipt {
     permissionRevoked: runtime,
     scopeClosed: runtime,
     approvedRemedyDigest: null,
+    terminalReason: null,
     quotaEvidence: {
       providerCeilingRpm: 1000,
       recordedDemandRpm: 1200,

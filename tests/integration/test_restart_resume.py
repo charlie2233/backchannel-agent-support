@@ -11,6 +11,10 @@ from server.config import RuntimeSettings
 from server.main import create_app
 from server.models import ApprovalDecisionRequest, ExecutionMode, RecoveryStatus
 from server.orchestrator import RecoveryOrchestrator
+from server.providers.hotel_contract import (
+    DurableHotelDispatchContract,
+    durable_hotel_dispatch_contract,
+)
 from server.providers.hotel_simulator import HotelSimulator
 from server.store import RecoveryNotFoundError, SQLiteStore
 
@@ -24,6 +28,19 @@ def approval_request(pending, decision_id: str) -> ApprovalDecisionRequest:
         remedyId=approval.remedy_id,
         remedyDigest=approval.remedy_digest,
         toolCallId=approval.tool_call_id,
+    )
+
+
+def dispatch_contract(
+    store: SQLiteStore,
+    recovery_id: str,
+    request: ApprovalDecisionRequest,
+) -> DurableHotelDispatchContract:
+    return durable_hotel_dispatch_contract(
+        recovery_id=recovery_id,
+        remedy=store.get_remedy_consent(recovery_id).evidence.remedy,
+        tool_call_id=request.tool_call_id,
+        remedy_digest=request.remedy_digest,
     )
 
 
@@ -230,19 +247,20 @@ def test_startup_retries_committed_execution_after_foreign_lease_expires(
             now=clock.now(),
         )
         assert lease.disposition == "owner"
+        contract = dispatch_contract(initial_store, recovery_id, request)
         execution, dispatched = initial_store.record_completed_execution(
-            execution_id="execution-before-unexpired-crash",
+            execution_id=contract.execution_id,
             recovery_id=recovery_id,
-            idempotency_key="dispatch-before-unexpired-crash",
-            request_digest="request-before-unexpired-crash",
+            idempotency_key=contract.idempotency_key,
+            request_digest=contract.request_digest,
             tool_call_id=request.tool_call_id,
             remedy_digest=request.remedy_digest,
-            result_json={
-                "dispatch_id": "dispatch-before-unexpired-crash",
-                "status": "confirmed",
-                "simulated": True,
-                "provider_result": "Durable result committed before process crash.",
-            },
+            action_digest=initial_store.get_pending_approval(
+                recovery_id
+            ).action_digest,
+            resume_owner_id="crashed-process-owner",
+            resume_generation=lease.resume_generation,
+            result_json=contract.result_json,
         )
         assert dispatched is True
         assert execution.provider_execution is True
@@ -354,7 +372,6 @@ def test_startup_releases_owned_lease_after_partial_approval_completion_failure(
                 self.current += timedelta(seconds=delay)
                 await asyncio.sleep(0)
 
-        clock = FakeClock()
         database_path = tmp_path / "restart-release-approval-lease.sqlite3"
         initial_store = SQLiteStore(database_path)
         initial_orchestrator = RecoveryOrchestrator(
@@ -367,25 +384,40 @@ def test_startup_releases_owned_lease_after_partial_approval_completion_failure(
         )
         recovery_id = pending.recovery.recovery_id
         request = approval_request(pending, "release-partial-approval-lease")
-        initial_store.claim_decision(recovery_id, request)
+        claim = initial_store.claim_decision(recovery_id, request)
+        lease = initial_store.acquire_decision_resume(
+            claim,
+            resume_owner_id="partial-approval-owner",
+            lease_duration=timedelta(minutes=1),
+        )
+        contract = dispatch_contract(initial_store, recovery_id, request)
         _, dispatched = initial_store.record_completed_execution(
-            execution_id="execution-before-partial-approval-failure",
+            execution_id=contract.execution_id,
             recovery_id=recovery_id,
-            idempotency_key="dispatch-before-partial-approval-failure",
-            request_digest="request-before-partial-approval-failure",
+            idempotency_key=contract.idempotency_key,
+            request_digest=contract.request_digest,
             tool_call_id=request.tool_call_id,
             remedy_digest=request.remedy_digest,
-            result_json={
-                "dispatch_id": "dispatch-before-partial-approval-failure",
-                "status": "confirmed",
-                "simulated": True,
-                "provider_result": "Durable result before partial finalization failure.",
-            },
+            action_digest=initial_store.get_pending_approval(
+                recovery_id
+            ).action_digest,
+            resume_owner_id="partial-approval-owner",
+            resume_generation=lease.resume_generation,
+            result_json=contract.result_json,
         )
         assert dispatched is True
+        assert initial_store.release_decision_resume(
+            claim,
+            resume_owner_id="partial-approval-owner",
+            resume_generation=lease.resume_generation,
+        )
         await initial_orchestrator.shutdown()
         initial_store.close()
 
+        # The restart clock must begin after the real durable claim and
+        # execution timestamps. Starting it before setup would make the
+        # finalizer manufacture an impossible pre-authorization chronology.
+        clock = FakeClock()
         restarted_store = SQLiteStore(database_path)
         monkeypatch.setattr(restarted_store, "_now", clock.now)
         restarted_provider = HotelSimulator(store=restarted_store)
@@ -646,19 +678,20 @@ def test_shutdown_cancels_permanently_failing_startup_reconciliation(
             now=clock.now(),
         )
         assert lease.disposition == "owner"
+        contract = dispatch_contract(initial_store, recovery_id, request)
         _, dispatched = initial_store.record_completed_execution(
-            execution_id="execution-before-shutdown-test",
+            execution_id=contract.execution_id,
             recovery_id=recovery_id,
-            idempotency_key="dispatch-before-shutdown-test",
-            request_digest="request-before-shutdown-test",
+            idempotency_key=contract.idempotency_key,
+            request_digest=contract.request_digest,
             tool_call_id=request.tool_call_id,
             remedy_digest=request.remedy_digest,
-            result_json={
-                "dispatch_id": "dispatch-before-shutdown-test",
-                "status": "confirmed",
-                "simulated": True,
-                "provider_result": "Durable result awaiting lease expiry.",
-            },
+            action_digest=initial_store.get_pending_approval(
+                recovery_id
+            ).action_digest,
+            resume_owner_id="still-running-owner",
+            resume_generation=lease.resume_generation,
+            result_json=contract.result_json,
         )
         assert dispatched is True
         await initial_orchestrator.shutdown()
@@ -765,19 +798,18 @@ def test_app_lifespan_retries_store_failure_for_orchestrator_created_outside_loo
         now=clock.now(),
     )
     assert lease.disposition == "owner"
+    contract = dispatch_contract(initial_store, recovery_id, request)
     _, dispatched = initial_store.record_completed_execution(
-        execution_id="execution-before-lifespan-start",
+        execution_id=contract.execution_id,
         recovery_id=recovery_id,
-        idempotency_key="dispatch-before-lifespan-start",
-        request_digest="request-before-lifespan-start",
+        idempotency_key=contract.idempotency_key,
+        request_digest=contract.request_digest,
         tool_call_id=request.tool_call_id,
         remedy_digest=request.remedy_digest,
-        result_json={
-            "dispatch_id": "dispatch-before-lifespan-start",
-            "status": "confirmed",
-            "simulated": True,
-            "provider_result": "Durable result awaiting application lifespan.",
-        },
+        action_digest=initial_store.get_pending_approval(recovery_id).action_digest,
+        resume_owner_id="crashed-before-lifespan-owner",
+        resume_generation=lease.resume_generation,
+        result_json=contract.result_json,
     )
     assert dispatched is True
     asyncio.run(initial_orchestrator.shutdown())

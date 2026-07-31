@@ -9,6 +9,7 @@ from agents.exceptions import UserError
 
 from server.models import ApprovalDecisionRequest, ExecutionMode, RecoveryReceipt
 from server.orchestrator import RecoveryOrchestrator
+from server.providers.hotel_contract import durable_hotel_dispatch_contract
 from server.providers.hotel_simulator import HotelSimulator
 from server.store import (
     APPROVED_RECEIPT_AUTHORIZATION,
@@ -166,20 +167,25 @@ def test_approved_receipt_and_scope_revocation_commit_atomically(tmp_path) -> No
     database_path = tmp_path / "approved-scope-atomic.sqlite3"
     store = SQLiteStore(database_path)
     recovery_id, request, owner_id, generation = _start_and_claim_approval(store)
-    provider_result = "Durable provider evidence for scope atomicity."
-    execution, _dispatched = store.record_completed_execution(
-        execution_id="execution-scope-atomic",
+    contract = durable_hotel_dispatch_contract(
         recovery_id=recovery_id,
-        idempotency_key="idempotency-scope-atomic",
-        request_digest="request-scope-atomic",
+        remedy=store.get_remedy_consent(recovery_id).evidence.remedy,
         tool_call_id=request.tool_call_id,
         remedy_digest=request.remedy_digest,
-        result_json={
-            "dispatch_id": "dispatch-scope-atomic",
-            "status": "confirmed",
-            "simulated": True,
-            "provider_result": provider_result,
-        },
+    )
+    provider_result = contract.result_json["provider_result"]
+    assert isinstance(provider_result, str)
+    execution, _dispatched = store.record_completed_execution(
+        execution_id=contract.execution_id,
+        recovery_id=recovery_id,
+        idempotency_key=contract.idempotency_key,
+        request_digest=contract.request_digest,
+        tool_call_id=request.tool_call_id,
+        remedy_digest=request.remedy_digest,
+        action_digest=store.get_pending_approval(recovery_id).action_digest,
+        resume_owner_id=owner_id,
+        resume_generation=generation,
+        result_json=contract.result_json,
     )
     envelope = store.get_pending_approval(recovery_id)
     receipt = RecoveryReceipt(

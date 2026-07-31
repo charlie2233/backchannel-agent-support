@@ -87,6 +87,28 @@ export interface ApprovalDecisionResponse {
   executionStarted: true;
 }
 
+interface ExpiredApprovalDecisionResponseBase {
+  clientDecisionId: string;
+  recoveryId: string;
+  decision: "approve";
+  decisionRemedyDigest: `sha256:${string}`;
+}
+
+export type ExpiredApprovalDecisionResponse =
+  | (ExpiredApprovalDecisionResponseBase & {
+      status: "closed_without_action";
+      executionStarted: false;
+      terminalReason: "authorization_expired_before_dispatch";
+    })
+  | (ExpiredApprovalDecisionResponseBase & {
+      status: "outcome_unknown";
+      executionStarted: true;
+      terminalReason: "authorization_expired_with_unresolved_dispatch";
+    });
+
+export type ApprovalTerminalReason =
+  ExpiredApprovalDecisionResponse["terminalReason"];
+
 export interface DeclineDecisionResponse {
   clientDecisionId: string;
   recoveryId: string;
@@ -98,6 +120,7 @@ export interface DeclineDecisionResponse {
 
 export type DecisionResponse =
   | ApprovalDecisionResponse
+  | ExpiredApprovalDecisionResponse
   | DeclineDecisionResponse;
 
 export interface RecoveryReceipt {
@@ -124,6 +147,7 @@ export interface RecoveryReceipt {
   permissionRevoked: boolean;
   scopeClosed: boolean;
   approvedRemedyDigest: `sha256:${string}` | null;
+  terminalReason: ApprovalTerminalReason | null;
   quotaEvidence: QuotaEvidence | null;
 }
 

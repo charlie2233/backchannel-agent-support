@@ -319,6 +319,86 @@ class ApprovalDecisionResponse(ApiModel):
     execution_started: Literal[True] = Field(alias="executionStarted")
 
 
+ApprovalTerminalReason = Literal[
+    "authorization_expired_before_dispatch",
+    "authorization_expired_with_unresolved_dispatch",
+]
+
+
+class ExpiredApprovalDecisionResponse(ApiModel):
+    """Truthful terminal replay when claimed approval outlives its authorization."""
+
+    model_config = ConfigDict(
+        populate_by_name=True,
+        extra="forbid",
+        frozen=True,
+        json_schema_extra={
+            "oneOf": [
+                {
+                    "properties": {
+                        "status": {"const": "closed_without_action"},
+                        "executionStarted": {"const": False},
+                        "terminalReason": {
+                            "const": "authorization_expired_before_dispatch"
+                        },
+                    },
+                    "required": [
+                        "status",
+                        "executionStarted",
+                        "terminalReason",
+                    ],
+                },
+                {
+                    "properties": {
+                        "status": {"const": "outcome_unknown"},
+                        "executionStarted": {"const": True},
+                        "terminalReason": {
+                            "const": (
+                                "authorization_expired_with_unresolved_dispatch"
+                            )
+                        },
+                    },
+                    "required": [
+                        "status",
+                        "executionStarted",
+                        "terminalReason",
+                    ],
+                },
+            ]
+        },
+    )
+
+    client_decision_id: str = Field(alias="clientDecisionId")
+    recovery_id: str = Field(alias="recoveryId")
+    decision: Literal["approve"]
+    status: Literal["closed_without_action", "outcome_unknown"]
+    decision_remedy_digest: str = Field(
+        alias="decisionRemedyDigest",
+        pattern=r"^sha256:[0-9a-f]{64}$",
+    )
+    execution_started: bool = Field(alias="executionStarted")
+    terminal_reason: ApprovalTerminalReason = Field(alias="terminalReason")
+
+    @model_validator(mode="after")
+    def bind_reason_to_execution_evidence(self) -> Self:
+        safe_closed = (
+            self.status == RecoveryStatus.CLOSED_WITHOUT_ACTION.value
+            and not self.execution_started
+            and self.terminal_reason == "authorization_expired_before_dispatch"
+        )
+        unresolved = (
+            self.status == RecoveryStatus.OUTCOME_UNKNOWN.value
+            and self.execution_started
+            and self.terminal_reason
+            == "authorization_expired_with_unresolved_dispatch"
+        )
+        if not safe_closed and not unresolved:
+            raise ValueError(
+                "Expired approval result must match its dispatch evidence"
+            )
+        return self
+
+
 class DeclineDecisionResponse(ApiModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid", frozen=True)
 
@@ -333,7 +413,11 @@ class DeclineDecisionResponse(ApiModel):
     execution_started: bool = Field(alias="executionStarted")
 
 
-DecisionResponse = ApprovalDecisionResponse | DeclineDecisionResponse
+DecisionResponse = (
+    ApprovalDecisionResponse
+    | ExpiredApprovalDecisionResponse
+    | DeclineDecisionResponse
+)
 
 
 class RecoverySnapshot(ApiModel):
@@ -464,10 +548,44 @@ class RecoveryReceipt(ApiModel):
         alias="approvedRemedyDigest",
         pattern=r"^sha256:[0-9a-f]{64}$",
     )
+    terminal_reason: ApprovalTerminalReason | None = Field(
+        default=None,
+        alias="terminalReason",
+    )
     quota_evidence: QuotaEvidence | None = Field(default=None, alias="quotaEvidence")
 
     @model_validator(mode="after")
     def enforce_execution_mode_provenance(self) -> Self:
+        completed_approval = (
+            self.decision == "approved"
+            and self.status == RecoveryStatus.COMPLETED.value
+            and self.provider_execution
+            and self.execution_count == 1
+            and self.provider_dispatch_started
+            and not self.exact_interruption_rejected
+            and self.approved_remedy_digest == self.decision_remedy_digest
+            and self.terminal_reason is None
+        )
+        expired_before_dispatch = (
+            self.decision == "approved"
+            and self.status == RecoveryStatus.CLOSED_WITHOUT_ACTION.value
+            and not self.provider_execution
+            and self.execution_count == 0
+            and not self.provider_dispatch_started
+            and not self.exact_interruption_rejected
+            and self.approved_remedy_digest is None
+            and self.terminal_reason == "authorization_expired_before_dispatch"
+        )
+        expired_with_unresolved_dispatch = (
+            self.decision == "approved"
+            and self.status == RecoveryStatus.OUTCOME_UNKNOWN.value
+            and self.execution_count == 1
+            and self.provider_dispatch_started
+            and not self.exact_interruption_rejected
+            and self.approved_remedy_digest is None
+            and self.terminal_reason
+            == "authorization_expired_with_unresolved_dispatch"
+        )
         if self.execution_mode is ExecutionMode.REPLAY_FIXTURE and (
             self.status != RecoveryStatus.COMPLETED.value
             or not self.simulated
@@ -486,6 +604,7 @@ class RecoveryReceipt(ApiModel):
             or self.permission_revoked
             or self.scope_closed
             or self.approved_remedy_digest is not None
+            or self.terminal_reason is not None
             or (
                 self.quota_evidence is not None
                 and self.quota_evidence.source != "recorded_fixture"
@@ -515,16 +634,14 @@ class RecoveryReceipt(ApiModel):
                     "OpenAI live terminal receipts require model and closed-scope provenance"
                 )
             if self.decision == "approved":
-                if (
-                    self.status != RecoveryStatus.COMPLETED.value
-                    or not self.provider_execution
-                    or self.execution_count != 1
-                    or not self.provider_dispatch_started
-                    or self.exact_interruption_rejected
-                    or self.approved_remedy_digest != self.decision_remedy_digest
+                if not (
+                    completed_approval
+                    or expired_before_dispatch
+                    or expired_with_unresolved_dispatch
                 ):
                     raise ValueError(
-                        "Approved live receipts require one demo-provider dispatch and digest"
+                        "Approved live receipts require completed or expired "
+                        "authorization evidence"
                     )
             elif self.status == RecoveryStatus.CLOSED_WITHOUT_ACTION.value:
                 if (
@@ -533,6 +650,7 @@ class RecoveryReceipt(ApiModel):
                     or self.provider_dispatch_started
                     or not self.exact_interruption_rejected
                     or self.approved_remedy_digest is not None
+                    or self.terminal_reason is not None
                 ):
                     raise ValueError(
                         "Closed live receipts require exact rejection and zero dispatch"
@@ -543,6 +661,7 @@ class RecoveryReceipt(ApiModel):
                     or not self.provider_dispatch_started
                     or not self.exact_interruption_rejected
                     or self.approved_remedy_digest is not None
+                    or self.terminal_reason is not None
                 ):
                     raise ValueError(
                         "Outcome-unknown live receipts require dispatch evidence"
@@ -572,6 +691,7 @@ class RecoveryReceipt(ApiModel):
                     or not self.permission_revoked
                     or not self.scope_closed
                     or self.approved_remedy_digest is not None
+                    or self.terminal_reason is not None
                 ):
                     raise ValueError(
                         "Delegated quota SDK receipts require one deterministic simulator "
@@ -588,17 +708,14 @@ class RecoveryReceipt(ApiModel):
                     "SDK stub terminal receipts require a decision-bound closed scope"
                 )
             if self.decision == "approved":
-                if (
-                    self.status != RecoveryStatus.COMPLETED.value
-                    or not self.provider_execution
-                    or self.execution_count != 1
-                    or not self.provider_dispatch_started
-                    or self.exact_interruption_rejected
-                    or self.approved_remedy_digest != self.decision_remedy_digest
+                if not (
+                    completed_approval
+                    or expired_before_dispatch
+                    or expired_with_unresolved_dispatch
                 ):
                     raise ValueError(
-                        "Approved SDK receipts require one dispatched execution and "
-                        "matching approved digest"
+                        "Approved SDK receipts require completed or expired "
+                        "authorization evidence"
                     )
             elif self.status == RecoveryStatus.CLOSED_WITHOUT_ACTION.value:
                 if (
@@ -607,6 +724,7 @@ class RecoveryReceipt(ApiModel):
                     or self.provider_dispatch_started
                     or not self.exact_interruption_rejected
                     or self.approved_remedy_digest is not None
+                    or self.terminal_reason is not None
                 ):
                     raise ValueError(
                         "Closed-without-action receipts require exact rejection and "
@@ -618,6 +736,7 @@ class RecoveryReceipt(ApiModel):
                     or not self.provider_dispatch_started
                     or not self.exact_interruption_rejected
                     or self.approved_remedy_digest is not None
+                    or self.terminal_reason is not None
                 ):
                     raise ValueError(
                         "Outcome-unknown decline receipts require execution or dispatch "

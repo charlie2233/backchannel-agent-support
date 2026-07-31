@@ -60,6 +60,12 @@ function ReceiptEvidence({
         <dt>Authorization source</dt>
         <dd>{receipt.authorizationSource}</dd>
       </div>
+      {receipt.terminalReason !== null ? (
+        <div>
+          <dt>Terminal reason</dt>
+          <dd className="mono">{receipt.terminalReason}</dd>
+        </div>
+      ) : null}
       <div>
         <dt>Decision remedy digest</dt>
         <dd className="mono">{available(receipt.decisionRemedyDigest)}</dd>
@@ -285,6 +291,9 @@ function ReplayReceipt({ receipt }: ReceiptProps) {
 }
 
 function ClosedReceipt({ receipt }: ReceiptProps) {
+  const expiredApproval =
+    receipt.decision === "approved" &&
+    receipt.terminalReason === "authorization_expired_before_dispatch";
   const closedBeforeDispatch =
     !receipt.providerExecution &&
     !receipt.providerDispatchStarted &&
@@ -296,12 +305,22 @@ function ClosedReceipt({ receipt }: ReceiptProps) {
     <aside className="evidence-inspector receipt-inspector" aria-labelledby="closed-heading">
       <div className="inspector-heading">
         <p className="eyebrow">Authoritative server receipt</p>
-        <h2 id="closed-heading">Closed without action</h2>
-        <p>The exact remedy was declined and its permission scope is closed.</p>
+        <h2 id="closed-heading">
+          {expiredApproval ? "Authorization expired" : "Closed without action"}
+        </h2>
+        <p>
+          {expiredApproval
+            ? "The exact approval was recorded before expiry, but its authorization expired before provider dispatch."
+            : "The exact remedy was declined and its permission scope is closed."}
+        </p>
       </div>
       <div className="receipt-verdict receipt-verdict--closed">
         <strong>{dispatchProof}</strong>
-        <p>This is cancellation evidence for the exact rejected interruption.</p>
+        <p>
+          {expiredApproval
+            ? "This receipt proves no provider action began before authorization expired."
+            : "This is cancellation evidence for the exact rejected interruption."}
+        </p>
       </div>
       <ul className="receipt-checks" aria-label="Closure verification">
         {receipt.verificationResults.map((result) => (
@@ -318,6 +337,10 @@ function ClosedReceipt({ receipt }: ReceiptProps) {
 }
 
 function UnknownReceipt({ receipt }: ReceiptProps) {
+  const expiredApproval =
+    receipt.decision === "approved" &&
+    receipt.terminalReason ===
+      "authorization_expired_with_unresolved_dispatch";
   const reconciliationResults = receipt.verificationResults.filter(
     (result) => result !== "Manual reconciliation required.",
   );
@@ -325,8 +348,16 @@ function UnknownReceipt({ receipt }: ReceiptProps) {
     <aside className="evidence-inspector receipt-inspector" aria-labelledby="unknown-heading">
       <div className="inspector-heading">
         <p className="eyebrow">Authoritative server receipt</p>
-        <h2 id="unknown-heading">Outcome unknown</h2>
-        <p>Execution evidence exists, so cancellation cannot be claimed.</p>
+        <h2 id="unknown-heading">
+          {expiredApproval
+            ? "Authorization expired with unresolved dispatch"
+            : "Outcome unknown"}
+        </h2>
+        <p>
+          {expiredApproval
+            ? "Authorization expired after dispatch evidence was recorded, but no terminal demo-provider result can be proved."
+            : "Execution evidence exists, so cancellation cannot be claimed."}
+        </p>
       </div>
       <div className="receipt-verdict receipt-verdict--unknown">
         <strong>Manual reconciliation required.</strong>

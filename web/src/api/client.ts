@@ -5,6 +5,7 @@ import type {
   DecisionRequest,
   DecisionResponse,
   DeclineDecisionResponse,
+  ExpiredApprovalDecisionResponse,
   HotelRemedyTerms,
   PendingApproval,
   QuotaEvidence,
@@ -768,10 +769,42 @@ function isDeclineDecisionResponse(
   );
 }
 
+function isExpiredApprovalDecisionResponse(
+  value: Record<string, unknown>,
+): value is Record<string, unknown> & ExpiredApprovalDecisionResponse {
+  const safeClosed =
+    value.status === "closed_without_action" &&
+    value.executionStarted === false &&
+    value.terminalReason === "authorization_expired_before_dispatch";
+  const unresolved =
+    value.status === "outcome_unknown" &&
+    value.executionStarted === true &&
+    value.terminalReason ===
+      "authorization_expired_with_unresolved_dispatch";
+  return (
+    hasExactKeys(value, [
+      "clientDecisionId",
+      "recoveryId",
+      "decision",
+      "status",
+      "decisionRemedyDigest",
+      "executionStarted",
+      "terminalReason",
+    ]) &&
+    typeof value.clientDecisionId === "string" &&
+    isUuid(value.recoveryId) &&
+    value.decision === "approve" &&
+    isSha256Digest(value.decisionRemedyDigest) &&
+    (safeClosed || unresolved)
+  );
+}
+
 function isDecisionResponse(value: unknown): value is DecisionResponse {
   return (
     isRecord(value) &&
-    (isApprovalDecisionResponse(value) || isDeclineDecisionResponse(value))
+    (isApprovalDecisionResponse(value) ||
+      isExpiredApprovalDecisionResponse(value) ||
+      isDeclineDecisionResponse(value))
   );
 }
 
@@ -802,7 +835,9 @@ export async function postDecision(
   }
   const responseDigest =
     body.decision === "approve"
-      ? body.approvedRemedyDigest
+      ? "approvedRemedyDigest" in body
+        ? body.approvedRemedyDigest
+        : body.decisionRemedyDigest
       : body.decisionRemedyDigest;
   if (
     body.recoveryId !== recoveryId ||
@@ -912,6 +947,7 @@ function isRecoveryReceipt(value: unknown): value is RecoveryReceipt {
     "permissionRevoked",
     "scopeClosed",
     "approvedRemedyDigest",
+    "terminalReason",
   ];
   if (
     !isRecord(value) ||
@@ -959,7 +995,11 @@ function isRecoveryReceipt(value: unknown): value is RecoveryReceipt {
     typeof value.exactInterruptionRejected === "boolean" &&
     typeof value.permissionRevoked === "boolean" &&
     typeof value.scopeClosed === "boolean" &&
-    nullableDigest(value.approvedRemedyDigest);
+    nullableDigest(value.approvedRemedyDigest) &&
+    (value.terminalReason === null ||
+      value.terminalReason === "authorization_expired_before_dispatch" ||
+      value.terminalReason ===
+        "authorization_expired_with_unresolved_dispatch");
   const quotaEvidenceIsValid =
     quotaEvidence === null || isQuotaEvidence(quotaEvidence);
   if (!commonFieldsAreValid || !quotaEvidenceIsValid) {
@@ -1005,6 +1045,7 @@ function isRecoveryReceipt(value: unknown): value is RecoveryReceipt {
       value.permissionRevoked === false &&
       value.scopeClosed === false &&
       value.approvedRemedyDigest === null &&
+      value.terminalReason === null &&
       (quotaEvidence === null || quotaEvidence.source === "recorded_fixture")
     );
   }
@@ -1027,7 +1068,8 @@ function isRecoveryReceipt(value: unknown): value is RecoveryReceipt {
       value.exactInterruptionRejected === false &&
       value.permissionRevoked === true &&
       value.scopeClosed === true &&
-      value.approvedRemedyDigest === null
+      value.approvedRemedyDigest === null &&
+      value.terminalReason === null
     );
   }
   if (!value.permissionRevoked || !value.scopeClosed || value.decisionRemedyDigest === null) {
@@ -1040,26 +1082,57 @@ function isRecoveryReceipt(value: unknown): value is RecoveryReceipt {
       value.executionCount === 1 &&
       value.providerDispatchStarted === true &&
       value.exactInterruptionRejected === false &&
-      value.approvedRemedyDigest === value.decisionRemedyDigest
+      value.approvedRemedyDigest === value.decisionRemedyDigest &&
+      value.terminalReason === null
     );
   }
   if (value.status === "closed_without_action") {
     return (
-      value.decision === "declined" &&
-      value.providerExecution === false &&
-      value.executionCount === 0 &&
-      value.providerDispatchStarted === false &&
-      value.exactInterruptionRejected === true &&
-      value.approvedRemedyDigest === null
+      ((value.decision === "declined" &&
+        value.providerExecution === false &&
+        value.executionCount === 0 &&
+        value.providerDispatchStarted === false &&
+        value.exactInterruptionRejected === true &&
+        value.approvedRemedyDigest === null &&
+        value.terminalReason === null) ||
+        (value.decision === "approved" &&
+          value.providerExecution === false &&
+          value.executionCount === 0 &&
+          value.providerDispatchStarted === false &&
+          value.exactInterruptionRejected === false &&
+          value.approvedRemedyDigest === null &&
+          value.terminalReason ===
+            "authorization_expired_before_dispatch"))
     );
   }
   return (
-    value.decision === "declined" &&
-    Number(value.executionCount) >= 1 &&
-    value.providerDispatchStarted === true &&
-    value.exactInterruptionRejected === true &&
-    value.approvedRemedyDigest === null
+    ((value.decision === "declined" &&
+      Number(value.executionCount) >= 1 &&
+      value.providerDispatchStarted === true &&
+      value.exactInterruptionRejected === true &&
+      value.approvedRemedyDigest === null &&
+      value.terminalReason === null) ||
+      (value.decision === "approved" &&
+        value.executionCount === 1 &&
+        value.providerDispatchStarted === true &&
+        value.exactInterruptionRejected === false &&
+        value.approvedRemedyDigest === null &&
+        value.terminalReason ===
+          "authorization_expired_with_unresolved_dispatch"))
   );
+}
+
+function normalizeRecoveryReceipt(value: unknown): unknown {
+  if (
+    !isRecord(value) ||
+    Object.prototype.hasOwnProperty.call(value, "terminalReason")
+  ) {
+    return value;
+  }
+  // terminalReason was added as a nullable receipt field. Normalize receipts
+  // from an older rolling server instead of treating an omitted null as
+  // malformed, while the strict validator still rejects every other key drift.
+  return { ...value, terminalReason: null };
 }
 
 export async function getReceipt(
@@ -1081,7 +1154,7 @@ export async function getReceipt(
       expectedRecoveryId: recoveryId,
     });
   }
-  const body = await successfulJson(response);
+  const body = normalizeRecoveryReceipt(await successfulJson(response));
   if (!isRecoveryReceipt(body)) {
     throw unexpectedResponse(response.status);
   }

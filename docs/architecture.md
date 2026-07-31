@@ -16,7 +16,10 @@ markers; all markers are checked before resume.
 
 Consent is one-use and remedy-bound. The server compares the exact remedy, canonical
 digest, interruption tool call, session, expiry, and durable decision claim before a
-provider dispatch. A terminal receipt closes and revokes that permission scope.
+provider dispatch. Claiming an approval does not extend its immutable consent expiry.
+The SQLite-backed demo adapter rechecks the exact decision owner, generation, policy,
+scope, and expiry in the same write transaction that records its canonical result. A
+terminal receipt closes and revokes that permission scope.
 
 ## Three execution modes
 
@@ -106,6 +109,13 @@ cancellation chained and the lease remains generation-fenced until expiry or saf
 takeover. Final application shutdown instead rejects admitted work that has not
 started, joins the one active SQLite call, and leaves an injected `SQLiteStore` open
 for its owner.
+If cancellation lands after a durable decision claim commits, the joined mutation
+still wakes lifecycle reconciliation before cancellation is re-raised. Reconciliation
+validates canonical execution evidence before trusting it, schedules the immutable
+consent deadline, and atomically seals either safe no-dispatch expiry or conservative
+outcome-unknown evidence.
+Owner-scoped terminal snapshot, receipt, and SSE reads validate the complete sealed
+receipt graph from one SQLite read transaction before returning any terminal evidence.
 Each process-local reentrant store-lock wait is capped at 1 second and the first
 SQLite busy wait is capped at 3 seconds, leaving nominal headroom beneath the
 packaged server's 5-second request-task drain window. Lifespan shutdown and the
@@ -183,7 +193,9 @@ volume backup/restore, log retention, and a verified public smoke. Public deploy
 3. The orchestrator pauses the SDK run at `commit_remedy`; the store records the
    exact interruption and digest.
 4. The decision route durably claims one exact action before resuming the SDK state.
-5. The idempotent simulator records at most one result for its idempotency key.
+5. The idempotent simulator derives the request digest, idempotency key, execution ID,
+   dispatch ID, and result from the exact consent and records that result only while
+   the same atomic write still proves authorization is active.
 6. Snapshot, ordered events, and the terminal receipt are committed and rendered.
 
 See [protocol.md](protocol.md) for endpoint semantics and

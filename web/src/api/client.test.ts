@@ -220,6 +220,7 @@ function cancellationReceipt(executionCount = 0) {
     permissionRevoked: true,
     scopeClosed: true,
     approvedRemedyDigest: null,
+    terminalReason: null,
     quotaEvidence: null,
   };
 }
@@ -269,6 +270,7 @@ function replayRecoveryReceipt() {
     permissionRevoked: false,
     scopeClosed: false,
     approvedRemedyDigest: null,
+    terminalReason: null,
     quotaEvidence: null,
   };
 }
@@ -301,7 +303,35 @@ function liveApprovedReceipt() {
     permissionRevoked: true,
     scopeClosed: true,
     approvedRemedyDigest: digest,
+    terminalReason: null,
     quotaEvidence: null,
+  };
+}
+
+function expiredApprovalReceipt(unresolved = false) {
+  return {
+    ...cancellationReceipt(unresolved ? 1 : 0),
+    status: unresolved ? "outcome_unknown" : "closed_without_action",
+    providerResult: unresolved
+      ? "Dispatch evidence exists, but no terminal demo-provider result can be proved."
+      : "Authorization expired before demo-provider dispatch; no provider action began.",
+    authorizationSource:
+      "Operator approved the exact pending remedy before expiry.",
+    verificationResults: unresolved
+      ? [
+          "Authorization expired after dispatch evidence began.",
+          "Manual reconciliation required.",
+        ]
+      : [
+          "Authorization expired before demo-provider dispatch.",
+          "No provider action began.",
+        ],
+    decision: "approved",
+    providerDispatchStarted: unresolved,
+    exactInterruptionRejected: false,
+    terminalReason: unresolved
+      ? "authorization_expired_with_unresolved_dispatch"
+      : "authorization_expired_before_dispatch",
   };
 }
 
@@ -1668,6 +1698,93 @@ describe("decision and receipt contracts", () => {
     expect(init.cache).toBeUndefined();
   });
 
+  it.each([
+    {
+      status: "closed_without_action",
+      executionStarted: false,
+      terminalReason: "authorization_expired_before_dispatch",
+    },
+    {
+      status: "outcome_unknown",
+      executionStarted: true,
+      terminalReason: "authorization_expired_with_unresolved_dispatch",
+    },
+  ] as const)(
+    "accepts the exact expired approval $status response",
+    async ({ status, executionStarted, terminalReason }) => {
+      const request = {
+        decision: "approve" as const,
+        clientDecisionId: `expired-${status}`,
+        remedyId: "remedy-contract",
+        remedyDigest: digest,
+        toolCallId: "call-contract",
+      };
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(
+          jsonResponse({
+            clientDecisionId: request.clientDecisionId,
+            recoveryId,
+            decision: "approve",
+            status,
+            decisionRemedyDigest: digest,
+            executionStarted,
+            terminalReason,
+          }),
+        ),
+      );
+
+      await expect(postDecision(recoveryId, request)).resolves.toMatchObject({
+        status,
+        executionStarted,
+        terminalReason,
+      });
+    },
+  );
+
+  it.each([
+    {
+      status: "closed_without_action",
+      executionStarted: true,
+      terminalReason: "authorization_expired_before_dispatch",
+    },
+    {
+      status: "outcome_unknown",
+      executionStarted: false,
+      terminalReason: "authorization_expired_with_unresolved_dispatch",
+    },
+    {
+      status: "closed_without_action",
+      executionStarted: false,
+      terminalReason: "authorization_expired_with_unresolved_dispatch",
+    },
+  ])("rejects mismatched expired approval evidence %#", async (response) => {
+    const request = {
+      decision: "approve" as const,
+      clientDecisionId: "expired-invalid-pair",
+      remedyId: "remedy-contract",
+      remedyDigest: digest,
+      toolCallId: "call-contract",
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          clientDecisionId: request.clientDecisionId,
+          recoveryId,
+          decision: "approve",
+          decisionRemedyDigest: digest,
+          ...response,
+        }),
+      ),
+    );
+
+    await expect(postDecision(recoveryId, request)).rejects.toMatchObject({
+      code: "unexpected_response",
+      status: 200,
+    });
+  });
+
   it("rejects a response whose discriminator and status belong to different union arms", async () => {
     vi.stubGlobal(
       "fetch",
@@ -1704,6 +1821,31 @@ describe("decision and receipt contracts", () => {
       providerDispatchStarted: false,
     });
   });
+
+  it.each([
+    [false, "closed_without_action", "authorization_expired_before_dispatch"],
+    [
+      true,
+      "outcome_unknown",
+      "authorization_expired_with_unresolved_dispatch",
+    ],
+  ] as const)(
+    "loads exact expired approval receipt evidence for %s",
+    async (unresolved, status, terminalReason) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(jsonResponse(expiredApprovalReceipt(unresolved))),
+      );
+
+      await expect(getReceipt(recoveryId)).resolves.toMatchObject({
+        status,
+        decision: "approved",
+        exactInterruptionRejected: false,
+        approvedRemedyDigest: null,
+        terminalReason,
+      });
+    },
+  );
 
   it("rejects impossible cancellation execution evidence", async () => {
     vi.stubGlobal(

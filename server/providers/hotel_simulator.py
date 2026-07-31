@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from threading import RLock
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict
 
 from server.agents.schemas import BrokerRemedy
+from server.providers.hotel_contract import (
+    DEMO_HOTEL_PROVIDER_RESULT,
+    durable_hotel_dispatch_contract,
+    hotel_dispatch_request_digest,
+)
 from server.store import ExecutionConflictError
 
 if TYPE_CHECKING:
@@ -55,13 +58,10 @@ class HotelSimulator:
 
     @staticmethod
     def _request_fingerprint(request: HotelDispatchRequest) -> str:
-        canonical_request = json.dumps(
-            request.model_dump(mode="json"),
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-        return hashlib.sha256(canonical_request).hexdigest()
+        return hotel_dispatch_request_digest(
+            recovery_id=request.recovery_id,
+            remedy=request.remedy,
+        )
 
     @property
     def dispatch_count(self) -> int:
@@ -75,6 +75,9 @@ class HotelSimulator:
         idempotency_key: str,
         tool_call_id: str | None = None,
         remedy_digest: str | None = None,
+        action_digest: str | None = None,
+        resume_owner_id: str | None = None,
+        resume_generation: int | None = None,
     ) -> HotelDispatchResult:
         """Return the stored result when the same dispatch is retried."""
 
@@ -84,28 +87,43 @@ class HotelSimulator:
         request_fingerprint = self._request_fingerprint(request)
         with self._lock:
             if self._store is not None:
-                if not tool_call_id or not remedy_digest:
+                if (
+                    not tool_call_id
+                    or not remedy_digest
+                    or not action_digest
+                    or resume_owner_id is None
+                    or resume_generation is None
+                ):
                     raise ValueError(
-                        "Durable dispatch requires exact tool call and remedy digests"
+                        "Durable dispatch requires exact authorization identity"
                     )
-                dispatch_hash = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()
+                contract = durable_hotel_dispatch_contract(
+                    recovery_id=request.recovery_id,
+                    remedy=request.remedy,
+                    tool_call_id=tool_call_id,
+                    remedy_digest=remedy_digest,
+                )
+                if idempotency_key != contract.idempotency_key:
+                    raise ValueError(
+                        "Durable dispatch idempotency key is not canonical"
+                    )
                 candidate = HotelDispatchResult(
-                    dispatch_id=f"demo-hotel-dispatch-{dispatch_hash[:16]}",
+                    dispatch_id=contract.dispatch_id,
                     status="confirmed",
                     simulated=True,
-                    provider_result=(
-                        "Demo hotel adapter confirmed the replacement room; "
-                        "no real booking or payment was changed."
-                    ),
+                    provider_result=DEMO_HOTEL_PROVIDER_RESULT,
                 )
                 try:
                     execution, dispatched = self._store.record_completed_execution(
-                        execution_id=f"execution-{dispatch_hash}",
+                        execution_id=contract.execution_id,
                         recovery_id=request.recovery_id,
                         idempotency_key=idempotency_key,
-                        request_digest=request_fingerprint,
+                        request_digest=contract.request_digest,
                         tool_call_id=tool_call_id,
                         remedy_digest=remedy_digest,
+                        action_digest=action_digest,
+                        resume_owner_id=resume_owner_id,
+                        resume_generation=resume_generation,
                         result_json=candidate.model_dump(mode="json"),
                     )
                 except ExecutionConflictError as error:

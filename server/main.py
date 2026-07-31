@@ -754,12 +754,19 @@ def create_app(
                 recovery_id=recovery_key,
             )
         try:
-            claim = await store_io.mutate(
-                recovery_store.claim_decision_for_session,
-                recovery_key,
-                payload,
-                session_hash=identity.session_hash,
-            )
+            try:
+                claim = await store_io.mutate(
+                    recovery_store.claim_decision_for_session,
+                    recovery_key,
+                    payload,
+                    session_hash=identity.session_hash,
+                )
+            finally:
+                # AsyncSQLiteStore deliberately joins a submitted write before
+                # re-raising caller cancellation. Wake reconciliation even when
+                # that cancellation lands after the durable claim commits.
+                if isinstance(recovery_orchestrator, RecoveryOrchestrator):
+                    recovery_orchestrator.notify_decision_claimed()
         except RecoveryNotFoundError:
             _raise_public(
                 status_code=status.HTTP_404_NOT_FOUND,

@@ -76,6 +76,7 @@ from server.models import (
     DecisionResponse,
     DeclineDecisionResponse,
     ExecutionMode,
+    ExpiredApprovalDecisionResponse,
     QuotaEvidence,
     RecoveryReceipt,
     RecoverySnapshot,
@@ -223,6 +224,7 @@ class RecoveryOrchestrator:
         )
         self._reconciliation_sleep = reconciliation_sleep
         self._reconciliation_task: asyncio.Task[None] | None = None
+        self._reconciliation_wake: asyncio.Event | None = None
         self._startup_retry_at: datetime | None = None
         self._lifecycle_lock = Lock()
         self._lifecycle_loop: asyncio.AbstractEventLoop | None = None
@@ -399,7 +401,7 @@ class RecoveryOrchestrator:
         return retry_at
 
     def _reconcile_claimed_decisions(self) -> datetime | None:
-        """Complete claimed responses whose durable dispatch already committed."""
+        """Finalize claimed responses or schedule exact approval expiry."""
 
         retry_at: datetime | None = None
         for claim in self._store.list_claimed_decisions():
@@ -412,8 +414,20 @@ class RecoveryOrchestrator:
                     continue
                 execution = None
             elif claim.request.decision == "approve":
+                claim, consent_expiry = self._store.reconcile_expired_approval_claim(
+                    claim
+                )
+                if isinstance(
+                    claim.response,
+                    ExpiredApprovalDecisionResponse,
+                ):
+                    continue
                 execution = self._store.get_completed_execution(claim.recovery_id)
                 if execution is None:
+                    if consent_expiry is not None and (
+                        retry_at is None or consent_expiry < retry_at
+                    ):
+                        retry_at = consent_expiry
                     continue
             else:
                 continue
@@ -464,8 +478,8 @@ class RecoveryOrchestrator:
         return retry_at
 
     def _reconcile_startup_once(self) -> datetime | None:
-        completed_retry = self._reconcile_completed_executions()
         claimed_retry = self._reconcile_claimed_decisions()
+        completed_retry = self._reconcile_completed_executions()
         if completed_retry is None:
             return claimed_retry
         if claimed_retry is None:
@@ -481,6 +495,56 @@ class RecoveryOrchestrator:
             name="backchannel-startup-reconciliation",
         )
 
+    def notify_decision_claimed(self) -> None:
+        """Synchronously ensure an active lifecycle will observe the new claim."""
+
+        loop = asyncio.get_running_loop()
+        with self._lifecycle_lock:
+            if not self._lifecycle_owners or self._lifecycle_closing:
+                return
+            if self._lifecycle_loop is not loop:
+                raise RuntimeError(
+                    "Decision claim notification must use the lifecycle event loop"
+                )
+            task = self._reconciliation_task
+            wake = self._reconciliation_wake
+        if task is None or task.done():
+            self._schedule_startup_reconciliation()
+            return
+        if wake is None:
+            raise RuntimeError("Active reconciliation is missing its wake event")
+        wake.set()
+
+    async def _wait_for_reconciliation_deadline(self, delay: float) -> None:
+        wake = self._reconciliation_wake
+        if wake is None:
+            await self._reconciliation_sleep(delay)
+            return
+        if wake.is_set():
+            wake.clear()
+            return
+        sleep_task = asyncio.ensure_future(self._reconciliation_sleep(delay))
+        wake_task = asyncio.ensure_future(wake.wait())
+        waiters = {sleep_task, wake_task}
+        try:
+            done, pending = await asyncio.wait(
+                waiters,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        except BaseException:
+            for task in waiters:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*waiters, return_exceptions=True)
+            raise
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        if wake_task in done:
+            wake.clear()
+        if sleep_task in done:
+            await sleep_task
+
     async def _run_startup_reconciliation(self) -> None:
         retry_at: datetime | None = None
         failure_backoff = max(
@@ -493,7 +557,7 @@ class RecoveryOrchestrator:
                     (retry_at - self._reconciliation_clock()).total_seconds(),
                     self._decision_wait_interval,
                 )
-                await self._reconciliation_sleep(delay)
+                await self._wait_for_reconciliation_deadline(delay)
             try:
                 retry_at = await self._store_io.control(
                     self._reconcile_startup_once,
@@ -518,6 +582,10 @@ class RecoveryOrchestrator:
             )
             self._startup_retry_at = retry_at
             if retry_at is None:
+                wake = self._reconciliation_wake
+                if wake is not None and wake.is_set():
+                    wake.clear()
+                    continue
                 return
 
     async def startup(self, owner: object | None = None) -> None:
@@ -539,6 +607,7 @@ class RecoveryOrchestrator:
             first_owner = not self._lifecycle_owners
             if first_owner:
                 self._lifecycle_loop = loop
+                self._reconciliation_wake = asyncio.Event()
             self._lifecycle_owners.add(lifecycle_owner)
         if not first_owner:
             return
@@ -549,6 +618,7 @@ class RecoveryOrchestrator:
             with self._lifecycle_lock:
                 self._lifecycle_owners.remove(lifecycle_owner)
                 self._lifecycle_loop = None
+                self._reconciliation_wake = None
             raise
 
     async def wait_for_startup_reconciliation(self) -> None:
@@ -591,6 +661,7 @@ class RecoveryOrchestrator:
         finally:
             with self._lifecycle_lock:
                 self._lifecycle_loop = None
+                self._reconciliation_wake = None
                 self._lifecycle_closing = False
 
     @staticmethod
@@ -1376,7 +1447,7 @@ class RecoveryOrchestrator:
         *,
         session_hash: str | None = None,
         claimed_decision: ApprovalDecisionClaim | None = None,
-    ) -> ApprovalDecisionResponse:
+    ) -> ApprovalDecisionResponse | ExpiredApprovalDecisionResponse:
         """Claim, resume, and durably replay one exact approval decision."""
 
         if request.decision != "approve":
@@ -1389,26 +1460,42 @@ class RecoveryOrchestrator:
                 raise ValueError("Preclaimed decision does not match the request")
             claim = claimed_decision
         else:
-            if session_hash is None:
-                claim = await self._store_io.mutate(
-                    self._store.claim_decision,
-                    recovery_id,
-                    request,
-                )
-            else:
-                claim = await self._store_io.mutate(
-                    self._store.claim_decision_for_session,
-                    recovery_id,
-                    request,
-                    session_hash=session_hash,
-                )
+            try:
+                if session_hash is None:
+                    claim = await self._store_io.mutate(
+                        self._store.claim_decision,
+                        recovery_id,
+                        request,
+                    )
+                else:
+                    claim = await self._store_io.mutate(
+                        self._store.claim_decision_for_session,
+                        recovery_id,
+                        request,
+                        session_hash=session_hash,
+                    )
+            finally:
+                # The mutation may commit before AsyncSQLiteStore propagates
+                # caller cancellation. Always wake the expiry reconciler after
+                # joining that submitted write.
+                self.notify_decision_claimed()
+        claim, _consent_expiry = await self._store_io.control(
+            self._store.reconcile_expired_approval_claim,
+            claim,
+        )
         if claim.response is not None:
-            if not isinstance(claim.response, ApprovalDecisionResponse):
+            if not isinstance(
+                claim.response,
+                (ApprovalDecisionResponse, ExpiredApprovalDecisionResponse),
+            ):
                 raise TypeError("Approval request replayed a decline response")
             return claim.response
         lease = await self._acquire_resume_lease(claim)
         if lease.disposition == "replay":
-            if not isinstance(lease.claim.response, ApprovalDecisionResponse):
+            if not isinstance(
+                lease.claim.response,
+                (ApprovalDecisionResponse, ExpiredApprovalDecisionResponse),
+            ):
                 raise TypeError("Approval request replayed a decline response")
             return lease.claim.response
         resume_owner_id = lease.resume_owner_id
@@ -1456,6 +1543,23 @@ class RecoveryOrchestrator:
                     resume_generation=resume_generation,
                 )
             except UserError as sdk_error:
+                try:
+                    reconciled, _consent_expiry = await self._store_io.control(
+                        self._store.reconcile_expired_approval_claim,
+                        claim,
+                    )
+                except ApprovalDecisionError:
+                    # A non-expiry SDK guard failure can surface as UserError
+                    # while the same corrupted durable identity makes expiry
+                    # reconciliation unavailable. Preserve the original
+                    # fail-closed SDK error instead of replacing it with a
+                    # different decision envelope.
+                    raise sdk_error
+                if isinstance(
+                    reconciled.response,
+                    ExpiredApprovalDecisionResponse,
+                ):
+                    return reconciled.response
                 try:
                     await self._store_io.read(
                         self._store.get_receipt,
@@ -1657,6 +1761,8 @@ class RecoveryOrchestrator:
                 resume_owner_id=resume_owner_id,
                 resume_generation=resume_generation,
             )
+        except ApprovalDecisionError:
+            raise
         except (RecoveryNotFoundError, ValueError, TypeError):
             self._raise_incompatible(recovery_id, "envelope")
 
