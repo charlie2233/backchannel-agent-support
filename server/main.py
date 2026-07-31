@@ -416,6 +416,37 @@ _PRIVATE_NOT_FOUND_RESPONSE: dict[int | str, dict[str, Any]] = {
     status.HTTP_404_NOT_FOUND: {"description": "Recovery not found."}
 }
 _INVALID_REQUEST_MESSAGE = "The request did not match the public API contract."
+_INVALID_REQUEST_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["code", "message", "requestId"],
+    "properties": {
+        "code": {
+            "type": "string",
+            "enum": ["invalid_request"],
+        },
+        "message": {
+            "type": "string",
+            "enum": [_INVALID_REQUEST_MESSAGE],
+        },
+        "requestId": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{32}$",
+        },
+    },
+}
+_INVALID_RECOVERY_PATH_RESPONSE: dict[str, Any] = {
+    "description": "The recovery path is not a valid UUID.",
+    "content": {
+        "application/json": {
+            "schema": _INVALID_REQUEST_SCHEMA,
+        }
+    },
+}
+_PRIVATE_RECOVERY_READ_RESPONSES: dict[int | str, dict[str, Any]] = {
+    **_PRIVATE_NOT_FOUND_RESPONSE,
+    status.HTTP_422_UNPROCESSABLE_CONTENT: _INVALID_RECOVERY_PATH_RESPONSE,
+}
 
 
 def _decision_conflict_response(
@@ -525,6 +556,71 @@ _REQUEST_BODY_TOO_LARGE_RESPONSE: dict[str, Any] = {
                         "pattern": "^[0-9a-f]{32}$",
                     },
                 },
+            }
+        }
+    },
+}
+_RECOVERY_CREATION_UNPROCESSABLE_RESPONSE: dict[str, Any] = {
+    "description": (
+        "The creation request is invalid, the selected scenario does not support "
+        "live execution, or live recovery is unavailable."
+    ),
+    "content": {
+        "application/json": {
+            "schema": {
+                "oneOf": [
+                    _INVALID_REQUEST_SCHEMA,
+                    {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["detail"],
+                        "properties": {
+                            "detail": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": ["code"],
+                                "properties": {
+                                    "code": {
+                                        "type": "string",
+                                        "enum": ["unsupported_scenario_mode"],
+                                    }
+                                },
+                            }
+                        },
+                    },
+                    {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": [
+                            "code",
+                            "message",
+                            "requestId",
+                            "fallbackExecutionMode",
+                        ],
+                        "properties": {
+                            "code": {
+                                "type": "string",
+                                "enum": [LiveAdmissionCode.LIVE_UNAVAILABLE.value],
+                            },
+                            "message": {
+                                "type": "string",
+                                "enum": [
+                                    LiveAdmissionError(
+                                        LiveAdmissionCode.LIVE_UNAVAILABLE
+                                    ).public_message
+                                ],
+                            },
+                            "requestId": {
+                                "type": "string",
+                                "pattern": "^[0-9a-f]{32}$",
+                            },
+                            "fallbackExecutionMode": {
+                                "type": "string",
+                                "enum": [ExecutionMode.REPLAY_FIXTURE.value],
+                            },
+                        },
+                    },
+                ]
             }
         }
     },
@@ -683,7 +779,7 @@ _EVENT_CURSOR_HEADER_DESCRIPTION = (
     "evaluated before this header, which must occur at most once."
 )
 _EVENT_STREAM_RESPONSES: dict[int | str, dict[str, Any]] = {
-    **_PRIVATE_NOT_FOUND_RESPONSE,
+    **_PRIVATE_RECOVERY_READ_RESPONSES,
     status.HTTP_400_BAD_REQUEST: {
         "description": "The authorized event cursor is outside the supported contract.",
         "content": {
@@ -1573,6 +1669,10 @@ def create_app(
         status_code=status.HTTP_201_CREATED,
         responses={
             status.HTTP_409_CONFLICT: _RECOVERY_CREATION_CONFLICT_RESPONSE,
+            status.HTTP_413_CONTENT_TOO_LARGE: _REQUEST_BODY_TOO_LARGE_RESPONSE,
+            status.HTTP_422_UNPROCESSABLE_CONTENT: (
+                _RECOVERY_CREATION_UNPROCESSABLE_RESPONSE
+            ),
             status.HTTP_429_TOO_MANY_REQUESTS: (_RECOVERY_CREATION_CAPACITY_RESPONSE),
         },
     )
@@ -2033,7 +2133,7 @@ def create_app(
         "/api/recoveries/{recovery_id}",
         response_model=RecoverySnapshot,
         description=_PRIVATE_RECOVERY_DESCRIPTION,
-        responses=_PRIVATE_NOT_FOUND_RESPONSE,
+        responses=_PRIVATE_RECOVERY_READ_RESPONSES,
     )
     def get_recovery(recovery_id: UUID, request: Request) -> RecoverySnapshot:
         recovery_key = str(recovery_id)
@@ -2121,7 +2221,7 @@ def create_app(
         "/api/recoveries/{recovery_id}/receipt",
         response_model=RecoveryReceipt,
         description=_PRIVATE_RECOVERY_DESCRIPTION,
-        responses=_PRIVATE_NOT_FOUND_RESPONSE,
+        responses=_PRIVATE_RECOVERY_READ_RESPONSES,
     )
     def get_receipt(recovery_id: UUID, request: Request) -> RecoveryReceipt:
         recovery_key = str(recovery_id)

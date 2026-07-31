@@ -200,19 +200,6 @@
         "title": "ExecutionMode",
         "type": "string"
       },
-      "HTTPValidationError": {
-        "properties": {
-          "detail": {
-            "items": {
-              "$ref": "#/components/schemas/ValidationError"
-            },
-            "title": "Detail",
-            "type": "array"
-          }
-        },
-        "title": "HTTPValidationError",
-        "type": "object"
-      },
       "HealthResponse": {
         "additionalProperties": false,
         "properties": {
@@ -704,46 +691,6 @@
         ],
         "title": "ScenarioResponse",
         "type": "object"
-      },
-      "ValidationError": {
-        "properties": {
-          "ctx": {
-            "title": "Context",
-            "type": "object"
-          },
-          "input": {
-            "title": "Input"
-          },
-          "loc": {
-            "items": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "integer"
-                }
-              ]
-            },
-            "title": "Location",
-            "type": "array"
-          },
-          "msg": {
-            "title": "Message",
-            "type": "string"
-          },
-          "type": {
-            "title": "Error Type",
-            "type": "string"
-          }
-        },
-        "required": [
-          "loc",
-          "msg",
-          "type"
-        ],
-        "title": "ValidationError",
-        "type": "object"
       }
     }
   },
@@ -932,15 +879,135 @@
               }
             }
           },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "code": {
+                      "enum": [
+                        "request_too_large"
+                      ],
+                      "type": "string"
+                    },
+                    "message": {
+                      "enum": [
+                        "The request body is too large."
+                      ],
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "pattern": "^[0-9a-f]{32}$",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "requestId"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The bounded public request body is too large."
+          },
           "422": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "oneOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "enum": [
+                            "invalid_request"
+                          ],
+                          "type": "string"
+                        },
+                        "message": {
+                          "enum": [
+                            "The request did not match the public API contract."
+                          ],
+                          "type": "string"
+                        },
+                        "requestId": {
+                          "pattern": "^[0-9a-f]{32}$",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message",
+                        "requestId"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "detail": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "code": {
+                              "enum": [
+                                "unsupported_scenario_mode"
+                              ],
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "code"
+                          ],
+                          "type": "object"
+                        }
+                      },
+                      "required": [
+                        "detail"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "enum": [
+                            "live_unavailable"
+                          ],
+                          "type": "string"
+                        },
+                        "fallbackExecutionMode": {
+                          "enum": [
+                            "replay_fixture"
+                          ],
+                          "type": "string"
+                        },
+                        "message": {
+                          "enum": [
+                            "Live recovery is unavailable in this demo. A replay fixture is starting automatically; you can rerun it explicitly."
+                          ],
+                          "type": "string"
+                        },
+                        "requestId": {
+                          "pattern": "^[0-9a-f]{32}$",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "code",
+                        "message",
+                        "requestId",
+                        "fallbackExecutionMode"
+                      ],
+                      "type": "object"
+                    }
+                  ]
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "The creation request is invalid, the selected scenario does not support live execution, or live recovery is unavailable."
           },
           "429": {
             "content": {
@@ -1120,11 +1187,35 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "additionalProperties": false,
+                  "properties": {
+                    "code": {
+                      "enum": [
+                        "invalid_request"
+                      ],
+                      "type": "string"
+                    },
+                    "message": {
+                      "enum": [
+                        "The request did not match the public API contract."
+                      ],
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "pattern": "^[0-9a-f]{32}$",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "requestId"
+                  ],
+                  "type": "object"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "The recovery path is not a valid UUID."
           }
         },
         "summary": "Get Recovery"
@@ -1690,11 +1781,35 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "additionalProperties": false,
+                  "properties": {
+                    "code": {
+                      "enum": [
+                        "invalid_request"
+                      ],
+                      "type": "string"
+                    },
+                    "message": {
+                      "enum": [
+                        "The request did not match the public API contract."
+                      ],
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "pattern": "^[0-9a-f]{32}$",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "requestId"
+                  ],
+                  "type": "object"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "The recovery path is not a valid UUID."
           }
         },
         "summary": "Recovery Events"
@@ -1734,11 +1849,35 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
+                  "additionalProperties": false,
+                  "properties": {
+                    "code": {
+                      "enum": [
+                        "invalid_request"
+                      ],
+                      "type": "string"
+                    },
+                    "message": {
+                      "enum": [
+                        "The request did not match the public API contract."
+                      ],
+                      "type": "string"
+                    },
+                    "requestId": {
+                      "pattern": "^[0-9a-f]{32}$",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message",
+                    "requestId"
+                  ],
+                  "type": "object"
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "The recovery path is not a valid UUID."
           }
         },
         "summary": "Get Receipt"

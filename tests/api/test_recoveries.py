@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
@@ -93,6 +94,30 @@ def test_replay_recovery_snapshot_and_receipt_are_durable(client: TestClient) ->
     assert "no model call or provider execution" in receipt["boundary"].lower()
 
     assert client.get(f"/api/recoveries/{uuid4()}/receipt").status_code == 404
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        "/api/recoveries/not-a-uuid",
+        "/api/recoveries/not-a-uuid/events",
+        "/api/recoveries/not-a-uuid/receipt",
+    ),
+)
+def test_invalid_recovery_path_uuid_uses_correlated_public_error(
+    client: TestClient,
+    path: str,
+) -> None:
+    response = client.get(path)
+    request_id = response.headers["x-request-id"]
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "code": "invalid_request",
+        "message": "The request did not match the public API contract.",
+        "requestId": request_id,
+    }
+    assert re.fullmatch(r"[0-9a-f]{32}", request_id)
 
 
 def test_independent_apps_racing_replay_post_return_one_complete_recovery(

@@ -326,6 +326,124 @@ def test_recovery_creation_documents_only_exact_reachable_429_envelopes() -> Non
     ]
 
 
+def test_recovery_creation_documents_exact_413_and_422_envelopes() -> None:
+    schema = json.loads(_exporter().render_openapi())
+    responses = schema["paths"]["/api/recoveries"]["post"]["responses"]
+
+    assert set(responses) == {"201", "409", "413", "422", "429"}
+    assert responses["413"] == {
+        "description": "The bounded public request body is too large.",
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["code", "message", "requestId"],
+                    "properties": {
+                        "code": {
+                            "type": "string",
+                            "enum": ["request_too_large"],
+                        },
+                        "message": {
+                            "type": "string",
+                            "enum": ["The request body is too large."],
+                        },
+                        "requestId": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{32}$",
+                        },
+                    },
+                }
+            }
+        },
+    }
+    assert responses["422"] == {
+        "description": (
+            "The creation request is invalid, the selected scenario does not support "
+            "live execution, or live recovery is unavailable."
+        ),
+        "content": {
+            "application/json": {
+                "schema": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["code", "message", "requestId"],
+                            "properties": {
+                                "code": {
+                                    "type": "string",
+                                    "enum": ["invalid_request"],
+                                },
+                                "message": {
+                                    "type": "string",
+                                    "enum": [
+                                        "The request did not match the public API contract."
+                                    ],
+                                },
+                                "requestId": {
+                                    "type": "string",
+                                    "pattern": "^[0-9a-f]{32}$",
+                                },
+                            },
+                        },
+                        {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["detail"],
+                            "properties": {
+                                "detail": {
+                                    "type": "object",
+                                    "additionalProperties": False,
+                                    "required": ["code"],
+                                    "properties": {
+                                        "code": {
+                                            "type": "string",
+                                            "enum": ["unsupported_scenario_mode"],
+                                        }
+                                    },
+                                }
+                            },
+                        },
+                        {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": [
+                                "code",
+                                "message",
+                                "requestId",
+                                "fallbackExecutionMode",
+                            ],
+                            "properties": {
+                                "code": {
+                                    "type": "string",
+                                    "enum": ["live_unavailable"],
+                                },
+                                "message": {
+                                    "type": "string",
+                                    "enum": [
+                                        "Live recovery is unavailable in this demo. "
+                                        "A replay fixture is starting automatically; "
+                                        "you can rerun it explicitly."
+                                    ],
+                                },
+                                "requestId": {
+                                    "type": "string",
+                                    "pattern": "^[0-9a-f]{32}$",
+                                },
+                                "fallbackExecutionMode": {
+                                    "type": "string",
+                                    "enum": ["replay_fixture"],
+                                },
+                            },
+                        },
+                    ]
+                }
+            }
+        },
+    }
+
+
 def test_private_recovery_operations_document_one_generic_not_found_boundary() -> None:
     schema = json.loads(_exporter().render_openapi())
     operations = (
@@ -341,6 +459,47 @@ def test_private_recovery_operations_document_one_generic_not_found_boundary() -
         description = operation["description"].lower()
         assert "signed opaque demo session" in description
         assert "generic not-found" in description
+
+
+def test_owner_read_invalid_uuid_documents_correlated_public_error() -> None:
+    schema = json.loads(_exporter().render_openapi())
+    expected = {
+        "description": "The recovery path is not a valid UUID.",
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["code", "message", "requestId"],
+                    "properties": {
+                        "code": {
+                            "type": "string",
+                            "enum": ["invalid_request"],
+                        },
+                        "message": {
+                            "type": "string",
+                            "enum": [
+                                "The request did not match the public API contract."
+                            ],
+                        },
+                        "requestId": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{32}$",
+                        },
+                    },
+                }
+            }
+        },
+    }
+
+    for path in (
+        "/api/recoveries/{recovery_id}",
+        "/api/recoveries/{recovery_id}/events",
+        "/api/recoveries/{recovery_id}/receipt",
+    ):
+        response = schema["paths"][path]["get"]["responses"]["422"]
+        assert response == expected
+        assert "HTTPValidationError" not in json.dumps(response)
 
 
 def test_decision_resume_documents_only_an_exact_empty_json_request() -> None:
