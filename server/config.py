@@ -19,6 +19,23 @@ DEFAULT_MAX_RECOVERY_CREATIONS_GLOBAL = 2_048
 MAX_RECOVERY_CREATIONS_PER_SESSION = 4_096
 MAX_RECOVERY_CREATIONS_PER_IP = 100_000
 MAX_RECOVERY_CREATIONS_GLOBAL = 100_000
+_COOKIE_TOKEN_CHARACTERS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+    "!#$%&'*+-.^_`|~"
+)
+_RESERVED_COOKIE_NAMES = frozenset(
+    {
+        "comment",
+        "domain",
+        "expires",
+        "httponly",
+        "max-age",
+        "path",
+        "samesite",
+        "secure",
+        "version",
+    }
+)
 
 
 def _environment_bool(name: str, *, default: bool = False) -> bool:
@@ -186,8 +203,17 @@ class RuntimeSettings:
                 "max_recovery_creations_global"
             )
 
-        if not self.demo_session_cookie_name or any(
-            character in self.demo_session_cookie_name for character in " ;,\r\n\t"
+        cookie_name = self.demo_session_cookie_name
+        if (
+            not isinstance(cookie_name, str)
+            or not cookie_name
+            or any(character not in _COOKIE_TOKEN_CHARACTERS for character in cookie_name)
+        ):
+            raise ValueError("demo_session_cookie_name must be a safe cookie token")
+        normalized_cookie_name = cookie_name.lower()
+        if normalized_cookie_name in _RESERVED_COOKIE_NAMES or (
+            normalized_cookie_name.startswith(("__secure-", "__host-"))
+            and not self.effective_demo_session_cookie_secure
         ):
             raise ValueError("demo_session_cookie_name must be a safe cookie token")
         if len(self.identity_hash_secret.encode("utf-8")) < 32:

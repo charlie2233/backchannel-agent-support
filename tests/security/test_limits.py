@@ -301,6 +301,92 @@ def test_invalid_integer_environment_limit_fails_closed(monkeypatch: pytest.Monk
         RuntimeSettings.from_environment()
 
 
+@pytest.mark.parametrize(
+    "cookie_name",
+    [
+        "",
+        *[f"bad{chr(code_point)}name" for code_point in range(32)],
+        "bad\x7fname",
+        "bad name",
+        "bad;name",
+        "bad,name",
+        "bad=name",
+        'bad"name',
+        "bad(name)",
+        "bad/name",
+        "bad:name",
+        "bad<name",
+        "bad>name",
+        "bad?name",
+        "bad@name",
+        "bad[name",
+        "bad]name",
+        "bad{name",
+        "bad}name",
+        "bad\\name",
+        "café",
+        "comment",
+        "domain",
+        "expires",
+        "HttpOnly",
+        "max-age",
+        "path",
+        "SaMeSiTe",
+        "secure",
+        "version",
+        "__Secure-session",
+        "__host-session",
+    ],
+)
+def test_runtime_settings_rejects_cookie_names_that_cannot_preserve_sessions(
+    cookie_name: str,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match="demo_session_cookie_name must be a safe cookie token",
+    ):
+        RuntimeSettings(
+            live_ready=False,
+            demo_session_cookie_name=cookie_name,
+        )
+
+
+@pytest.mark.parametrize(
+    ("cookie_name", "secure"),
+    [
+        ("backchannel_demo_session", False),
+        ("token!#$%&'*+-.^_`|~09AZaz", False),
+        ("__Secure-session", True),
+        ("__Host-session", True),
+        ("__secure-session", True),
+        ("__host-session", True),
+    ],
+)
+def test_runtime_settings_accepts_safe_cookie_tokens_and_secure_prefixes(
+    cookie_name: str,
+    secure: bool,
+) -> None:
+    settings = RuntimeSettings(
+        live_ready=False,
+        demo_session_cookie_name=cookie_name,
+        demo_session_cookie_secure=secure,
+    )
+
+    assert settings.demo_session_cookie_name == cookie_name
+
+
+def test_invalid_cookie_name_environment_fails_during_settings_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BACKCHANNEL_DEMO_SESSION_COOKIE_NAME", "bad=name")
+
+    with pytest.raises(
+        ValueError,
+        match="demo_session_cookie_name must be a safe cookie token",
+    ):
+        RuntimeSettings.from_environment()
+
+
 def test_event_stream_limits_have_bounded_defaults_and_environment_overrides(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
