@@ -26,28 +26,50 @@ results from any sibling branch.
   a fully valid pending-approval fixture.
 - Independent Task33 combined before/after visual review passed with no P0-P3
   findings.
-- Hosted verification and a full canonical/backend gate are intentionally
-  excluded from this activation checkpoint.
-- No current Task33 full canonical/backend, GitHub Actions, or packaged
-  container result has been observed.
+- Local exact clean gate on hosted validation successor
+  `0dee3af822edc164b06be6cff61441023ae703dc`: 29 capture contracts,
+  `capture_manifest_valid`, 19 web test files / 369 tests and the TypeScript/Vite
+  build, Ruff, strict MyPy over 35 source files, 866 / 866 Python tests with 3
+  warnings in 24.98s, deterministic stub and local
+  production/SSE/reconnect/shutdown smokes, OpenAPI verification, and the
+  history-aware secret scan all passed.
+
+## Current Task33 hosted CI and packaged-container evidence
+
+- Hosted validation successor:
+  `0dee3af822edc164b06be6cff61441023ae703dc`
+- GitHub Actions:
+  [run 30591690973](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30591690973).
+- Result: `verify`
+  ([job 91035189804](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30591690973/job/91035189804))
+  reported `PASS`; `container-smoke`
+  ([job 91035490238](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30591690973/job/91035490238))
+  reported `PASS`.
+- Both current job annotation APIs returned `[]`.
+- Hosted `verify` passed `capture_manifest_valid`, 19 web test files / 369
+  tests, Ruff, strict MyPy over 35 source files, 866 Python tests with 1 warning
+  in 42.00s, deterministic stub smoke, OpenAPI verification, and the
+  history-aware secret scan.
+- Hosted `container-smoke` built the packaged image with owner-only `/data` mode
+  `0700`, confirmed runtime user `10001:10001`, and passed the offline
+  network-none `deterministic-qa` and `deployed-readonly` profiles.
 
 ## Per-SHA proof matrix
 
 | Lane | Exact evidence | Status and boundary |
 | --- | --- | --- |
-| Local source and tests | Focused and full web source gates on `84af413…`; no current full canonical/backend result | **Verified locally** only in the named frontend lanes; not backend, hosted CI, container, browser deployment, live OpenAI, or release proof |
+| Local source and tests | Focused web source gate on `84af413…`; exact clean canonical gate on successor `0dee3af…` | **Verified locally** in the named lanes; not local Docker, browser deployment, live OpenAI, or release proof |
 | Local final-build captures | [`docs/assets/final/manifest.json`](assets/final/manifest.json); six provenance-checked PNGs under [`docs/assets/final`](assets/final) | **Local capture evidence only** on source `84af413…` in Google Chrome at 1440×1024 and 390×844; not container, deployment, live OpenAI, or release proof |
 | Live OpenAI | [`live-validation.md`](live-validation.md) records only a redacted invalid-key result | **Blocked / Unverified**; no valid `OPENAI_API_KEY`, one-run trace, or three consecutive successes |
 | Local Docker | No Docker-family runtime is installed on this Mac | **Unverified locally** |
-| GitHub CI/container | No current Task33 GitHub Actions run or packaged container job has been observed | **Unverified** for this source/capture checkpoint; superseded Task32 proof is retained only below and is not inherited |
+| GitHub CI/container | Exact successor `0dee3af…`; run `30591690973`; `verify` job `91035189804`; `container-smoke` job `91035490238` | **Verified in GitHub CI** for the exact hosted and packaged-container lanes above; not local Docker, browser capture in CI, public deployment, live OpenAI, or release proof |
 | Public deployment | No public application origin | **Blocked / Unverified** |
 | Tag/release | No release tag or GitHub release | **Blocked / Unverified** |
 
 ## Hosted container evidence boundary
 
-There is no current Task33 hosted-container result. The superseded historical section
-records prior packaged Docker evidence, but it is not current for this source/capture
-checkpoint. Current local source and capture evidence does not prove local Docker,
+The exact current hosted result proves the named GitHub `verify` and packaged
+`container-smoke` lanes on successor `0dee3af…`. It does not prove local Docker,
 browser capture in CI, public deployment or browser URL, live OpenAI, real provider
 execution, container replacement or restart, long-lived `/data` volume persistence,
 target-host durability/networking, abrupt host-loss or backup, concurrent
