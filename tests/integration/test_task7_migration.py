@@ -204,6 +204,230 @@ def test_current_terminal_receipt_bytes_are_stable_across_reopen(tmp_path) -> No
         )
 
 
+@pytest.mark.parametrize("decision", ["approve", "decline"])
+def test_modern_terminal_marker_removal_is_rejected_without_repair(
+    tmp_path,
+    decision: str,
+) -> None:
+    database_path = tmp_path / f"task7-modern-terminal-marker-{decision}.sqlite3"
+    store = SQLiteStore(database_path)
+    orchestrator = RecoveryOrchestrator(
+        store=store,
+        hotel_provider=HotelSimulator(store=store),
+    )
+    pending = asyncio.run(
+        orchestrator.start("hotel", execution_mode=ExecutionMode.SDK_STUB)
+    )
+    recovery_id = pending.recovery.recovery_id
+    if decision == "approve":
+        asyncio.run(
+            orchestrator.approve_decision(
+                recovery_id,
+                _approval_request(pending),
+            )
+        )
+    else:
+        asyncio.run(
+            orchestrator.decline_decision(
+                recovery_id,
+                _decline_request(pending, "task7-modern-terminal-declined"),
+            )
+        )
+    store.close()
+
+    with sqlite3.connect(database_path) as connection:
+        terminal_count = connection.execute(
+            """
+            SELECT COUNT(*) FROM events
+            WHERE recovery_id = ? AND terminal = 1
+            """,
+            (recovery_id,),
+        ).fetchone()
+        assert terminal_count == (1,)
+        connection.execute(
+            """
+            UPDATE events SET terminal = 0
+            WHERE recovery_id = ? AND terminal = 1
+            """,
+            (recovery_id,),
+        )
+        assert connection.execute(
+            """
+            SELECT COUNT(*) FROM events
+            WHERE recovery_id = ? AND terminal = 1
+            """,
+            (recovery_id,),
+        ).fetchone() == (0,)
+        tampered_rows = connection.execute(
+            """
+            SELECT id, recovery_id, seq, type, terminal, data_json, created_at,
+                   CAST(type AS BLOB), CAST(data_json AS BLOB),
+                   CAST(created_at AS BLOB)
+            FROM events
+            WHERE recovery_id = ?
+            ORDER BY seq
+            """,
+            (recovery_id,),
+        ).fetchall()
+
+    with pytest.raises(ReceiptTransitionError, match="terminal evidence"):
+        SQLiteStore(database_path)
+
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            """
+            SELECT COUNT(*) FROM events
+            WHERE recovery_id = ? AND terminal = 1
+            """,
+            (recovery_id,),
+        ).fetchone() == (0,)
+        assert connection.execute(
+            """
+            SELECT id, recovery_id, seq, type, terminal, data_json, created_at,
+                   CAST(type AS BLOB), CAST(data_json AS BLOB),
+                   CAST(created_at AS BLOB)
+            FROM events
+            WHERE recovery_id = ?
+            ORDER BY seq
+            """,
+            (recovery_id,),
+        ).fetchall() == tampered_rows
+
+
+def test_legacy_events_without_terminal_column_are_backfilled_once_without_drift(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "task7-legacy-events-terminal.sqlite3"
+    store = SQLiteStore(database_path)
+    orchestrator = RecoveryOrchestrator(
+        store=store,
+        hotel_provider=HotelSimulator(store=store),
+    )
+    pending = asyncio.run(
+        orchestrator.start("hotel", execution_mode=ExecutionMode.SDK_STUB)
+    )
+    recovery_id = pending.recovery.recovery_id
+    asyncio.run(orchestrator.approve_decision(recovery_id, _approval_request(pending)))
+    store.close()
+
+    row_projection = """
+        SELECT id, recovery_id, seq, type, data_json, created_at,
+               CAST(recovery_id AS BLOB), CAST(type AS BLOB),
+               CAST(data_json AS BLOB), CAST(created_at AS BLOB)
+        FROM events
+        WHERE recovery_id = ?
+        ORDER BY seq
+    """
+    migrated_row_projection = """
+        SELECT id, recovery_id, seq, type, terminal, data_json, created_at,
+               CAST(recovery_id AS BLOB), CAST(type AS BLOB),
+               CAST(data_json AS BLOB), CAST(created_at AS BLOB)
+        FROM events
+        WHERE recovery_id = ?
+        ORDER BY seq
+    """
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        expected_rows = connection.execute(
+            row_projection,
+            (recovery_id,),
+        ).fetchall()
+        assert connection.execute(
+            """
+            SELECT COUNT(*) FROM events
+            WHERE recovery_id = ? AND terminal = 1
+            """,
+            (recovery_id,),
+        ).fetchone() == (1,)
+
+        connection.execute("PRAGMA foreign_keys = OFF")
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            """
+            CREATE TABLE events_task7_legacy (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                recovery_id TEXT NOT NULL
+                    REFERENCES recoveries(id) ON DELETE CASCADE,
+                seq INTEGER NOT NULL CHECK (seq >= 1),
+                type TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE (recovery_id, seq)
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO events_task7_legacy (
+                id, recovery_id, seq, type, data_json, created_at
+            )
+            SELECT id, recovery_id, seq, type, data_json, created_at
+            FROM events
+            ORDER BY id
+            """
+        )
+        connection.execute("DROP TABLE events")
+        connection.execute(
+            "ALTER TABLE events_task7_legacy RENAME TO events"
+        )
+        connection.execute(
+            """
+            CREATE INDEX events_recovery_seq_idx
+            ON events(recovery_id, seq)
+            """
+        )
+        connection.commit()
+        connection.execute("PRAGMA foreign_keys = ON")
+
+        event_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(events)").fetchall()
+        }
+        assert "terminal" not in event_columns
+        assert connection.execute(row_projection, (recovery_id,)).fetchall() == (
+            expected_rows
+        )
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+
+    migrated = SQLiteStore(database_path)
+    migrated.close()
+
+    with sqlite3.connect(database_path) as connection:
+        event_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(events)").fetchall()
+        }
+        assert "terminal" in event_columns
+        assert connection.execute(row_projection, (recovery_id,)).fetchall() == (
+            expected_rows
+        )
+        migrated_rows = connection.execute(
+            migrated_row_projection,
+            (recovery_id,),
+        ).fetchall()
+        assert [(row[2], row[4]) for row in migrated_rows] == [
+            (seq, int(seq == len(expected_rows)))
+            for seq in range(1, len(expected_rows) + 1)
+        ]
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+
+    migrated_database_bytes = database_path.read_bytes()
+    reopened = SQLiteStore(database_path)
+    reopened.close()
+    assert database_path.read_bytes() == migrated_database_bytes
+
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            migrated_row_projection,
+            (recovery_id,),
+        ).fetchall() == migrated_rows
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+
+
 @pytest.mark.parametrize("tamper_mode", ["replace", "remove"])
 def test_current_terminal_receipt_provenance_tampering_is_rejected_on_reopen(
     tmp_path,

@@ -574,23 +574,23 @@ class SQLiteStore:
                 connection.execute(
                     "ALTER TABLE events ADD COLUMN terminal INTEGER NOT NULL DEFAULT 0"
                 )
-            connection.execute(
-                """
-                UPDATE events
-                SET terminal = 1
-                WHERE recovery_id IN (
-                    SELECT id FROM recoveries
-                    WHERE status IN (
-                        'completed', 'closed_without_action', 'outcome_unknown'
+                connection.execute(
+                    """
+                    UPDATE events
+                    SET terminal = 1
+                    WHERE recovery_id IN (
+                        SELECT id FROM recoveries
+                        WHERE status IN (
+                            'completed', 'closed_without_action', 'outcome_unknown'
+                        )
                     )
+                    AND seq = (
+                        SELECT MAX(final_event.seq)
+                        FROM events AS final_event
+                        WHERE final_event.recovery_id = events.recovery_id
+                    )
+                    """
                 )
-                AND seq = (
-                    SELECT MAX(final_event.seq)
-                    FROM events AS final_event
-                    WHERE final_event.recovery_id = events.recovery_id
-                )
-                """
-            )
             self._migrate_task6_receipts(connection)
             self._migrate_task7_receipt_provenance(connection)
             self._migrate_task8_inert_replay_fixtures(connection)
