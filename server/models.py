@@ -2,7 +2,7 @@
 
 from datetime import datetime, timedelta
 from enum import StrEnum
-from typing import Literal, Self
+from typing import Final, Literal, Self
 
 from pydantic import (
     BaseModel,
@@ -65,6 +65,13 @@ class RecoveryStatus(StrEnum):
     COMPLETED = "completed"
     CLOSED_WITHOUT_ACTION = "closed_without_action"
     OUTCOME_UNKNOWN = "outcome_unknown"
+
+
+TERMINAL_RECOVERY_STATUSES: Final[tuple[RecoveryStatus, ...]] = (
+    RecoveryStatus.COMPLETED,
+    RecoveryStatus.CLOSED_WITHOUT_ACTION,
+    RecoveryStatus.OUTCOME_UNKNOWN,
+)
 
 
 class HealthResponse(ApiModel):
@@ -330,6 +337,30 @@ DecisionResponse = ApprovalDecisionResponse | DeclineDecisionResponse
 
 
 class RecoverySnapshot(ApiModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "allOf": [
+                {
+                    "if": {
+                        "properties": {
+                            "status": {
+                                "enum": [
+                                    status.value
+                                    for status in TERMINAL_RECOVERY_STATUSES
+                                ]
+                            }
+                        },
+                        "required": ["status"],
+                    },
+                    "then": {
+                        "properties": {"currentStep": {"const": 5}},
+                        "required": ["currentStep"],
+                    },
+                }
+            ]
+        }
+    )
+
     recovery_id: str = Field(alias="recoveryId")
     scenario_id: ScenarioId = Field(alias="scenarioId")
     execution_mode: ExecutionMode = Field(alias="executionMode")
@@ -351,6 +382,12 @@ class RecoverySnapshot(ApiModel):
         alias="promptToolSchemaHash",
         pattern=r"^[0-9a-f]{64}$",
     )
+
+    @model_validator(mode="after")
+    def enforce_terminal_step(self) -> Self:
+        if self.status in TERMINAL_RECOVERY_STATUSES and self.current_step != 5:
+            raise ValueError("Terminal recovery snapshots require currentStep 5")
+        return self
 
     @model_validator(mode="after")
     def enforce_snapshot_provenance(self) -> Self:

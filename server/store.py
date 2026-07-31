@@ -28,6 +28,7 @@ from server.controls import (
 )
 from server.digest import remedy_consent_digest
 from server.models import (
+    TERMINAL_RECOVERY_STATUSES,
     ApprovalDecisionRequest,
     ApprovalDecisionResponse,
     DecisionResponse,
@@ -3476,6 +3477,8 @@ class SQLiteStore:
         pending_approval: PendingApprovalEnvelope | None = None,
         remedy_consent: RemedyConsentRecord | None = None,
     ) -> RecoverySnapshot:
+        if status in TERMINAL_RECOVERY_STATUSES and current_step != 5:
+            raise ValueError("Terminal recovery transitions require current_step 5")
         now = self._now()
         event_json = json.dumps(event_data, separators=(",", ":"), sort_keys=True)
         receipt_json = (
@@ -3571,14 +3574,7 @@ class SQLiteStore:
                     recovery_id,
                     next_sequence,
                     event_type,
-                    int(
-                        status
-                        in {
-                            RecoveryStatus.COMPLETED,
-                            RecoveryStatus.CLOSED_WITHOUT_ACTION,
-                            RecoveryStatus.OUTCOME_UNKNOWN,
-                        }
-                    ),
+                    int(status in TERMINAL_RECOVERY_STATUSES),
                     event_json,
                     now.isoformat(),
                 ),
@@ -3679,11 +3675,7 @@ class SQLiteStore:
                         now.isoformat(),
                     ),
                 )
-            if status in {
-                RecoveryStatus.COMPLETED,
-                RecoveryStatus.CLOSED_WITHOUT_ACTION,
-                RecoveryStatus.OUTCOME_UNKNOWN,
-            }:
+            if status in TERMINAL_RECOVERY_STATUSES:
                 connection.execute(
                     """
                     UPDATE pending_approvals

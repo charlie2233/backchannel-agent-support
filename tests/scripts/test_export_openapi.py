@@ -121,6 +121,7 @@ def test_canonical_export_is_utf8_sorted_newline_terminated_and_idempotent(
 def test_generated_schema_matches_the_implemented_public_http_contract() -> None:
     schema = json.loads(build_openapi_bytes())
     paths = schema["paths"]
+    recovery_snapshot_schema = schema["components"]["schemas"]["RecoverySnapshot"]
 
     assert {path: set(methods) for path, methods in paths.items()} == {
         "/health": {"get"},
@@ -133,6 +134,26 @@ def test_generated_schema_matches_the_implemented_public_http_contract() -> None
         "/api/recoveries/{recovery_id}/receipt": {"get"},
         "/api/demo/reset": {"post"},
     }
+    assert recovery_snapshot_schema["allOf"] == [
+        {
+            "if": {
+                "properties": {
+                    "status": {
+                        "enum": [
+                            "completed",
+                            "closed_without_action",
+                            "outcome_unknown",
+                        ]
+                    }
+                },
+                "required": ["status"],
+            },
+            "then": {
+                "properties": {"currentStep": {"const": 5}},
+                "required": ["currentStep"],
+            },
+        }
+    ]
     event_responses = paths["/api/recoveries/{recovery_id}/events"]["get"][
         "responses"
     ]

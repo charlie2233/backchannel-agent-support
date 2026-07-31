@@ -798,6 +798,34 @@
       },
       "RecoverySnapshot": {
         "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "status": {
+                  "enum": [
+                    "completed",
+                    "closed_without_action",
+                    "outcome_unknown"
+                  ]
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "then": {
+              "properties": {
+                "currentStep": {
+                  "const": 5
+                }
+              },
+              "required": [
+                "currentStep"
+              ]
+            }
+          }
+        ],
         "properties": {
           "agentGraphVersion": {
             "anyOf": [
