@@ -731,6 +731,7 @@ def run_local_single_process_smoke() -> dict[str, object]:
         environment = dict(os.environ)
         environment.update(
             {
+                "BACKCHANNEL_ALLOWED_HOSTS": "127.0.0.1",
                 "BACKCHANNEL_CORS_ORIGINS": "https://backchannel.example",
                 "BACKCHANNEL_DB_PATH": str(temporary_path / "production.sqlite3"),
                 "BACKCHANNEL_DEPLOYED_MODE": "true",

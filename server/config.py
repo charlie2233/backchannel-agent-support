@@ -12,6 +12,12 @@ DEVELOPMENT_CORS_ORIGINS = (
     "http://localhost:5173",
     "http://127.0.0.1:5173",
 )
+DEVELOPMENT_ALLOWED_HOSTS = (
+    "localhost",
+    "127.0.0.1",
+    "::1",
+    "testserver",
+)
 DEVELOPMENT_IDENTITY_HASH_SECRET = "backchannel-local-development-identity-key"
 DEFAULT_MAX_RECOVERY_CREATIONS_PER_SESSION = 32
 DEFAULT_MAX_RECOVERY_CREATIONS_PER_IP = 128
@@ -73,6 +79,69 @@ def _environment_cidrs(name: str) -> tuple[str, ...]:
     raw = os.environ.get(name, "")
     return tuple(value.strip() for value in raw.split(",") if value.strip())
 
+
+def canonical_host_name(value: str) -> str | None:
+    """Return a comparison-safe bare DNS/IP host, or None for ambiguous input."""
+
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or len(value) > 253
+        or "%" in value
+    ):
+        return None
+    try:
+        value.encode("ascii")
+    except UnicodeEncodeError:
+        return None
+
+    try:
+        return ipaddress.ip_address(value).compressed
+    except ValueError:
+        pass
+
+    if ":" in value or all(character.isdigit() or character == "." for character in value):
+        return None
+    normalized = value.lower()
+    labels = normalized.split(".")
+    if (
+        normalized.endswith(".")
+        or any(not label or len(label) > 63 for label in labels)
+        or any(
+            label.startswith("-")
+            or label.endswith("-")
+            or any(
+                not (character.isascii() and (character.isalnum() or character == "-"))
+                for character in label
+            )
+            for label in labels
+        )
+    ):
+        return None
+    return normalized
+
+
+def _validated_allowed_hosts(
+    values: tuple[str, ...],
+    *,
+    required: bool,
+) -> tuple[str, ...]:
+    if not isinstance(values, tuple) or (required and not values):
+        raise ValueError("deployed mode requires an explicit allowed host allowlist")
+    normalized_values: list[str] = []
+    for value in values:
+        normalized = canonical_host_name(value)
+        if normalized is None or normalized != value:
+            raise ValueError(
+                "allowed hosts must be canonical bare DNS names or IP addresses"
+            )
+        if normalized in normalized_values:
+            raise ValueError("allowed hosts must not contain duplicates")
+        normalized_values.append(normalized)
+    return tuple(normalized_values)
+
+
 # Serialized SDK approvals are intentionally bound to these application contracts.
 APPROVAL_PROTOCOL_VERSION = "backchannel.approval.v1"
 HOTEL_AGENT_GRAPH_VERSION = "backchannel.hotel-agent.v1"
@@ -105,6 +174,7 @@ class RuntimeSettings:
     max_recovery_creations_global: int = DEFAULT_MAX_RECOVERY_CREATIONS_GLOBAL
     deployed_mode: bool = False
     deployed_cors_origins: tuple[str, ...] = ()
+    deployed_allowed_hosts: tuple[str, ...] = ()
     trusted_proxy_enabled: bool = False
     trusted_proxy_cidrs: tuple[str, ...] = ()
     demo_session_cookie_name: str = "backchannel_demo_session"
@@ -230,6 +300,7 @@ class RuntimeSettings:
                 raise ValueError("trusted_proxy_cidrs must contain valid IP networks") from error
         if self.trusted_proxy_enabled and not self.trusted_proxy_cidrs:
             raise ValueError("trusted proxy mode requires explicit trusted_proxy_cidrs")
+        _validated_allowed_hosts(DEVELOPMENT_ALLOWED_HOSTS, required=True)
         if self.deployed_mode:
             if self.demo_reset_enabled:
                 raise ValueError(
@@ -241,6 +312,7 @@ class RuntimeSettings:
                 )
             if not self.deployed_cors_origins:
                 raise ValueError("deployed mode requires an explicit HTTPS origin allowlist")
+            _validated_allowed_hosts(self.deployed_allowed_hosts, required=True)
             for origin in self.deployed_cors_origins:
                 parsed = urlparse(origin)
                 if (
@@ -259,6 +331,14 @@ class RuntimeSettings:
     @property
     def cors_origins(self) -> tuple[str, ...]:
         return self.deployed_cors_origins if self.deployed_mode else self.development_cors_origins
+
+    @property
+    def allowed_hosts(self) -> tuple[str, ...]:
+        return (
+            self.deployed_allowed_hosts
+            if self.deployed_mode
+            else DEVELOPMENT_ALLOWED_HOSTS
+        )
 
     @property
     def effective_demo_session_cookie_secure(self) -> bool:
@@ -335,6 +415,7 @@ class RuntimeSettings:
             ),
             deployed_mode=_environment_bool("BACKCHANNEL_DEPLOYED_MODE"),
             deployed_cors_origins=_environment_origins("BACKCHANNEL_CORS_ORIGINS"),
+            deployed_allowed_hosts=_environment_origins("BACKCHANNEL_ALLOWED_HOSTS"),
             trusted_proxy_enabled=_environment_bool("BACKCHANNEL_TRUSTED_PROXY_ENABLED"),
             trusted_proxy_cidrs=_environment_cidrs("BACKCHANNEL_TRUSTED_PROXY_CIDRS"),
             demo_session_cookie_name=os.environ.get(

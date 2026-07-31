@@ -534,6 +534,7 @@ def test_deployed_mode_rejects_demo_reset_with_valid_deployment_settings() -> No
             demo_reset_enabled=True,
             deployed_mode=True,
             deployed_cors_origins=("https://demo.example",),
+            deployed_allowed_hosts=("demo.example",),
             identity_hash_secret="deployment-identity-secret-that-is-long-enough",
         )
 
@@ -1482,6 +1483,7 @@ def test_signed_cookie_reuse_and_invalid_cookie_replacement_are_stateless(
         live_ready=False,
         deployed_mode=True,
         deployed_cors_origins=("https://demo.example",),
+        deployed_allowed_hosts=("demo.example",),
         identity_hash_secret="deployment-identity-secret-that-is-long-enough",
         demo_session_lifetime_seconds=60,
     )
@@ -1660,6 +1662,7 @@ def test_deployed_cookie_is_secure_and_has_bounded_lifetime(tmp_path) -> None:
         live_ready=False,
         deployed_mode=True,
         deployed_cors_origins=("https://demo.example",),
+        deployed_allowed_hosts=("testserver",),
         identity_hash_secret="deployment-identity-secret-that-is-long-enough",
         demo_session_lifetime_seconds=3_600,
     )
@@ -1679,6 +1682,7 @@ def test_deployed_cors_is_exact_and_security_headers_preserve_sse(tmp_path) -> N
         live_ready=False,
         deployed_mode=True,
         deployed_cors_origins=("https://demo.example",),
+        deployed_allowed_hosts=("testserver",),
         identity_hash_secret="deployment-identity-secret-that-is-long-enough",
     )
     client = TestClient(

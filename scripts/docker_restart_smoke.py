@@ -422,6 +422,8 @@ def _container_arguments(
         "--mount",
         f"type=volume,source={volume},target=/data",
         "-e",
+        "BACKCHANNEL_ALLOWED_HOSTS",
+        "-e",
         "BACKCHANNEL_CORS_ORIGINS",
         "-e",
         "BACKCHANNEL_DEPLOYED_MODE",
@@ -566,6 +568,7 @@ def run_container_restart_smoke(*, image: str, canary: str) -> dict[str, object]
         environment = dict(os.environ)
         environment.update(
             {
+                "BACKCHANNEL_ALLOWED_HOSTS": "127.0.0.1",
                 "BACKCHANNEL_CORS_ORIGINS": "https://judge.example",
                 "BACKCHANNEL_DEPLOYED_MODE": "true",
                 "BACKCHANNEL_DB_PATH": _DATABASE_PATH,

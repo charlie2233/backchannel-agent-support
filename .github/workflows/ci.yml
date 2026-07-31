@@ -63,6 +63,7 @@ jobs:
       - name: Start packaged app
         run: |
           docker run --rm -d --name backchannel-ci -p 8000:8000 \
+            -e BACKCHANNEL_ALLOWED_HOSTS=127.0.0.1 \
             -e BACKCHANNEL_CORS_ORIGINS=https://judge.example \
             -e BACKCHANNEL_IDENTITY_HASH_SECRET=ci-container-identity-boundary-0123456789 \
             -e OPENAI_API_KEY="$BACKCHANNEL_SMOKE_CANARY" \

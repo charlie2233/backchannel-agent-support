@@ -240,6 +240,7 @@ def test_replacement_uses_distinct_containers_one_volume_and_memory_only_cookie(
     assert first_environment is not None
     assert second_environment is not None
     for key in (
+        "BACKCHANNEL_ALLOWED_HOSTS",
         "BACKCHANNEL_DB_PATH",
         "BACKCHANNEL_IDENTITY_HASH_SECRET",
         "BACKCHANNEL_SMOKE_CANARY",
@@ -247,10 +248,13 @@ def test_replacement_uses_distinct_containers_one_volume_and_memory_only_cookie(
     ):
         assert first_environment[key] == second_environment[key]
     assert first_environment["BACKCHANNEL_DB_PATH"] == "/data/backchannel.sqlite3"
+    assert first_environment["BACKCHANNEL_ALLOWED_HOSTS"] == "127.0.0.1"
     assert first_environment["BACKCHANNEL_MAX_CONCURRENT_EVENT_STREAMS"] == "1"
     assert first_environment["BACKCHANNEL_MAX_EVENT_STREAMS_PER_RECOVERY"] == "1"
     assert "BACKCHANNEL_DEMO_RESET_ENABLED" not in first_arguments
     assert "BACKCHANNEL_DEMO_RESET_ENABLED" not in second_arguments
+    assert "BACKCHANNEL_ALLOWED_HOSTS" in first_arguments
+    assert "BACKCHANNEL_ALLOWED_HOSTS" in second_arguments
     serialized_arguments = json.dumps([arguments for arguments, _, _ in calls])
     for secret_value in (
         "identity-secret-kept-out-of-argv",

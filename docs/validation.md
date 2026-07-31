@@ -255,9 +255,11 @@ docker build -t backchannel:v0.3 .
 npm run smoke:docker
 ```
 
-The image smoke requires a disposable container, writable `/data`, explicit deployed CORS and
-identity configuration, and no build-time API key. A local production smoke is useful evidence
-for the packaged application contract, but it is not container-runtime proof.
+The image smoke requires a disposable container, writable `/data`, explicit deployed Host, CORS,
+and identity configuration, and no build-time API key. Because the image healthcheck targets
+`127.0.0.1`, that address must be included alongside any public DNS name in
+`BACKCHANNEL_ALLOWED_HOSTS`. A local production smoke is useful evidence for the packaged
+application contract, but it is not container-runtime proof.
 
 The GitHub-hosted `container-smoke` job in
 [CI run 30602953030](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30602953030),

@@ -26,7 +26,11 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import Request
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from server.config import MAX_DEMO_SESSION_COOKIE_VALUE_LENGTH, RuntimeSettings
+from server.config import (
+    MAX_DEMO_SESSION_COOKIE_VALUE_LENGTH,
+    RuntimeSettings,
+    canonical_host_name,
+)
 from server.logging import get_safe_logger, log_safe_exception
 
 if TYPE_CHECKING:
@@ -80,6 +84,7 @@ DECISION_CAPACITY_MESSAGE = (
     "Retry the same decision shortly."
 )
 REQUEST_BODY_TOO_LARGE_MESSAGE = "The request body is too large."
+INVALID_HOST_MESSAGE = "The request host is not allowed."
 
 
 class LiveAdmissionError(RuntimeError):
@@ -120,6 +125,62 @@ class SanitizedApplicationError(RuntimeError):
 
     def __init__(self) -> None:
         super().__init__("Unhandled application error")
+
+
+def _valid_host_port(value: str) -> bool:
+    return (
+        1 <= len(value) <= 5
+        and value.isascii()
+        and value.isdigit()
+        and 1 <= int(value) <= 65_535
+    )
+
+
+def _canonical_request_host(scope: Scope) -> str | None:
+    raw_host: bytes | None = None
+    for name, value in scope.get("headers", []):
+        if name.lower() != b"host":
+            continue
+        if raw_host is not None:
+            return None
+        raw_host = value
+    if raw_host is None:
+        return None
+    try:
+        authority = raw_host.decode("ascii")
+    except UnicodeDecodeError:
+        return None
+    if (
+        not authority
+        or authority != authority.strip()
+        or len(authority) > 259
+        or any(ord(character) < 33 or ord(character) == 127 for character in authority)
+    ):
+        return None
+
+    if authority.startswith("["):
+        closing_bracket = authority.find("]")
+        if (
+            closing_bracket < 2
+            or "[" in authority[1:]
+            or "]" in authority[closing_bracket + 1 :]
+        ):
+            return None
+        literal = authority[1:closing_bracket]
+        suffix = authority[closing_bracket + 1 :]
+        if suffix and (not suffix.startswith(":") or not _valid_host_port(suffix[1:])):
+            return None
+        try:
+            return ipaddress.IPv6Address(literal).compressed
+        except ValueError:
+            return None
+
+    if "[" in authority or "]" in authority or authority.count(":") > 1:
+        return None
+    host, separator, port = authority.partition(":")
+    if separator and not _valid_host_port(port):
+        return None
+    return canonical_host_name(host)
 
 
 @dataclass(frozen=True, slots=True)
@@ -417,6 +478,7 @@ class PublicBoundaryMiddleware:
         self.app = app
         self._controls = controls
         self._settings = settings
+        self._allowed_hosts = frozenset(settings.allowed_hosts)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -464,20 +526,8 @@ class PublicBoundaryMiddleware:
         request_id: str,
         state: dict[str, object],
     ) -> None:
-        identity = self._controls.resolve_client_identity(Request(scope))
-        state["demo_identity"] = identity
         headers = Headers(scope=scope)
-        declared_length = headers.get("content-length")
-        declared_too_large = False
-        if declared_length is not None:
-            try:
-                declared_too_large = (
-                    int(declared_length)
-                    > self._settings.request_body_size_limit_bytes
-                )
-            except ValueError:
-                # An invalid length is never trusted; cumulative byte counting remains active.
-                declared_too_large = False
+        identity: ClientIdentity | None = None
 
         async def send_with_headers(message: Message) -> None:
             if message["type"] == "http.response.start":
@@ -502,15 +552,61 @@ class PublicBoundaryMiddleware:
                     response_headers["strict-transport-security"] = (
                         "max-age=31536000; includeSubDomains"
                     )
+                response_identity = identity
                 if (
-                    identity.new_session_cookie is not None
+                    response_identity is not None
+                    and response_identity.new_session_cookie is not None
                     and "set-cookie" not in response_headers
                 ):
                     response_headers.append(
                         "set-cookie",
-                        self._controls.session_cookie_header(identity.new_session_cookie),
+                        self._controls.session_cookie_header(
+                            response_identity.new_session_cookie
+                        ),
                     )
             await send(message)
+
+        async def send_invalid_host() -> None:
+            payload = json.dumps(
+                {
+                    "code": "invalid_host",
+                    "message": INVALID_HOST_MESSAGE,
+                    "requestId": request_id,
+                },
+                separators=(",", ":"),
+            ).encode("utf-8")
+            await send_with_headers(
+                {
+                    "type": "http.response.start",
+                    "status": 400,
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"content-length", str(len(payload)).encode("ascii")),
+                    ],
+                }
+            )
+            await send_with_headers(
+                {"type": "http.response.body", "body": payload, "more_body": False}
+            )
+
+        request_host = _canonical_request_host(scope)
+        if request_host is None or request_host not in self._allowed_hosts:
+            await send_invalid_host()
+            return
+
+        identity = self._controls.resolve_client_identity(Request(scope))
+        state["demo_identity"] = identity
+        declared_length = headers.get("content-length")
+        declared_too_large = False
+        if declared_length is not None:
+            try:
+                declared_too_large = (
+                    int(declared_length)
+                    > self._settings.request_body_size_limit_bytes
+                )
+            except ValueError:
+                # An invalid length is never trusted; cumulative byte counting remains active.
+                declared_too_large = False
 
         async def send_too_large() -> None:
             payload = json.dumps(

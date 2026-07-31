@@ -363,17 +363,20 @@ explicit shared admission design before claiming a fleet-wide limit.
 
 ## Public-demo controls
 
-The server applies request-size limits, exact CORS configuration, generic public errors,
+The server applies request-size limits, exact Host and CORS configuration, generic public errors,
 redacted server logging, per-IP and per-session live cooldowns, a live concurrency cap, a
 configurable daily admission budget, terminal-record TTL cleanup, and an HttpOnly demo-session
 cookie. Long-lived event streams add configurable process and per-recovery caps plus a bounded
 retry interval and are bound to the verified signed-session expiry. Admission leases are
 released idempotently after session expiry, terminal completion, client disconnect,
 cancellation, iterator/store/encoding failure, blocked-send expiry, ASGI send failure, or
-response construction failure; zero-count recovery entries are removed. Deployed mode
-additionally requires an exact HTTPS origin allowlist and an explicit
-32-byte-or-longer identity-hash secret. Proxy headers are ignored unless the direct peer is in
-an explicit trusted CIDR allowlist.
+response construction failure; zero-count recovery entries are removed. Every HTTP request must
+carry exactly one syntactically valid Host whose normalized bare DNS name or IP literal is
+allowlisted; rejection happens before body reads, session issuance, routing, or durable mutation.
+Development permits only loopback names/addresses and the test harness. Deployed mode additionally
+requires an explicit bare-host allowlist, an exact HTTPS origin allowlist, and an explicit
+32-byte-or-longer identity-hash secret. Proxy headers are ignored unless the direct peer is in an
+explicit trusted CIDR allowlist.
 
 The cookie contains a random nonce, expiry, and HMAC signature. SQLite never stores that raw
 cookie, nonce, client address, API key, or authorization value. Instead, creation atomically

@@ -40,6 +40,7 @@ class FakeLocalProcess:
         self.kill_calls = 0
         self.wait_timeouts: list[float] = []
         self.stderr_file: Any | None = None
+        self.environment: dict[str, str] | None = None
         self.clean_shutdown_log = True
 
     def poll(self) -> int | None:
@@ -110,6 +111,7 @@ def _install_local_smoke_fakes(
         lambda *_args, **kwargs: _attach_local_process_log(
             process,
             kwargs["stderr"],
+            environment=kwargs["env"],
             clean_shutdown_log=clean_shutdown_log,
             stale_shutdown_log=stale_shutdown_log,
             log_canary=log_canary,
@@ -121,11 +123,13 @@ def _attach_local_process_log(
     process: FakeLocalProcess,
     stderr_file: Any,
     *,
+    environment: dict[str, str],
     clean_shutdown_log: bool,
     stale_shutdown_log: bool,
     log_canary: bool,
 ) -> FakeLocalProcess:
     process.stderr_file = stderr_file
+    process.environment = environment
     process.clean_shutdown_log = clean_shutdown_log
     if stale_shutdown_log:
         _write_clean_shutdown_log(process, stderr_file)
@@ -167,6 +171,8 @@ def test_local_production_smoke_requires_clean_graceful_exit(
     assert process.terminate_calls == 1
     assert process.kill_calls == 0
     assert process.wait_timeouts == [5]
+    assert process.environment is not None
+    assert process.environment["BACKCHANNEL_ALLOWED_HOSTS"] == "127.0.0.1"
 
 
 def test_local_production_smoke_rejects_forced_process_kill(
