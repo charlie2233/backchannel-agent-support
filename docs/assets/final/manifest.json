@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "sourceCommit": "21d9b0f8dbeb59454e3f3b3d3d9138af28af02ad",
+  "sourceCommit": "a01f0a361f2c45f762496a0c6af298a4473fde96",
   "runtimeInput": {
     "algorithm": "sha256",
-    "digest": "eabc2743f9475e384fe7a49344f42a9635d2f57277f788708d23425edd845385",
+    "digest": "168e315936fe58a2f2371c0122dbf0c5d5a4f0be93f7f2a1021e4f84dd90a6f4",
     "paths": [
       ".node-version",
       "e2e/capture-manifest.mjs",
@@ -34,6 +34,7 @@
       "server/orchestrator.py",
       "server/policy.py",
       "server/providers/__init__.py",
+      "server/providers/hotel_contract.py",
       "server/providers/hotel_simulator.py",
       "server/providers/quota_simulator.py",
       "server/replay/__init__.py",
@@ -107,7 +108,7 @@
   "artifacts": [
     {
       "filename": "desktop-consent.png",
-      "sha256": "acdf50fb67c38b8108adf86424a53e6940046ae4588aef11549341d0e8b02f73",
+      "sha256": "94966bc9013aef5ed86e757f217b08c429c0a4783720908d154b5a6ac8bb59a5",
       "width": 1440,
       "height": 1024,
       "scenarioId": "hotel",
@@ -116,7 +117,7 @@
     },
     {
       "filename": "desktop-completed.png",
-      "sha256": "b7b5af1c26598ac6ae1496acff082b75a320e53fdaadfd8e17064e3e8e34315e",
+      "sha256": "2eb641903f8fbe12f5c50e613b7b5aae1a89670e3199665da3485a16ec59db6b",
       "width": 1440,
       "height": 1024,
       "scenarioId": "hotel",
@@ -125,7 +126,7 @@
     },
     {
       "filename": "desktop-declined.png",
-      "sha256": "da3a0e5f030e418c93aef79d80092f1f4054d57bab9cee0a697a4a8a5d5957f2",
+      "sha256": "c5e1a2c9a9ae44750b19b7c10d957a6274e4c62795cd0a6f3c5be11af08f0427",
       "width": 1440,
       "height": 1024,
       "scenarioId": "hotel",
@@ -143,7 +144,7 @@
     },
     {
       "filename": "mobile-completed.png",
-      "sha256": "d2b629ee3e61314db3d525005bd566ff7af70ae90c7e036a66ec1de4fbe3a628",
+      "sha256": "1254dab752c3652cb1d8148261036bbc39bfedac1ff3d3e8993de934f018f44d",
       "width": 390,
       "height": 844,
       "scenarioId": "hotel",
@@ -152,7 +153,7 @@
     },
     {
       "filename": "mobile-declined.png",
-      "sha256": "3c0ddc7b6c9b8bb529f9090b5079cc10690d1d6171524c09deea32967b1a1058",
+      "sha256": "03d184a8be747dee880ba5d2a63d805335881bde7273b26b071695edb3a735f7",
       "width": 390,
       "height": 844,
       "scenarioId": "hotel",
