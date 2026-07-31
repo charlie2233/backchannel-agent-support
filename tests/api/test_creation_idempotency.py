@@ -2016,10 +2016,12 @@ def test_expired_creation_backlog_does_not_consume_capacity(
 
 def test_terminal_recovery_cleanup_does_not_release_unexpired_creation_capacity(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database_path = tmp_path / "terminal-cleanup-capacity.sqlite3"
     store = SQLiteStore(database_path)
     now = datetime(2026, 7, 24, tzinfo=UTC)
+    monkeypatch.setattr(store, "_now", lambda: now)
     session_key = "b" * 64
     request_key = "a" * 64
     request_fingerprint = "f" * 64
