@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import re
@@ -23,1292 +24,9 @@ def _read(relative_path: str) -> str:
     return (ROOT / relative_path).read_text(encoding="utf-8")
 
 
-def test_task35_current_transition_marker_evidence_contract() -> None:
-    validation = _read("docs/validation.md")
-    historical_heading = "## Superseded historical hosted baseline"
-    current_evidence, historical_evidence = validation.split(
-        historical_heading,
-        maxsplit=1,
-    )
-    normalized_current_evidence = " ".join(current_evidence.split())
-
-    for required_current_fact in (
-        "## Current Task35 final evidence activation",
-        "`21d9b0f8dbeb59454e3f3b3d3d9138af28af02ad`",
-        "`60fe1243a5eeb760984d78d667f7efdc33630adc`",
-        "`6533a3f2e212d9a7c4e1af9f1d2dd77f7bd45a18`",
-        "`eabc2743f9475e384fe7a49344f42a9635d2f57277f788708d23425edd845385`",
-        "2 failed, 17 deselected",
-        "DID NOT RAISE `ReceiptTransitionError`",
-        "3 passed, 17 deselected",
-        "20 passed",
-        "951 passed",
-        "24.57s",
-        "exact event-row and text-byte stability",
-        "one-time `terminal` add/backfill",
-        "exactly one final marker",
-        "exact unrelated-row preservation",
-        "exact database-byte stability across a second reopen",
-        "foreign-key check was empty",
-        "integrity check returned `ok`",
-        "Independent Task35 specification and quality reviews passed with no P0-P3",
-        "explicit second-reopen proof",
-        "19 web test files / 369 tests",
-        "strict MyPy over 35 source files",
-        "`957 passed`, 3 warnings, in 25.36s",
-        "local deterministic stub smoke reported `PASS`",
-        "local production `deterministic-qa` smoke reported `PASS`",
-        "`missing_openai_api_key`",
-        "`attempted=1` of `target=3`",
-        "`approvals=0`",
-        "30598406930",
-        "91055708186",
-        "957 passed, 1 warning",
-        "46.45s",
-        "91055968348",
-        "runtime user `10001:10001`",
-        "offline network-none `deterministic-qa` and `deployed-readonly` profiles",
-        "Both job annotation APIs returned `[]`",
-    ):
-        assert required_current_fact in normalized_current_evidence
-
-    actions_base = (
-        "https://github.com/charlie2233/backchannel-agent-support/actions/runs"
-    )
-    assert tuple(
-        re.findall(
-            r"https://github\.com/[^)\s]+/actions/runs/\d+(?:/job/\d+)?",
-            current_evidence,
-        )
-    ) == (
-        f"{actions_base}/30595724271",
-        f"{actions_base}/30595724271/job/91047571247",
-        f"{actions_base}/30595724271/job/91047810594",
-        f"{actions_base}/30598406930",
-        f"{actions_base}/30598406930/job/91055708186",
-        f"{actions_base}/30598406930/job/91055968348",
-    )
-    for forbidden_current_fact in (
-        "8942517f43045a124e11a8e79296f6e4de875936",
-        "4ca13252e05357ff98023f9290375cd1718bcce6",
-        "e208c767646af920d90aa9396f441fb328c999c3235aff646ac20a5611543f27",
-        "e208c76…",
-        "5364dd4f9f825f5d68c85ea005ceb277ab943e4c",
-        "9d7e850cbf6761524e9a51359801944cdf7fabf4",
-        "30593858167",
-        "91041814602",
-        "91042106744",
-        "30594431983",
-        "91043601366",
-        "91043886907",
-    ):
-        assert forbidden_current_fact not in current_evidence
-
-    task34_heading = (
-        "### Task34 terminal-snapshot capture and hosted baselines (superseded)"
-    )
-    task33_heading = "### Client-terminal capture and hosted baselines (superseded)"
-    assert historical_evidence.index(task34_heading) < historical_evidence.index(
-        task33_heading
-    )
-    task34_history = historical_evidence.split(task34_heading, maxsplit=1)[1].split(
-        task33_heading,
-        maxsplit=1,
-    )[0]
-    normalized_task34_history = " ".join(task34_history.split())
-    for required_task34_fact in (
-        "8942517f43045a124e11a8e79296f6e4de875936",
-        "4ca13252e05357ff98023f9290375cd1718bcce6",
-        "e208c767646af920d90aa9396f441fb328c999c3235aff646ac20a5611543f27",
-        "5364dd4f9f825f5d68c85ea005ceb277ab943e4c",
-        "9d7e850cbf6761524e9a51359801944cdf7fabf4",
-        "30593858167",
-        "91041814602",
-        "91042106744",
-        "30594431983",
-        "91043601366",
-        "91043886907",
-        "944 Python tests with 1 warning in 43.54s",
-        "948 Python tests with 1 warning in 42.45s",
-        "Both activation job annotation APIs returned `[]`",
-        "Both final-tip job annotation APIs returned `[]`",
-        "935 / 935 tests with 3 warnings in 24.53s",
-        "944 / 944 Python tests with 3 warnings in 25.73s",
-        "missing-`OPENAI_API_KEY` preflight",
-    ):
-        assert required_task34_fact in normalized_task34_history
-    _assert_validation_normalized_digests(validation)
-    _assert_validation_matches_current_capture(validation)
-
-
 def _normalized_digest(evidence: str) -> str:
     return hashlib.sha256(" ".join(evidence.split()).encode("utf-8")).hexdigest()
 
-
-def _assert_validation_normalized_digests(validation: str) -> None:
-    historical_heading = "## Superseded historical hosted baseline"
-    task34_heading = (
-        "### Task34 terminal-snapshot capture and hosted baselines (superseded)"
-    )
-    task33_heading = "### Client-terminal capture and hosted baselines (superseded)"
-    assert historical_heading in validation, "digest section structure"
-    current_evidence, historical_evidence = validation.split(
-        historical_heading,
-        maxsplit=1,
-    )
-    assert task34_heading in historical_evidence, "digest section structure"
-    assert task33_heading in historical_evidence, "digest section structure"
-    task34_history = historical_evidence.split(task34_heading, maxsplit=1)[1].split(
-        task33_heading,
-        maxsplit=1,
-    )[0]
-    older_history = task33_heading + historical_evidence.split(
-        task33_heading,
-        maxsplit=1,
-    )[1]
-
-    assert _normalized_digest(current_evidence) == (
-        "d1403b1fb4d69a5953aab6e040760be5912b35f37ebb4ac9cf632a9322c224dd"
-    ), "current normalized digest"
-    assert _normalized_digest(task34_history) == (
-        "86d6128f55b21219641cd1b4f62da4a4567a352557b7ef9f30755c30dea71d7c"
-    ), "Task34 normalized digest"
-    assert _normalized_digest(older_history) == (
-        "75818dd3d27072d3e0443a6e314cfc28a3ea524787ff855bff47d5f3df6bbaf2"
-    ), "older-history normalized digest"
-
-
-def test_validation_normalized_digests_match_current_document() -> None:
-    _assert_validation_normalized_digests(_read("docs/validation.md"))
-
-
-@pytest.mark.parametrize(
-    ("needle", "expected_guard"),
-    (
-        (
-            "This file records only `codex/backchannel-v0.3` evidence.",
-            "current normalized digest",
-        ),
-        (
-            "This Task34 source, capture, activation, hosted, packaged-container",
-            "Task34 normalized digest",
-        ),
-        (
-            "The prior Task33 source gate covered",
-            "older-history normalized digest",
-        ),
-    ),
-)
-def test_validation_normalized_digest_rejects_section_mutation(
-    needle: str,
-    expected_guard: str,
-) -> None:
-    validation = _read("docs/validation.md")
-    assert needle in validation
-    polluted_validation = validation.replace(needle, f"{needle} mutated", 1)
-
-    with pytest.raises(AssertionError, match=expected_guard):
-        _assert_validation_normalized_digests(polluted_validation)
-
-
-def _extract_current_section(
-    current_evidence: str,
-    start_heading: str,
-    end_heading: str,
-    guard: str,
-) -> str:
-    assert current_evidence.count(start_heading) == 1, guard
-    assert current_evidence.count(end_heading) == 1, guard
-    return current_evidence.split(start_heading, maxsplit=1)[1].split(
-        end_heading,
-        maxsplit=1,
-    )[0]
-
-
-def _extract_current_bullet(section: str, prefix: str, guard: str) -> str:
-    matches = tuple(
-        re.finditer(
-            rf"^- {re.escape(prefix)}.*?(?=^- |\Z)",
-            section,
-            flags=re.MULTILINE | re.DOTALL,
-        )
-    )
-    assert len(matches) == 1, guard
-    return " ".join(matches[0].group(0).split())
-
-
-def _assert_current_canonical_local_evidence(current_evidence: str) -> None:
-    guard = "current canonical/local evidence"
-    activation = _extract_current_section(
-        current_evidence,
-        "## Current Task35 final evidence activation",
-        "## Current Task35 transition-marker proof boundary",
-        guard,
-    )
-    assert _extract_current_bullet(
-        activation,
-        "The exact local canonical gate on final evidence activation",
-        guard,
-    ) == (
-        "- The exact local canonical gate on final evidence activation "
-        "`6533a3f2e212d9a7c4e1af9f1d2dd77f7bd45a18` covered 29 capture "
-        "contracts, `capture_manifest_valid`, 19 web test files / 369 tests, the "
-        "production TypeScript/Vite build, Ruff, strict MyPy over 35 source files, "
-        "and `957 passed`, 3 warnings, in 25.36s."
-    ), guard
-    assert _extract_current_bullet(
-        activation,
-        "The local deterministic stub smoke reported",
-        guard,
-    ) == (
-        "- The local deterministic stub smoke reported `PASS`. The local production "
-        "`deterministic-qa` smoke reported `PASS` for health, readiness, session "
-        "isolation, SSE reconnect, approval, decline, and bounded SIGTERM. OpenAPI "
-        "verification and the history-aware secret scan also reported `PASS`."
-    ), guard
-    assert _extract_current_bullet(
-        activation,
-        "The live three-run command remained blocked",
-        guard,
-    ) == (
-        "- The live three-run command remained blocked at its "
-        "`missing_openai_api_key` preflight after `attempted=1` of `target=3`, with "
-        "`approvals=0` and no model IDs, tools, or root trace. It did not execute "
-        "three live runs."
-    ), guard
-
-
-def _assert_current_hosted_provenance(current_evidence: str) -> None:
-    guard = "current hosted provenance"
-    activation = _extract_current_section(
-        current_evidence,
-        "## Current Task35 final evidence activation",
-        "## Current Task35 transition-marker proof boundary",
-        guard,
-    )
-    assert _extract_current_bullet(
-        activation,
-        "The earlier capture evidence activation",
-        guard,
-    ) == (
-        "- The earlier capture evidence activation "
-        "`60fe1243a5eeb760984d78d667f7efdc33630adc` and GitHub Actions "
-        "[run 30595724271]"
-        "(https://github.com/charlie2233/backchannel-agent-support/actions/runs/"
-        "30595724271) remain bounded historical nonproof: `verify` "
-        "([job 91047571247]"
-        "(https://github.com/charlie2233/backchannel-agent-support/actions/runs/"
-        "30595724271/job/91047571247)) reported `FAILURE` with `1 failed, 950 "
-        "passed, 1 warning` in 41.89s and exactly one observed annotation; "
-        "`container-smoke` ([job 91047810594]"
-        "(https://github.com/charlie2233/backchannel-agent-support/actions/runs/"
-        "30595724271/job/91047810594)) reported `SKIPPED`, with container "
-        "annotations `[]`."
-    ), guard
-    assert _extract_current_bullet(
-        activation,
-        "Final evidence activation GitHub Actions",
-        guard,
-    ) == (
-        "- Final evidence activation GitHub Actions [run 30598406930]"
-        "(https://github.com/charlie2233/backchannel-agent-support/actions/runs/"
-        "30598406930) passed the exact named hosted lanes. `verify` "
-        "([job 91055708186]"
-        "(https://github.com/charlie2233/backchannel-agent-support/actions/runs/"
-        "30598406930/job/91055708186)) reported `PASS` with `957 passed, 1 "
-        "warning` in 46.45s and covered the canonical gate, deterministic stub "
-        "smoke, OpenAPI verification, and the history-aware secret scan. "
-        "`container-smoke` ([job 91055968348]"
-        "(https://github.com/charlie2233/backchannel-agent-support/actions/runs/"
-        "30598406930/job/91055968348)) reported `PASS`, built the packaged image, "
-        "confirmed runtime user `10001:10001`, and passed the offline network-none "
-        "`deterministic-qa` and `deployed-readonly` profiles. Both job annotation "
-        "APIs returned `[]`."
-    ), guard
-    actions_base = (
-        "https://github.com/charlie2233/backchannel-agent-support/actions/runs"
-    )
-    assert tuple(
-        re.findall(
-            r"https://github\.com/[^)\s]+/actions/runs/\d+(?:/job/\d+)?",
-            current_evidence,
-        )
-    ) == (
-        f"{actions_base}/30595724271",
-        f"{actions_base}/30595724271/job/91047571247",
-        f"{actions_base}/30595724271/job/91047810594",
-        f"{actions_base}/30598406930",
-        f"{actions_base}/30598406930/job/91055708186",
-        f"{actions_base}/30598406930/job/91055968348",
-    ), guard
-    assert "Hosted validation successor:" not in current_evidence, guard
-
-
-def _assert_current_pending_bullets(current_evidence: str) -> None:
-    guard = "current pending bullets"
-    pending = _extract_current_section(
-        current_evidence,
-        "## Current Task35 pending external gates",
-        "## Per-SHA proof matrix",
-        guard,
-    )
-    bullets = tuple(
-        " ".join(match.group(0).split())
-        for match in re.finditer(
-            r"^- .*?(?=^- |\Z)",
-            pending,
-            flags=re.MULTILINE | re.DOTALL,
-        )
-    )
-    assert bullets == (
-        (
-            "- Within the source, capture, and hosted activation lane, only final "
-            "documentation-tip CI for the resulting documentation successor remains "
-            "pending."
-        ),
-        (
-            "- There is no current Task35 live OpenAI, public deployment, tag, or "
-            "release proof or claim. The blocked missing-key attempt did not execute "
-            "three live runs or prove a real provider mutation."
-        ),
-    ), guard
-
-
-def _assert_current_matrix(current_evidence: str) -> None:
-    guard = "current matrix"
-    matrix = _extract_current_section(
-        current_evidence,
-        "## Per-SHA proof matrix",
-        "## Hosted container evidence boundary",
-        guard,
-    )
-    rows = tuple(
-        line.strip() for line in matrix.splitlines() if line.strip().startswith("|")
-    )
-    assert rows == (
-        "| Lane | Exact evidence | Status and boundary |",
-        "| --- | --- | --- |",
-        (
-            "| Local source and tests | Exact final evidence activation canonical "
-            "gate on `6533a3f…`: 29 capture contracts, manifest verification, 19 web "
-            "files / 369 tests, build, Ruff, strict MyPy over 35 files, and 957 "
-            "Python tests | **Verified locally** in the exact named lanes |"
-        ),
-        (
-            "| Local final-build captures | "
-            "[`docs/assets/final/manifest.json`](assets/final/manifest.json); six "
-            "provenance-checked PNGs under [`docs/assets/final`](assets/final) | "
-            "**Local capture evidence only** on source `21d9b0f…` in Google Chrome "
-            "at 1440×1024 and 390×844; not container, deployment, live OpenAI, or "
-            "release proof |"
-        ),
-        (
-            "| Live OpenAI | Three-run command stopped at "
-            "`missing_openai_api_key` after attempt 1 of 3, with zero approvals and "
-            "no model IDs, tools, or root trace | **Blocked / Unverified**; three "
-            "live runs did not execute |"
-        ),
-        (
-            "| Local Docker | No Docker-family runtime is installed on this Mac | "
-            "**Unverified locally** |"
-        ),
-        (
-            "| GitHub CI/container | Final activation `6533a3f…`; run `30598406930`; "
-            "`verify` job `91055708186` = `PASS`; `container-smoke` job "
-            "`91055968348` = `PASS`; both annotation APIs `[]` | **Verified for the "
-            "exact hosted canonical and packaged-container smoke lanes**; final "
-            "docs-tip CI remains pending within that activation lane |"
-        ),
-        (
-            "| Public deployment | No public application origin | **Blocked / "
-            "Unverified** |"
-        ),
-        (
-            "| Tag/release | No release tag or GitHub release | **Blocked / "
-            "Unverified** |"
-        ),
-    ), guard
-
-
-def _assert_current_hosted_boundary(current_evidence: str) -> None:
-    guard = "current hosted boundary"
-    boundary = _extract_current_section(
-        current_evidence,
-        "## Hosted container evidence boundary",
-        "## Capture contract",
-        guard,
-    )
-    assert " ".join(boundary.split()) == (
-        "The final activation passed the exact hosted canonical lane and packaged "
-        "container smoke lane. The container job built the packaged image, "
-        "confirmed runtime user `10001:10001`, and passed only the offline "
-        "network-none `deterministic-qa` and `deployed-readonly` profiles. This "
-        "does not prove local Docker, browser capture in CI, public deployment or "
-        "browser URL, live OpenAI, real provider execution, container replacement "
-        "or restart durability beyond those exact profiles, long-lived `/data` "
-        "volume persistence, target-host durability/networking, abrupt host loss "
-        "or backup, concurrent multi-container SQLite, final documentation-tip CI, "
-        "tag, or release. The earlier capture activation run `30595724271` remains "
-        "bounded historical nonproof: `verify` failed and `container-smoke` was "
-        "skipped. The successful final activation does not erase that result. "
-        "Within the source, capture, and hosted activation lane, only final docs-tip "
-        "CI remains pending. Live OpenAI, public deployment, local Docker, tag, and "
-        "release remain separate blocked or unverified lanes. The browser capture "
-        "remained local; CI did not execute the browser capture."
-    ), guard
-
-
-def _assert_validation_matches_current_capture(validation: str) -> None:
-    manifest = json.loads(_read("docs/assets/final/manifest.json"))
-    runtime_input = manifest["runtimeInput"]
-    browser = manifest["browser"]
-    environment = manifest["environment"]
-    artifacts = manifest["artifacts"]
-
-    historical_heading = "## Superseded historical hosted baseline"
-    assert historical_heading in validation, "validation semantic structure"
-    current_evidence, historical_evidence = validation.split(
-        historical_heading,
-        maxsplit=1,
-    )
-    actions_base = (
-        "https://github.com/charlie2233/backchannel-agent-support/actions/runs"
-    )
-    normalized_current_evidence = " ".join(current_evidence.split())
-    normalized_historical_evidence = " ".join(historical_evidence.split())
-    task34_heading = (
-        "### Task34 terminal-snapshot capture and hosted baselines (superseded)"
-    )
-    task33_heading = "### Client-terminal capture and hosted baselines (superseded)"
-    assert task34_heading in historical_evidence, "validation semantic structure"
-    assert task33_heading in historical_evidence, "validation semantic structure"
-    assert (
-        historical_evidence.split(task34_heading, maxsplit=1)[0].strip() == ""
-    ), "current provenance exclusion"
-    task34_history = historical_evidence.split(task34_heading, maxsplit=1)[1].split(
-        task33_heading,
-        maxsplit=1,
-    )[0]
-
-    transition_heading = "## Current Task35 transition-marker proof boundary"
-    transition_end_heading = "## Current Task35 pending external gates"
-    transition_evidence = current_evidence.split(
-        transition_heading,
-        maxsplit=1,
-    )[1].split(transition_end_heading, maxsplit=1)[0]
-    assert " ".join(transition_evidence.split()) == (
-        "On modern schemas, clearing the sole `terminal = 1` marker for a "
-        "completed approval or decline makes reopen fail closed with "
-        "`ReceiptTransitionError`. Reopen performs no repair and preserves exact "
-        "event-row and text-byte stability. On a genuine legacy events schema "
-        "without `terminal`, reopen performs a one-time `terminal` add/backfill, "
-        "leaves exactly one final marker, and provides exact unrelated-row "
-        "preservation and exact database-byte stability across a second reopen; "
-        "the foreign-key check was empty and the integrity check returned `ok`."
-    ), "transition marker semantic contract"
-
-    _assert_current_hosted_provenance(current_evidence)
-    _assert_current_pending_bullets(current_evidence)
-    _assert_current_matrix(current_evidence)
-    _assert_current_hosted_boundary(current_evidence)
-    _assert_current_canonical_local_evidence(current_evidence)
-
-    for current_identifier in (
-        manifest["sourceCommit"],
-        "21d9b0f…",
-        "60fe1243a5eeb760984d78d667f7efdc33630adc",
-        "60fe124…",
-        "6533a3f2e212d9a7c4e1af9f1d2dd77f7bd45a18",
-        "6533a3f…",
-        runtime_input["digest"],
-        "eabc274…",
-    ):
-        assert (
-            current_identifier not in historical_evidence
-        ), f"current historical identifier exclusion: {current_identifier}"
-
-    assert manifest["sourceCommit"] == (
-        "21d9b0f8dbeb59454e3f3b3d3d9138af28af02ad"
-    ), "manifest source contract"
-    assert runtime_input["digest"] == (
-        "eabc2743f9475e384fe7a49344f42a9635d2f57277f788708d23425edd845385"
-    ), "manifest runtime digest contract"
-    for required_current_fact in (
-        "## Current Task35 final evidence activation",
-        manifest["sourceCommit"],
-        runtime_input["digest"],
-        "84 runtime paths",
-        "capture profile `keyless_sdk_stub`",
-        "Google Chrome 150.0.7871.187",
-        "stable `chrome` channel in headless mode",
-        "`en-US` / `UTC` / `reduce` / `light`",
-        "1440×1024",
-        "390×844",
-        "`npm run test:e2e` reported `29 passed`",
-        "29 capture contracts",
-        "Five PNGs changed from Task34; `mobile-consent.png` was byte-identical",
-        "combined before/after review across all six images passed with no P0-P3",
-        "2 failed, 17 deselected",
-        "DID NOT RAISE `ReceiptTransitionError`",
-        "3 passed, 17 deselected",
-        "20 passed",
-        "`951 passed`, 3 warnings, in 24.57s",
-        "strict MyPy on `server/store.py`",
-        "Independent Task35 specification and quality reviews passed with no P0-P3",
-        "explicit second-reopen proof",
-        "clearing the sole `terminal = 1` marker",
-        "fail closed with `ReceiptTransitionError`",
-        "Reopen performs no repair",
-        "exact event-row and text-byte stability",
-        "genuine legacy events schema without `terminal`",
-        "one-time `terminal` add/backfill",
-        "exactly one final marker",
-        "exact unrelated-row preservation",
-        "exact database-byte stability",
-        "foreign-key check was empty",
-        "integrity check returned `ok`",
-    ):
-        assert (
-            required_current_fact in normalized_current_evidence
-        ), f"current evidence facts: missing {required_current_fact}"
-
-    for unsupported_current_claim in (
-        "Current Task35 live OpenAI passed",
-        "Current Task35 public deployment passed",
-        "Current Task35 docs-tip CI passed",
-        "Current Task35 container replacement persistence passed",
-        "Current Task35 release passed",
-    ):
-        assert (
-            unsupported_current_claim not in current_evidence
-        ), f"current positive allowlist: unsupported claim {unsupported_current_claim}"
-
-    for forbidden_current_fact in (
-        "8942517f43045a124e11a8e79296f6e4de875936",
-        "4ca13252e05357ff98023f9290375cd1718bcce6",
-        "e208c767646af920d90aa9396f441fb328c999c3235aff646ac20a5611543f27",
-        "e208c76…",
-        "5364dd4f9f825f5d68c85ea005ceb277ab943e4c",
-        "9d7e850cbf6761524e9a51359801944cdf7fabf4",
-        "30593858167",
-        "91041814602",
-        "91042106744",
-        "30594431983",
-        "91043601366",
-        "91043886907",
-    ):
-        assert (
-            forbidden_current_fact not in current_evidence
-        ), f"superseded provenance exclusion: {forbidden_current_fact}"
-
-    for excluded_nonproof_identifier in (
-        "85e1e8ec9147242adca311c4ba10ea8c1c3008dc",
-        "85e1e8e…",
-        "30206582233",
-        "89805619343",
-        "89805788728",
-        "b578680…",
-    ):
-        assert (
-            excluded_nonproof_identifier not in current_evidence
-        ), f"superseded provenance exclusion: {excluded_nonproof_identifier}"
-
-    historical_identifiers = set(
-        re.findall(
-            r"(?<![0-9A-Za-z])(?:[0-9a-f]{40,64}|[0-9a-f]{7}…|\d{11})"
-            r"(?![0-9A-Za-z])",
-            historical_evidence,
-        )
-    )
-    for historical_identifier in historical_identifiers:
-        assert (
-            historical_identifier not in current_evidence
-        ), f"superseded provenance exclusion: {historical_identifier}"
-
-    task34_urls = (
-        f"{actions_base}/30593858167",
-        f"{actions_base}/30593858167/job/91041814602",
-        f"{actions_base}/30593858167/job/91042106744",
-        f"{actions_base}/30594431983",
-        f"{actions_base}/30594431983/job/91043601366",
-        f"{actions_base}/30594431983/job/91043886907",
-    )
-    assert tuple(
-        re.findall(
-            r"https://github\.com/[^)\s]+/actions/runs/\d+(?:/job/\d+)?",
-            task34_history,
-        )
-    ) == task34_urls, "Task34 ordered Actions bindings"
-    normalized_task34_history = " ".join(task34_history.split())
-    for required_task34_fact in (
-        "51 / 51 tests",
-        "63 / 63",
-        "e208c767646af920d90aa9396f441fb328c999c3235aff646ac20a5611543f27",
-        "capture profile `keyless_sdk_stub`",
-        "Google Chrome 150.0.7871.187 stable `chrome` in headless mode",
-        "935 / 935 tests with 3 warnings in 24.53s",
-        "944 / 944 Python tests with 3 warnings in 25.73s",
-        "missing-`OPENAI_API_KEY` preflight",
-        "944 Python tests with 1 warning in 43.54s",
-        "948 Python tests with 1 warning in 42.45s",
-        "Both activation job annotation APIs returned `[]`",
-        "Both final-tip job annotation APIs returned `[]`",
-        "built the packaged image",
-        "runtime user `10001:10001`",
-        "offline network-none `deterministic-qa` and `deployed-readonly` profiles",
-        "truthful superseded history only",
-        (
-            "Prior pre-CI/current activation: "
-            "`5364dd4f9f825f5d68c85ea005ceb277ab943e4c`"
-        ),
-        (
-            "[run 30593858167]"
-            f"({actions_base}/30593858167)"
-        ),
-        (
-            "[job 91041814602]"
-            f"({actions_base}/30593858167/job/91041814602)"
-        ),
-        (
-            "[job 91042106744]"
-            f"({actions_base}/30593858167/job/91042106744)"
-        ),
-        (
-            "The superseded local exact activation gate covered 29 capture "
-            "contracts, `capture_manifest_valid`, 19 web test files / 369 tests "
-            "and TypeScript/Vite, Ruff, strict MyPy over 35 source files"
-        ),
-    ):
-        assert (
-            required_task34_fact in normalized_task34_history
-        ), f"Task34 historical facts: missing {required_task34_fact}"
-    expected_history_headings = (
-        task34_heading,
-        task33_heading,
-        "### SQLite-permission capture and hosted baselines (superseded)",
-        "### JSON-media capture and hosted baselines (superseded)",
-        "### Terminal-retry capture and hosted baselines (superseded)",
-        "### Async SQLite capture and hosted baseline (superseded)",
-        "### Request-boundary capture and hosted baseline (superseded)",
-        "### Immediate prior capture and hosted baseline (superseded)",
-        "### Prior capture and hosted baseline (superseded)",
-        "### Older hosted baseline (superseded)",
-    )
-    assert tuple(
-        line for line in historical_evidence.splitlines() if line.startswith("### ")
-    ) == expected_history_headings, "older history section order"
-
-    expected_historical_url_suffixes = (
-        (
-            "30593858167",
-            "30593858167/job/91041814602",
-            "30593858167/job/91042106744",
-            "30594431983",
-            "30594431983/job/91043601366",
-            "30594431983/job/91043886907",
-        ),
-        (
-            "30591690973",
-            "30591690973/job/91035189804",
-            "30591690973/job/91035490238",
-            "30592336018",
-            "30592336018/job/91037154486",
-            "30592336018/job/91037472406",
-        ),
-        (
-            "30588357735",
-            "30588357735/job/91024909140",
-            "30588357735/job/91025281220",
-            "30589435325",
-            "30589435325/job/91028250060",
-            "30589435325/job/91028596793",
-        ),
-        (
-            "30501109833",
-            "30501109833/job/90740755548",
-            "30501109833/job/90741063564",
-            "30501426777",
-            "30501426777/job/90741727313",
-            "30501426777/job/90742037347",
-        ),
-        (
-            "30499178838",
-            "30499178838/job/90734790003",
-            "30499178838/job/90735121608",
-            "30499500934",
-            "30499500934/job/90735804461",
-            "30499500934/job/90736149754",
-        ),
-        (
-            "30208188300",
-            "30208188300/job/89809811619",
-            "30208188300/job/89809998273",
-        ),
-        (
-            "30182741263",
-            "30182741263/job/89742014836",
-            "30182741263/job/89742159778",
-        ),
-        (
-            "30174822102",
-            "30174822102/job/89721793096",
-            "30174822102/job/89721989116",
-        ),
-        (
-            "30162644778",
-            "30162644778/job/89690352979",
-            "30162644778/job/89690513333",
-        ),
-        (
-            "30140554792",
-            "30140554792/job/89632837699",
-            "30140554792/job/89633002245",
-        ),
-    )
-    for index, heading in enumerate(expected_history_headings):
-        section = historical_evidence.split(heading, maxsplit=1)[1]
-        if index + 1 < len(expected_history_headings):
-            section = section.split(expected_history_headings[index + 1], maxsplit=1)[
-                0
-            ]
-        observed_suffixes = tuple(
-            url.split("/actions/runs/", maxsplit=1)[1]
-            for url in re.findall(
-                r"https://github\.com/[^)\s]+/actions/runs/\d+(?:/job/\d+)?",
-                section,
-            )
-        )
-        assert (
-            observed_suffixes == expected_historical_url_suffixes[index]
-        ), f"older history ordered Actions bindings: {heading}"
-
-    task32_heading = expected_history_headings[2]
-    task32_end_heading = expected_history_headings[3]
-    task32_history = historical_evidence.split(task32_heading, maxsplit=1)[1].split(
-        task32_end_heading,
-        maxsplit=1,
-    )[0]
-    normalized_task32_history = " ".join(task32_history.split())
-    for required_task32_fact in (
-        (
-            "pre-CI documentation successor "
-            "`c6c60d4354eba7348aef3245d19e787661544fa7`"
-        ),
-        (
-            "[job 91024909140]"
-            f"({actions_base}/30588357735/job/91024909140)"
-        ),
-        (
-            "[job 91025281220]"
-            f"({actions_base}/30588357735/job/91025281220)"
-        ),
-        (
-            "Both pre-CI jobs passed and both pre-CI job annotation APIs "
-            "returned `[]`"
-        ),
-        (
-            "Prior final documentation tip: "
-            "`abdf644b4c35ecfaee2d22917c4c621f9d123a5b`"
-        ),
-        (
-            "[job 91028250060]"
-            f"({actions_base}/30589435325/job/91028250060)"
-        ),
-        (
-            "[job 91028596793]"
-            f"({actions_base}/30589435325/job/91028596793)"
-        ),
-        (
-            "Both final-tip jobs passed and both final-tip job annotation APIs "
-            "returned `[]`"
-        ),
-        (
-            "Final-tip hosted `verify` covered `capture_manifest_valid`, 19 web "
-            "test files / 345 tests, Ruff, strict MyPy over 35 source files, "
-            "796 Python tests"
-        ),
-        (
-            "Both prior `container-smoke` jobs built the packaged image with "
-            "owner-only `/data` mode `0700`, confirmed runtime user `10001:10001`, "
-            "and passed the offline network-none `deterministic-qa` and "
-            "`deployed-readonly` profiles"
-        ),
-    ):
-        assert (
-            required_task32_fact in normalized_task32_history
-        ), f"older history semantic facts: missing Task32 fact {required_task32_fact}"
-
-    for required_older_fact in (
-        "84af413c3a7833daa635e6a0b84e8f331cc1f7f2",
-        "884 Python tests with 1 warning in 43.91s",
-        "a8057a8e0c29bdcc95e35949819c64005e5ee064",
-        "778 / 778 Python tests with 3 warnings in 28.51s",
-        "796 Python tests",
-        "c446f05adfb836539ddbaa74a41502034c910092",
-        "120-test client matrix",
-        "695 Python tests with 3 warnings in 179.85s",
-        "96543fff62bb5d0a3c0f8a0464e9a07bf9c54568",
-        "8d0a896c753c4c60894301a20a3866bbbfa1e76f",
-        "8823d29d7de93d44f4843a2fa4db1adec4e452bd",
-        "742e3caf2af5a9cce3cd8de242cf113424e8528f",
-        "7d9128a8171ddb4978d8f7b0debb9effce997e27",
-        "b57868005a3fe0869136f54472ee0098035a9099",
-        (
-            "pre-CI documentation successor "
-            "`c6c60d4354eba7348aef3245d19e787661544fa7`"
-        ),
-        (
-            "[job 91024909140]"
-            f"({actions_base}/30588357735/job/91024909140)"
-        ),
-        (
-            "[job 91025281220]"
-            f"({actions_base}/30588357735/job/91025281220)"
-        ),
-        (
-            "Prior final documentation tip: "
-            "`abdf644b4c35ecfaee2d22917c4c621f9d123a5b`"
-        ),
-        (
-            "[job 91028250060]"
-            f"({actions_base}/30589435325/job/91028250060)"
-        ),
-        (
-            "[job 91028596793]"
-            f"({actions_base}/30589435325/job/91028596793)"
-        ),
-        (
-            "Both pre-CI jobs passed and both pre-CI job annotation APIs "
-            "returned `[]`"
-        ),
-        (
-            "Both final-tip jobs passed and both final-tip job annotation APIs "
-            "returned `[]`"
-        ),
-        "Final-tip hosted `verify` covered `capture_manifest_valid`, 19 web test files",
-        "796 Python tests",
-        (
-            "Both prior `container-smoke` jobs built the packaged image with "
-            "owner-only `/data` mode `0700`, confirmed runtime user `10001:10001`, "
-            "and passed the offline network-none `deterministic-qa` and "
-            "`deployed-readonly` profiles"
-        ),
-    ):
-        assert (
-            required_older_fact in normalized_historical_evidence
-        ), f"older history semantic facts: missing {required_older_fact}"
-
-    for forbidden_history_text in (
-        "not current Task29",
-        "not current Task28",
-        "not current Task25",
-        "The pre-CI verify job failed.",
-        "The final container-smoke job was skipped.",
-        "The hosted verify gate covered 344 web tests.",
-        "The final hosted gate covered 795 Python tests.",
-        "The local exact gate completed in 29.51s.",
-    ):
-        assert (
-            forbidden_history_text not in historical_evidence
-        ), f"older history semantic contract: {forbidden_history_text}"
-
-    sqlite_heading = "## SQLite file-permission proof boundary"
-    sqlite_end_heading = "## JSON response media proof boundary"
-    sqlite_evidence = current_evidence.split(sqlite_heading, maxsplit=1)[1].split(
-        sqlite_end_heading,
-        maxsplit=1,
-    )[0]
-    normalized_sqlite_evidence = " ".join(sqlite_evidence.split())
-    for sqlite_fact in (
-        "owner-only `0600` regular files",
-        "Constructor-time initialization is the only lane allowed to harden",
-        "connection and readiness checks are nonmutating and fail closed instead "
-        "of repairing permission drift",
-        "URI with `mode=rw`",
-        "Unsupported POSIX capabilities",
-        "unexpected owner",
-        "unprotected directory ancestry",
-        "changed device/inode identity",
-        "insecure database or sidecar permissions all fail closed",
-        "owner-only `0700`",
-        "23 focused tests",
-    ):
-        assert (
-            sqlite_fact in normalized_sqlite_evidence
-        ), f"SQLite permission semantic contract: missing {sqlite_fact}"
-
-    media_heading = "## JSON response media proof boundary"
-    media_end_heading = "## Terminal evidence retry proof boundary"
-    media_evidence = current_evidence.split(media_heading, maxsplit=1)[1].split(
-        media_end_heading,
-        maxsplit=1,
-    )[0]
-    normalized_media_evidence = " ".join(media_evidence.split())
-    for media_fact in (
-        "exactly one `Content-Type` field",
-        "case-insensitive `application/json` media type",
-        "valid no-comma token or quoted-string parameters",
-        "missing, wrong, malformed, comma-joined, duplicate parameters, and "
-        "split-quote values",
-        "cancels the unlocked wrong-media response body without waiting",
-        "typed IDs, fallback, retry metadata, and provenance remain inactive",
-        "SSE behavior is unchanged",
-        "ordinary `500` handling and the Task30 exact `503` retry contract remain "
-        "preserved",
-    ):
-        assert (
-            media_fact in normalized_media_evidence
-        ), f"JSON media semantic contract: missing {media_fact}"
-
-    retry_heading = "## Terminal evidence retry proof boundary"
-    retry_end_heading = "## Async SQLite proof boundary"
-    retry_evidence = current_evidence.split(retry_heading, maxsplit=1)[1].split(
-        retry_end_heading,
-        maxsplit=1,
-    )[0]
-    normalized_retry_evidence = " ".join(retry_evidence.split())
-    for retry_fact in (
-        "HTTP `503`, code `internal_error`, `recoveryId` equal to the requested "
-        "recovery UUID, `retryAfterSeconds: 1`, `fallback: null`, a matching "
-        "`Retry-After: 1` header, and `application/json` media",
-        "Null, foreign, or substituted recovery IDs",
-        "malformed status, header, body, or media fail closed",
-        "one initial authoritative read pair plus exactly three one-second "
-        "automatic retries",
-        "one accessible manual retry begins a fresh equally bounded "
-        "initial-plus-three cycle",
-        "already verified snapshot, receipt, event, and cursor state remains visible",
-        "No POST, create, decision, reset, or fallback request is issued by either "
-        "automatic or manual terminal evidence retry",
-    ):
-        assert (
-            retry_fact in normalized_retry_evidence
-        ), f"terminal retry semantic contract: missing {retry_fact}"
-    current_evidence_lines = tuple(
-        line.strip() for line in current_evidence.splitlines() if line.strip()
-    )
-    hosted_scope_pattern = re.compile(
-        r"\b(?:CI|GitHub\s+Actions|workflow|verify\s+job|canonical|backend|"
-        r"container(?:-smoke|\s+smoke|\s+job)?|packaged\s+Docker|"
-        r"public\s+deployment|live\s+OpenAI|provider|release|docs-tip)\b",
-        flags=re.IGNORECASE,
-    )
-    expected_current_scope_lines = (
-        "container, live OpenAI, deployment, or release evidence.",
-        "- The exact local canonical gate on final evidence activation",
-        "`60fe1243a5eeb760984d78d667f7efdc33630adc` and GitHub Actions",
-        "exactly one observed annotation; `container-smoke`",
-        "reported `SKIPPED`, with container annotations `[]`.",
-        "- Final evidence activation GitHub Actions",
-        "canonical gate, deterministic stub smoke, OpenAPI verification, and the",
-        "history-aware secret scan. `container-smoke`",
-        "documentation-tip CI for the resulting documentation successor remains",
-        "- There is no current Task35 live OpenAI, public deployment, tag, or release",
-        "runs or prove a real provider mutation.",
-        (
-            "| Local source and tests | Exact final evidence activation canonical "
-            "gate on `6533a3f…`: 29 capture contracts, manifest verification, 19 web "
-            "files / 369 tests, build, Ruff, strict MyPy over 35 files, and 957 "
-            "Python tests | **Verified locally** in the exact named lanes |"
-        ),
-        (
-            "| Local final-build captures | "
-            "[`docs/assets/final/manifest.json`](assets/final/manifest.json); six "
-            "provenance-checked PNGs under [`docs/assets/final`](assets/final) | "
-            "**Local capture evidence only** on source `21d9b0f…` in Google Chrome "
-            "at 1440×1024 and 390×844; not container, deployment, live OpenAI, or "
-            "release proof |"
-        ),
-        (
-            "| Live OpenAI | Three-run command stopped at "
-            "`missing_openai_api_key` after attempt 1 of 3, with zero approvals and "
-            "no model IDs, tools, or root trace | **Blocked / Unverified**; three "
-            "live runs did not execute |"
-        ),
-        (
-            "| GitHub CI/container | Final activation `6533a3f…`; run `30598406930`; "
-            "`verify` job `91055708186` = `PASS`; `container-smoke` job "
-            "`91055968348` = `PASS`; both annotation APIs `[]` | **Verified for the "
-            "exact hosted canonical and packaged-container smoke lanes**; final "
-            "docs-tip CI remains pending within that activation lane |"
-        ),
-        (
-            "| Public deployment | No public application origin | **Blocked / "
-            "Unverified** |"
-        ),
-        (
-            "| Tag/release | No release tag or GitHub release | **Blocked / "
-            "Unverified** |"
-        ),
-        "## Hosted container evidence boundary",
-        "The final activation passed the exact hosted canonical lane and packaged",
-        "container smoke lane. The container job built the packaged image, confirmed",
-        "Docker, browser capture in CI, public deployment or browser URL, live OpenAI,",
-        "real provider execution, container replacement or restart durability beyond",
-        "durability/networking, abrupt host loss or backup, concurrent multi-container",
-        "SQLite, final documentation-tip CI, tag, or release.",
-        "nonproof: `verify` failed and `container-smoke` was skipped. The successful",
-        "hosted activation lane, only final docs-tip CI remains pending. Live OpenAI,",
-        "public deployment, local Docker, tag, and release remain separate blocked or",
-        "unverified lanes. The browser capture remained local; CI did not execute the",
-        (
-            "added the captured files. CI did not execute the browser capture. The "
-            "six images"
-        ),
-        "OpenAI, a public deployment, a container, a release, or a real provider",
-        (
-            "container-replacement, abrupt-host-loss, or concurrent "
-            "multi-container SQLite proof."
-        ),
-        "checkpoint. The current Task35 activation verifies only its exact canonical and",
-        (
-            "offline container-smoke profiles; it does not prove multi-process or "
-            "concurrent"
-        ),
-        (
-            "multi-container SQLite, target-host scheduling, abrupt host loss, "
-            "public latency,"
-        ),
-        "or live provider behavior.",
-        (
-            "`21d9b0f…` and is not public deployment, live OpenAI, container-host "
-            "durability, tag,"
-        ),
-        "or release proof.",
-        (
-            "route-gate release, retained admission charges, exact public "
-            "`504 live_timeout`"
-        ),
-        (
-            "envelopes, retryable approve/decline claims, and no duplicate dispatch "
-            "when provider"
-        ),
-        "process-termination proof, public deployment, or release claim.",
-    )
-    observed_current_scope_lines = tuple(
-        line for line in current_evidence_lines if hosted_scope_pattern.search(line)
-    )
-    assert (
-        observed_current_scope_lines == expected_current_scope_lines
-    ), "current hosted provenance and scope allowlist"
-
-    positive_word_pattern = re.compile(
-        r"\b(?:pass|passed|passing|green|healthy|clean|cleanly|clear|"
-        r"succeed|succeeded|succeeding|success|successful|successfully|verified|"
-        r"validat(?:e|ed|es|ing)|confirm(?:ed|s|ing)?|ok|complete(?:d|ly)?|"
-        r"operational|live|approv(?:e|ed|ing)|prov(?:e|ed|en|ing)|works?|good|"
-        r"done|ready|red-free)\b"
-        r"|\b(?:completed|finished)\s+(?:cleanly|successfully)\b"
-        r"|\bwithout\s+(?:any\s+)?(?:failures?|errors?)\b"
-        r"|\b(?:no|zero)\s+(?:failures?|errors?)\b"
-        r"|\b(?:failure|error)-free\b"
-        r"|\b(?:returned\s+)?exit(?:\s+code)?\s*(?:[:=]\s*)?0\b"
-        r"|\bstatus\s*(?:[:=]\s*)?0\b",
-        flags=re.IGNORECASE,
-    )
-    expected_current_positive_lines = (
-        "container, live OpenAI, deployment, or release evidence.",
-        "- `npm run test:e2e` reported `29 passed` against the clean capture source",
-        "combined before/after review across all six images passed with no P0-P3",
-        "- The focused transition-marker gate then passed with `3 passed, 17 deselected`;",
-        "the whole Task7 migration suite passed with `20 passed`.",
-        "- The full Python suite passed with `951 passed`, 3 warnings, in 24.57s. Ruff,",
-        "strict MyPy on `server/store.py`, and the diff check passed.",
-        "- Independent Task35 specification and quality reviews passed with no P0-P3",
-        "`957 passed`, 3 warnings, in 25.36s.",
-        "- The local deterministic stub smoke reported `PASS`. The local production",
-        "`deterministic-qa` smoke reported `PASS` for health, readiness, session",
-        "verification and the history-aware secret scan also reported `PASS`.",
-        "- The live three-run command remained blocked at its",
-        "live runs.",
-        "reported `FAILURE` with `1 failed, 950 passed, 1 warning` in 41.89s and",
-        "passed the exact named hosted lanes. `verify`",
-        "reported `PASS` with `957 passed, 1 warning` in 46.45s and covered the",
-        "reported `PASS`, built the packaged image, confirmed runtime user",
-        "`10001:10001`, and passed the offline network-none `deterministic-qa` and",
-        "On modern schemas, clearing the sole `terminal = 1` marker for a completed",
-        "the foreign-key check was empty and the integrity check returned `ok`.",
-        "- There is no current Task35 live OpenAI, public deployment, tag, or release",
-        "proof or claim. The blocked missing-key attempt did not execute three live",
-        "runs or prove a real provider mutation.",
-        (
-            "| Local source and tests | Exact final evidence activation canonical "
-            "gate on `6533a3f…`: 29 capture contracts, manifest verification, 19 web "
-            "files / 369 tests, build, Ruff, strict MyPy over 35 files, and 957 "
-            "Python tests | **Verified locally** in the exact named lanes |"
-        ),
-        (
-            "| Local final-build captures | "
-            "[`docs/assets/final/manifest.json`](assets/final/manifest.json); six "
-            "provenance-checked PNGs under [`docs/assets/final`](assets/final) | "
-            "**Local capture evidence only** on source `21d9b0f…` in Google Chrome "
-            "at 1440×1024 and 390×844; not container, deployment, live OpenAI, or "
-            "release proof |"
-        ),
-        (
-            "| Live OpenAI | Three-run command stopped at "
-            "`missing_openai_api_key` after attempt 1 of 3, with zero approvals and "
-            "no model IDs, tools, or root trace | **Blocked / Unverified**; three "
-            "live runs did not execute |"
-        ),
-        (
-            "| GitHub CI/container | Final activation `6533a3f…`; run `30598406930`; "
-            "`verify` job `91055708186` = `PASS`; `container-smoke` job "
-            "`91055968348` = `PASS`; both annotation APIs `[]` | **Verified for the "
-            "exact hosted canonical and packaged-container smoke lanes**; final "
-            "docs-tip CI remains pending within that activation lane |"
-        ),
-        "The final activation passed the exact hosted canonical lane and packaged",
-        "container smoke lane. The container job built the packaged image, confirmed",
-        "runtime user `10001:10001`, and passed only the offline network-none",
-        "`deterministic-qa` and `deployed-readonly` profiles. This does not prove local",
-        "Docker, browser capture in CI, public deployment or browser URL, live OpenAI,",
-        "nonproof: `verify` failed and `container-smoke` was skipped. The successful",
-        "hosted activation lane, only final docs-tip CI remains pending. Live OpenAI,",
-        "validates API and DOM provenance before each viewport screenshot.",
-        (
-            "was produced against the clean source SHA, and the capture activation "
-            "successor"
-        ),
-        (
-            "prove only the local keyless SDK-stub final build; they do not prove "
-            "live"
-        ),
-        "different clean frozen tree.",
-        (
-            "cases prove these source-level parser boundaries; the screenshots do "
-            "not prove"
-        ),
-        (
-            "fresh equally bounded initial-plus-three cycle. Throughout retry, "
-            "already verified"
-        ),
-        (
-            "The ordinary final-state screenshots do not prove transient store "
-            "failure, retry"
-        ),
-        (
-            "offline container-smoke profiles; it does not prove multi-process or "
-            "concurrent"
-        ),
-        "or live provider behavior.",
-        (
-            "are source and raw-ASGI contract properties. The six screenshots do "
-            "not prove"
-        ),
-        (
-            "second/third write failure, validation-before-charge, live-ledger "
-            "separation, reset"
-        ),
-        (
-            "`21d9b0f…` and is not public deployment, live OpenAI, container-host "
-            "durability, tag,"
-        ),
-        "## Live deadline proof boundary",
-        "The source contract bounds the complete live pre-approval graph and each live",
-        (
-            "envelopes, retryable approve/decline claims, and no duplicate dispatch "
-            "when provider"
-        ),
-        (
-            "execution committed before the timeout. The OpenAI client and the "
-            "redacted live-smoke"
-        ),
-    )
-    observed_current_positive_lines = tuple(
-        line for line in current_evidence_lines if positive_word_pattern.search(line)
-    )
-    assert (
-        observed_current_positive_lines == expected_current_positive_lines
-    ), "current positive allowlist"
-
-    assert browser == {
-        "name": "Google Chrome",
-        "version": "150.0.7871.187",
-        "channel": "chrome",
-        "headless": True,
-    }, "manifest browser contract"
-    assert environment == {
-        "locale": "en-US",
-        "timezone": "UTC",
-        "reducedMotion": "reduce",
-        "colorScheme": "light",
-    }, "manifest environment contract"
-    assert manifest["schemaVersion"] == 1, "manifest schema contract"
-    assert len(runtime_input["paths"]) == 84, "manifest runtime paths contract"
-    assert runtime_input["paths"] == sorted(
-        runtime_input["paths"]
-    ), "manifest runtime paths contract"
-    assert len(runtime_input["paths"]) == len(
-        set(runtime_input["paths"])
-    ), "manifest runtime paths contract"
-    assert tuple(
-        (
-            item["filename"],
-            item["sha256"],
-            item["state"],
-            item["scenarioId"],
-            item["executionMode"],
-            item["width"],
-            item["height"],
-        )
-        for item in artifacts
-    ) == (
-        (
-            "desktop-consent.png",
-            "acdf50fb67c38b8108adf86424a53e6940046ae4588aef11549341d0e8b02f73",
-            "consent",
-            "hotel",
-            "sdk_stub",
-            1440,
-            1024,
-        ),
-        (
-            "desktop-completed.png",
-            "b7b5af1c26598ac6ae1496acff082b75a320e53fdaadfd8e17064e3e8e34315e",
-            "completed",
-            "hotel",
-            "sdk_stub",
-            1440,
-            1024,
-        ),
-        (
-            "desktop-declined.png",
-            "da3a0e5f030e418c93aef79d80092f1f4054d57bab9cee0a697a4a8a5d5957f2",
-            "declined",
-            "hotel",
-            "sdk_stub",
-            1440,
-            1024,
-        ),
-        (
-            "mobile-consent.png",
-            "654d6ea317bd132489d7369df9699ccf7cdd0d420829a47a75e65204201dfcb8",
-            "consent",
-            "hotel",
-            "sdk_stub",
-            390,
-            844,
-        ),
-        (
-            "mobile-completed.png",
-            "d2b629ee3e61314db3d525005bd566ff7af70ae90c7e036a66ec1de4fbe3a628",
-            "completed",
-            "hotel",
-            "sdk_stub",
-            390,
-            844,
-        ),
-        (
-            "mobile-declined.png",
-            "3c0ddc7b6c9b8bb529f9090b5079cc10690d1d6171524c09deea32967b1a1058",
-            "declined",
-            "hotel",
-            "sdk_stub",
-            390,
-            844,
-        ),
-    ), "manifest artifacts contract"
 
 @pytest.mark.parametrize(
     "superseded_identifier",
@@ -1438,49 +156,14 @@ def test_validation_rejects_superseded_provenance_in_current_evidence(
         1,
     )
 
-    with pytest.raises(AssertionError, match="superseded provenance exclusion"):
-        _assert_validation_matches_current_capture(polluted_validation)
-
-
-@pytest.mark.parametrize(
-    "history_heading",
-    (
-        "### Task34 terminal-snapshot capture and hosted baselines (superseded)",
-        "### Client-terminal capture and hosted baselines (superseded)",
-    ),
-)
-@pytest.mark.parametrize(
-    "current_identifier",
-    (
-        "21d9b0f8dbeb59454e3f3b3d3d9138af28af02ad",
-        "21d9b0f…",
-        "60fe1243a5eeb760984d78d667f7efdc33630adc",
-        "60fe124…",
-        "6533a3f2e212d9a7c4e1af9f1d2dd77f7bd45a18",
-        "6533a3f…",
-        "eabc2743f9475e384fe7a49344f42a9635d2f57277f788708d23425edd845385",
-        "eabc274…",
-    ),
-)
-def test_validation_current_identifier_loop_rejects_history_body_leakage(
-    history_heading: str,
-    current_identifier: str,
-) -> None:
-    validation = _read("docs/validation.md")
-    historical_heading = "## Superseded historical hosted baseline"
-    polluted_validation = validation.replace(
-        history_heading,
-        f"{history_heading}\n\nInjected current provenance: {current_identifier}",
-        1,
-    )
-    polluted_history = polluted_validation.split(historical_heading, maxsplit=1)[1]
-    task34_heading = (
-        "### Task34 terminal-snapshot capture and hosted baselines (superseded)"
-    )
-    assert polluted_history.split(task34_heading, maxsplit=1)[0].strip() == ""
-    assert current_identifier in polluted_history.split(history_heading, maxsplit=1)[1]
-
-    with pytest.raises(AssertionError, match="current historical identifier exclusion"):
+    with pytest.raises(
+        AssertionError,
+        match=(
+            r"(?:superseded provenance exclusion|"
+            r"provenance token allowlist|"
+            r"Actions provenance identifier allowlist)"
+        ),
+    ):
         _assert_validation_matches_current_capture(polluted_validation)
 
 
@@ -1488,20 +171,13 @@ def test_validation_current_identifier_loop_rejects_history_body_leakage(
     "unexpected_current_claim",
     (
         "- Hosted validation successor:\n  `deadbeefdeadbeefdeadbeefdeadbeefdeadbeef`",
-        (
-            "- GitHub Actions:\n"
-            "  [run 999999](https://github.com/example/repo/actions/runs/999999)"
-        ),
+        ("- GitHub Actions:\n  [run 999999](https://github.com/example/repo/actions/runs/999999)"),
         (
             "- Result: `verify`\n"
             "  ([job 999998](https://github.com/example/repo/actions/runs/"
             "999999/job/999998)) reported `PASS`."
         ),
-        (
-            "- GitHub Actions:\n"
-            "  [run 999999]"
-            "(https://github.com/example/repo/actions/runs/999999)"
-        ),
+        ("- GitHub Actions:\n  [run 999999](https://github.com/example/repo/actions/runs/999999)"),
         (
             "- Result: `verify`\n"
             "  ([job 999998](https://github.com/example/repo/actions/runs/"
@@ -1523,7 +199,11 @@ def test_validation_rejects_unexpected_current_hosted_provenance(
 
     with pytest.raises(
         AssertionError,
-        match="current hosted provenance",
+        match=(
+            r"(?:current hosted provenance|Actions Markdown label binding|"
+            r"provenance token allowlist|current (?:hosted provenance and "
+            r"scope|positive) allowlist)"
+        ),
     ):
         _assert_validation_matches_current_capture(polluted_validation)
 
@@ -1560,9 +240,7 @@ def test_validation_rejects_task34_historical_hosted_fact_mutation(
     replacement: str,
 ) -> None:
     validation = _read("docs/validation.md")
-    hosted_heading = (
-        "### Task34 terminal-snapshot capture and hosted baselines (superseded)"
-    )
+    hosted_heading = "### Task34 terminal-snapshot capture and hosted baselines (superseded)"
     hosted_end_heading = "### Client-terminal capture and hosted baselines (superseded)"
     hosted_evidence = validation.split(hosted_heading, maxsplit=1)[1].split(
         hosted_end_heading,
@@ -1581,18 +259,19 @@ def test_validation_rejects_task34_historical_hosted_fact_mutation(
         1,
     )
 
-    with pytest.raises(
-        AssertionError,
-        match=r"Task34 (?:ordered Actions bindings|historical facts)",
-    ):
+    expected_guard = (
+        r"(?:provenance token allowlist|"
+        r"Task34 (?:ordered Actions bindings|historical facts))"
+    )
+    if original.isdigit():
+        expected_guard = rf"(?:Actions Markdown label binding|{expected_guard})"
+    with pytest.raises(AssertionError, match=expected_guard):
         _assert_validation_matches_current_capture(polluted_validation)
 
 
 def test_validation_rejects_swapped_task34_hosted_job_bindings() -> None:
     validation = _read("docs/validation.md")
-    hosted_heading = (
-        "### Task34 terminal-snapshot capture and hosted baselines (superseded)"
-    )
+    hosted_heading = "### Task34 terminal-snapshot capture and hosted baselines (superseded)"
     hosted_end_heading = "### Client-terminal capture and hosted baselines (superseded)"
     hosted_evidence = validation.split(hosted_heading, maxsplit=1)[1].split(
         hosted_end_heading,
@@ -1611,7 +290,13 @@ def test_validation_rejects_swapped_task34_hosted_job_bindings() -> None:
         1,
     )
 
-    with pytest.raises(AssertionError, match="Task34 ordered Actions bindings"):
+    with pytest.raises(
+        AssertionError,
+        match=(
+            r"(?:Actions Markdown label binding|"
+            r"Task34 ordered Actions bindings)"
+        ),
+    ):
         _assert_validation_matches_current_capture(polluted_validation)
 
 
@@ -1719,8 +404,7 @@ def test_validation_rejects_generic_positive_after_json_media_section(
             "Pre-CI annotations were not inspected",
         ),
         (
-            "Both final-tip jobs passed and both final-tip job annotation APIs "
-            "returned `[]`",
+            "Both final-tip jobs passed and both final-tip job annotation APIs returned `[]`",
             "Final-tip annotations were not inspected",
         ),
         ("796 Python tests", "795 Python tests"),
@@ -1756,10 +440,13 @@ def test_validation_rejects_task32_historical_fact_mutation(
         1,
     )
 
-    with pytest.raises(
-        AssertionError,
-        match=r"older history (?:ordered Actions bindings|semantic facts)",
-    ):
+    expected_guard = (
+        r"(?:provenance token allowlist|"
+        r"older history (?:ordered Actions bindings|semantic facts))"
+    )
+    if original.isdigit():
+        expected_guard = rf"(?:Actions Markdown label binding|{expected_guard})"
+    with pytest.raises(AssertionError, match=expected_guard):
         _assert_validation_matches_current_capture(polluted_validation)
 
 
@@ -1838,7 +525,10 @@ def test_validation_rejects_swapped_task32_historical_job_bindings() -> None:
 
     with pytest.raises(
         AssertionError,
-        match="older history ordered Actions bindings",
+        match=(
+            r"(?:Actions Markdown label binding|"
+            r"older history ordered Actions bindings)"
+        ),
     ):
         _assert_validation_matches_current_capture(polluted_validation)
 
@@ -1915,6 +605,2340 @@ def test_validation_rejects_generic_current_positive_claims(
         _assert_validation_matches_current_capture(polluted_validation)
 
 
+TASK36_FEATURE_SOURCE = "9239410042de1477c15bdf1a4c72fb1bf00dd831"
+TASK36_CAPTURE_SOURCE = "a01f0a361f2c45f762496a0c6af298a4473fde96"
+TASK36_CAPTURE_COMMIT = "1030d197ce2801be2abe17bea43522a97736adb8"
+TASK36_RUNTIME_DIGEST = "168e315936fe58a2f2371c0122dbf0c5d5a4f0be93f7f2a1021e4f84dd90a6f4"
+TASK36_CURRENT_DIGEST = "045e22ebba86886a986be343370738cd6d24d1f427a6c5d4d10e5ae40f5157ac"
+TASK35_HISTORY_DIGEST = "9ca719ab22ff4aa4de79288f2a1ce70c403b59cb464d72061394fdc76eef0cc4"
+OLDER_HISTORY_DIGEST = "1cb4d31a3ffc3132fdaf7321f30fd1e5761b20436e1da28c082d6424a3d98d4e"
+TASK34_HISTORY_DIGEST = "86d6128f55b21219641cd1b4f62da4a4567a352557b7ef9f30755c30dea71d7c"
+TASK32_HISTORY_DIGEST = "0ce4b9e4e486b50b24bb3e05fd22746c7b86b5f29dd0266234736232728e900c"
+HISTORICAL_HEADING = "## Superseded historical hosted baseline"
+TASK35_HEADING = "### Task35 terminal-marker capture and hosted baselines (superseded)"
+TASK34_HEADING = "### Task34 terminal-snapshot capture and hosted baselines (superseded)"
+
+ACTIONS_BASE = "https://github.com/charlie2233/backchannel-agent-support/actions/runs"
+ALLOWED_ACTION_RUNS = (
+    ("30606996966", "91081238197", "91081310037"),
+    ("30607860082", "91083947213", "91084012386"),
+    ("30608202642", "91084965375", "91085278851"),
+    ("30595724271", "91047571247", "91047810594"),
+    ("30598406930", "91055708186", "91055968348"),
+    ("30603151491", "91069887646", "91070162086"),
+    ("30593858167", "91041814602", "91042106744"),
+    ("30594431983", "91043601366", "91043886907"),
+    ("30591690973", "91035189804", "91035490238"),
+    ("30592336018", "91037154486", "91037472406"),
+    ("30588357735", "91024909140", "91025281220"),
+    ("30589435325", "91028250060", "91028596793"),
+    ("30501109833", "90740755548", "90741063564"),
+    ("30501426777", "90741727313", "90742037347"),
+    ("30499178838", "90734790003", "90735121608"),
+    ("30499500934", "90735804461", "90736149754"),
+    ("30208188300", "89809811619", "89809998273"),
+    ("30182741263", "89742014836", "89742159778"),
+    ("30174822102", "89721793096", "89721989116"),
+    ("30162644778", "89690352979", "89690513333"),
+    ("30140554792", "89632837699", "89633002245"),
+)
+ALLOWED_ACTION_REFERENCE_IDS = (
+    "30606996966",
+    "91081238197",
+    "91081310037",
+    "30607860082",
+    "91083947213",
+    "91084012386",
+    "30608202642",
+    "91084965375",
+    "91085278851",
+    "30595724271",
+    "91047571247",
+    "91047810594",
+    "30598406930",
+    "91055708186",
+    "91055968348",
+    "30603151491",
+    "91069887646",
+    "91070162086",
+    "30603151491",
+    "91069887646",
+    "91070162086",
+    "30595724271",
+    "30593858167",
+    "91041814602",
+    "91042106744",
+    "30594431983",
+    "91043601366",
+    "91043886907",
+    "30591690973",
+    "91035189804",
+    "91035490238",
+    "30592336018",
+    "91037154486",
+    "91037472406",
+    "30588357735",
+    "91024909140",
+    "91025281220",
+    "30589435325",
+    "91028250060",
+    "91028596793",
+    "30501109833",
+    "90740755548",
+    "90741063564",
+    "30501426777",
+    "90741727313",
+    "90742037347",
+    "30499178838",
+    "90734790003",
+    "90735121608",
+    "30499500934",
+    "90735804461",
+    "90736149754",
+    "30208188300",
+    "89809811619",
+    "89809998273",
+    "30182741263",
+    "89742014836",
+    "89742159778",
+    "30174822102",
+    "89721793096",
+    "89721989116",
+    "30162644778",
+    "89690352979",
+    "89690513333",
+    "30140554792",
+    "89632837699",
+    "89633002245",
+)
+ALLOWED_ACTION_MARKDOWN_BINDINGS = tuple(
+    binding
+    for run_id, verify_job_id, container_job_id in ALLOWED_ACTION_RUNS
+    for binding in (
+        ("run", run_id, f"{ACTIONS_BASE}/{run_id}"),
+        (
+            "job",
+            verify_job_id,
+            f"{ACTIONS_BASE}/{run_id}/job/{verify_job_id}",
+        ),
+        (
+            "job",
+            container_job_id,
+            f"{ACTIONS_BASE}/{run_id}/job/{container_job_id}",
+        ),
+    )
+)
+ALLOWED_ACTION_URLS = tuple(url for _kind, _label_id, url in ALLOWED_ACTION_MARKDOWN_BINDINGS)
+ALLOWED_PROVENANCE_TOKEN_OCCURRENCES = (
+    "9239410042de1477c15bdf1a4c72fb1bf00dd831",
+    "a01f0a361f2c45f762496a0c6af298a4473fde96",
+    "1030d197ce2801be2abe17bea43522a97736adb8",
+    "9239410…",
+    "a01f0a3…",
+    "1030d19…",
+    "a01f0a361f2c45f762496a0c6af298a4473fde96",
+    "168e315936fe58a2f2371c0122dbf0c5d5a4f0be93f7f2a1021e4f84dd90a6f4",
+    "9239410…",
+    "a01f0a3…",
+    "1030d19…",
+    "168e315…",
+    "a01f0a3…",
+    "a01f0a3…",
+    "21d9b0f8dbeb59454e3f3b3d3d9138af28af02ad",
+    "60fe1243a5eeb760984d78d667f7efdc33630adc",
+    "6533a3f2e212d9a7c4e1af9f1d2dd77f7bd45a18",
+    "6533a3f2e212d9a7c4e1af9f1d2dd77f7bd45a18",
+    "60fe1243a5eeb760984d78d667f7efdc33630adc",
+    "6cbafce70fa1ea60cf00e315062e4e14a5ffb934",
+    "6533a3f…",
+    "21d9b0f…",
+    "6cbafce…",
+    "eabc2743f9475e384fe7a49344f42a9635d2f57277f788708d23425edd845385",
+    "21d9b0f…",
+    "60fe124…",
+    "6533a3f…",
+    "6cbafce…",
+    "eabc274…",
+    "21d9b0f…",
+    "8942517f43045a124e11a8e79296f6e4de875936",
+    "4ca13252e05357ff98023f9290375cd1718bcce6",
+    "e208c767646af920d90aa9396f441fb328c999c3235aff646ac20a5611543f27",
+    "5364dd4f9f825f5d68c85ea005ceb277ab943e4c",
+    "9d7e850cbf6761524e9a51359801944cdf7fabf4",
+    "84af413c3a7833daa635e6a0b84e8f331cc1f7f2",
+    "7a8092f9ac0be03274358bb9814db3d8e6a34507",
+    "00d4636da32836689202464fc55deb5f4b2a8f5e6ffd02831d27d22a9146bc90",
+    "0dee3af822edc164b06be6cff61441023ae703dc",
+    "d02ed41e25d1ffa8a43ee8d74583a1008a4d8026",
+    "84af413…",
+    "7a8092f…",
+    "00d4636…",
+    "0dee3af…",
+    "d02ed41…",
+    "a8057a8e0c29bdcc95e35949819c64005e5ee064",
+    "9de054e5131ad3f610902d0a7bd4bd97c5968c7a",
+    "a5fdc8adc9788f181ace5f4de9cce7974344af02312cef2caa9e123193744503",
+    "c6c60d4354eba7348aef3245d19e787661544fa7",
+    "abdf644b4c35ecfaee2d22917c4c621f9d123a5b",
+    "a8057a8…",
+    "9de054e…",
+    "a5fdc8a…",
+    "c6c60d4…",
+    "abdf644…",
+    "c446f05adfb836539ddbaa74a41502034c910092",
+    "b4c1bcbd70ff22ce3ac2b8a1de3828b7ce691afe",
+    "3bb9737a483fc90e50d5a6158bf0c61c1807e6510d22c9bf6d88e142d21ff5d9",
+    "62c37d6261257ea3800335257e43ae45ed839c47",
+    "3abd059087e216fb4fed613b45927f27a3af627f",
+    "c446f05…",
+    "b4c1bcb…",
+    "3bb9737…",
+    "62c37d6…",
+    "3abd059…",
+    "96543fff62bb5d0a3c0f8a0464e9a07bf9c54568",
+    "98dae414b3cdd36ee25d0dad3fe78257f3f4c135",
+    "e22c42085703fcdfaaa3f994334cc418a4e81e858187757edb5a33b8e2221e13",
+    "a3e3179bafb8050598cc5512d56e0c7661318c64",
+    "9e19b12de072e55932d1b32e24987576284ac4f0",
+    "96543ff…",
+    "98dae41…",
+    "e22c420…",
+    "a3e3179…",
+    "9e19b12…",
+    "8d0a896c753c4c60894301a20a3866bbbfa1e76f",
+    "cca97a8e75d52a26889d3bbb66740756041d9caf",
+    "e188202a4b0612a66503fda2b6ee1a3c89ec7b65",
+    "a1e0ecaf69926044419e29c7359102188c80550834ddb9351021aae411705054",
+    "8d0a896…",
+    "cca97a8…",
+    "e188202…",
+    "a1e0eca…",
+    "8823d29d7de93d44f4843a2fa4db1adec4e452bd",
+    "55af1e6d68f11542b1c5cc5e3465b87dc158ec08",
+    "117e4ebe40efea36f89bbb737143de9c918f938f",
+    "4ad336eaf2d304906e939fc0eb433c6633519e73d9855207ae72c4daea42eed2",
+    "8823d29…",
+    "55af1e6…",
+    "117e4eb…",
+    "742e3caf2af5a9cce3cd8de242cf113424e8528f",
+    "4a317e563c8d45bc45f676e465b01780b2b0be78",
+    "1289b773abe92bb2f5842f77e3c7f50c432352f4",
+    "1289b77…",
+    "1bde9788d551e5f76b895b977ad69291c6b1f44d26095b242d531f1bf289418c",
+    "742e3ca…",
+    "4a317e5…",
+    "1289b77…",
+    "7d9128a8171ddb4978d8f7b0debb9effce997e27",
+    "576ba5e3dfd3d13b9f797c1c516c2352c4e40688",
+    "7d9128a…",
+    "576ba5e…",
+    "b57868005a3fe0869136f54472ee0098035a9099",
+)
+EXPECTED_TASK36_HOSTED_SCOPE_LINES = (
+    "container, live OpenAI, deployment, or release evidence.",
+    "execute three live runs or prove a real provider mutation.",
+    "`container-smoke`",
+    "`container-smoke`",
+    "release-document contract still named Task35 and the removed `pretest:e2e`",
+    "contract. The generic exit-code annotation count was 1. `container-smoke`",
+    "workflow steps were not reached after the canonical failure.",
+    "- No successful current Task36 hosted `verify`, packaged `container-smoke`, or",
+    "documentation-tip CI result is claimed.",
+    "decision, session owner, generation, policy, scope, expiry, and canonical",
+    "provider result before it writes execution evidence.",
+    "`authorization_expired_before_dispatch` with zero provider dispatch and zero",
+    "successful terminal provider result.",
+    "`terminalReason` as null; it does not invent an expiry reason or provider",
+    "skipped container jobs. A successful activation `verify`, packaged",
+    "`container-smoke`, and documentation-tip CI remain pending.",
+    "- There is no current Task36 live OpenAI, public deployment/browser URL, target",
+    "multi-container SQLite, real external-provider execution, tag, or release",
+    "| Local final-build captures | "
+    "[`docs/assets/final/manifest.json`](assets/final/manifest.json); six "
+    "provenance-checked PNGs under [`docs/assets/final`](assets/final) | **Local capture "
+    "evidence only** on clean manifest source `a01f0a3…`, capture commit `1030d19…`, and "
+    "Google Chrome 150.0.7871.187 at 1440×1024 and 390×844; not CI, container, "
+    "deployment, live OpenAI, or release proof |",
+    "| Live OpenAI | Three-run command stopped at `missing_openai_api_key` after attempt "
+    "1 of 3, with zero approvals, model IDs `[]`, tools `[]`, and null root trace | "
+    "**Blocked / Unverified**; three live runs did not execute |",
+    "| GitHub CI/container | Runs `30606996966`, `30607860082`, and `30608202642`: all "
+    "`verify` jobs failed; all `container-smoke` jobs were skipped; latest annotations 1 "
+    "/ 0 | **Failed / Unverified**; bounded nonproof only, with no current Task36 hosted "
+    "canonical or packaged-container success |",
+    "| Public deployment | No public application origin or browser URL | **Blocked / "
+    "Unverified** |",
+    "| Target host/durability | No target-host networking, abrupt-loss, backup, or "
+    "concurrent multi-container SQLite proof | **Blocked / Unverified** |",
+    "| Tag/release | No release tag or GitHub release | **Blocked / Unverified** |",
+    "## Hosted container evidence boundary",
+    "`container-smoke` jobs were skipped. The latest capture-commit run reached",
+    "manifest verification and the web suite before the stale release-document",
+    "workflow steps. These failures are bounded nonproof and are not converted into",
+    "hosted or container success by local gates.",
+    "browser captures do not prove packaged Docker, browser capture in CI, public",
+    "deployment, live OpenAI, real provider execution, target-host",
+    "durability/networking, abrupt host loss or backup, concurrent multi-container",
+    "SQLite, documentation-tip CI, tag, or release.",
+    "capture remained local; CI did not execute it. The six images prove only the",
+    "local keyless SDK-stub final build. They do not prove live OpenAI, a public",
+    "deployment, a container, a release, or a real provider mutation.",
+    "container-replacement, abrupt-host-loss, or concurrent multi-container SQLite proof.",
+    "multi-container SQLite, target-host scheduling, abrupt host loss, public latency,",
+    "or live provider behavior.",
+    "`a01f0a3…` and is not public deployment, live OpenAI, container-host durability, tag,",
+    "or release proof.",
+    "route-gate release, retained admission charges, exact public `504 live_timeout`",
+    "envelopes, retryable approve/decline claims, and no duplicate dispatch when provider",
+    "process-termination proof, public deployment, or release claim.",
+)
+EXPECTED_TASK36_POSITIVE_LINES = (
+    "container, live OpenAI, deployment, or release evidence.",
+    "- The focused Task36 approval-expiry, restart, migration, and API matrix passed",
+    "`93 passed`. The full Python suite passed `1022 passed`; the web suite passed",
+    "the history-aware secret scan, and the diff check all passed.",
+    "- Three focused public terminal-evidence tamper cases passed `3 passed`: owner",
+    "- The deterministic stub smoke passed. The local one-process production smoke",
+    "passed health, readiness, static serving, API, SSE/reconnect, approval,",
+    "decline, session isolation, and bounded clean SIGTERM.",
+    "- Independent source/specification and security reviews passed with no P0-P3",
+    "exact-at-expiry execution truth, live UI truth, preauthorization chronology,",
+    "ignored `web/dist` could have been served while the manifest named a clean",
+    "path, and re-verifies unchanged clean source identity after the build. The",
+    "- `npm run test:e2e` then reported `35 passed` against the clean manifest source",
+    "passed with no P0-P3 findings.",
+    "- The live three-run command remained blocked at its",
+    "execute three live runs or prove a real provider mutation.",
+    "`FAILURE` with `264 failed, 758 passed, 1 warning` in 58.16s because the",
+    "- No successful current Task36 hosted `verify`, packaged `container-smoke`, or",
+    "execution. If the system cannot prove whether dispatch occurred, it records",
+    "successful terminal provider result.",
+    "terminal snapshot, receipt, and SSE readers validate the complete sealed receipt",
+    "SDK-stub and OpenAI-live responses and receipts require the truthful",
+    "skipped container jobs. A successful activation `verify`, packaged",
+    "- There is no current Task36 live OpenAI, public deployment/browser URL, target",
+    "| Local source and tests | Feature source `9239410…`: focused 93, public-terminal "
+    "tamper 3, 19 web files / 382 tests, 1022 Python tests, build, Ruff, strict MyPy, "
+    "OpenAPI, secret scan, diff, stub smoke, and local production smoke | **Verified "
+    "locally** in the exact named lanes |",
+    "| Local final-build captures | "
+    "[`docs/assets/final/manifest.json`](assets/final/manifest.json); six "
+    "provenance-checked PNGs under [`docs/assets/final`](assets/final) | **Local capture "
+    "evidence only** on clean manifest source `a01f0a3…`, capture commit `1030d19…`, and "
+    "Google Chrome 150.0.7871.187 at 1440×1024 and 390×844; not CI, container, "
+    "deployment, live OpenAI, or release proof |",
+    "| Live OpenAI | Three-run command stopped at `missing_openai_api_key` after attempt "
+    "1 of 3, with zero approvals, model IDs `[]`, tools `[]`, and null root trace | "
+    "**Blocked / Unverified**; three live runs did not execute |",
+    "| GitHub CI/container | Runs `30606996966`, `30607860082`, and `30608202642`: all "
+    "`verify` jobs failed; all `container-smoke` jobs were skipped; latest annotations 1 "
+    "/ 0 | **Failed / Unverified**; bounded nonproof only, with no current Task36 hosted "
+    "canonical or packaged-container success |",
+    "hosted or container success by local gates.",
+    "browser captures do not prove packaged Docker, browser capture in CI, public",
+    "deployment, live OpenAI, real provider execution, target-host",
+    "`chrome` channel in headless mode. It validates API and DOM provenance before",
+    "capture remained local; CI did not execute it. The six images prove only the",
+    "local keyless SDK-stub final build. They do not prove live OpenAI, a public",
+    "on a different clean frozen tree.",
+    "cases prove these source-level parser boundaries; the screenshots do not prove",
+    "fresh equally bounded initial-plus-three cycle. Throughout retry, already verified",
+    "The ordinary final-state screenshots do not prove transient store failure, retry",
+    "capture, and smoke lanes; it does not prove multi-process or concurrent",
+    "or live provider behavior.",
+    "are source and raw-ASGI contract properties. The six screenshots do not prove",
+    "second/third write failure, validation-before-charge, live-ledger separation, reset",
+    "`a01f0a3…` and is not public deployment, live OpenAI, container-host durability, tag,",
+    "## Live deadline proof boundary",
+    "The source contract bounds the complete live pre-approval graph and each live",
+    "envelopes, retryable approve/decline claims, and no duplicate dispatch when provider",
+    "execution committed before the timeout. The OpenAI client and the redacted live-smoke",
+)
+
+FORBIDDEN_CURRENT_POSITIVE_CLAIMS = (
+    "Hosted CI passed.",
+    "GitHub Actions verified.",
+    "Backend passed.",
+    "Full canonical verified.",
+    "Container passed.",
+    "Public deployment passed.",
+    "Live OpenAI verified.",
+    "Release passed.",
+    "Provider execution verified.",
+    "Hosted CI validated.",
+    "GitHub Actions confirmed.",
+    "Backend OK.",
+    "Full canonical complete.",
+    "Container operational.",
+    "Public deployment live.",
+    "Live OpenAI approved.",
+    "Provider execution proven.",
+    "Release validated.",
+    "Docs-tip OK.",
+    "Hosted CI. Passed.",
+    "Passed. GitHub Actions.",
+    "Passed.",
+    "All checks passed.",
+    "Verified.",
+    "Status: 0.",
+    "All tests work.",
+    "Everything is good.",
+    "The server suite is done.",
+    "The build checks are ready.",
+    "The pipeline is red-free.",
+    "Current Task35 full canonical gate returned exit 0.",
+    "Current Task35 hosted CI status: 0.",
+    "Current Task35 CI. A neutral evidence sentence. Passed.",
+    "Hosted CI. Neutral evidence one. Neutral evidence two. Neutral evidence three. Passed.",
+    "Live OpenAI. Neutral evidence one. Neutral evidence two. Neutral evidence three. Status: 0.",
+    "Current Task35 CI passed.",
+    "Current Task35 CI. Passed.",
+    "Passed. Current Task35 CI.",
+    "Current Task35 container job passed.",
+    "Current Task35 verify job passed.",
+    "Task35 GitHub Actions passed successfully.",
+    "The current Task35 GitHub workflow passed.",
+    "Task35 container smoke. Result: verified.",
+    "Status: verified. Task35 container smoke.",
+    "Healthy. Current Task35 workflow.",
+    "Completed cleanly. Current Task35 packaged Docker.",
+    "No failures. Current Task35 verify job.",
+    "Current Task35 CI completed cleanly.",
+    "Current Task35 CI is passing.",
+    "Current Task35 workflow is healthy.",
+    "Current Task35 container smoke completed without failures.",
+    "Current Task35 CI has no failures.",
+    "Current Task35 CI has zero failures.",
+    "Current Task35 CI is error-free.",
+    (
+        "- No current Task35 full canonical, GitHub Actions, or packaged "
+        "container result has been observed. Passed."
+    ),
+    (
+        "Passed. - No current Task35 full canonical, GitHub Actions, or "
+        "packaged container result has been observed."
+    ),
+    "The full Python suite passed all 718 tests.",
+    "Canonical backend: 718 passed.",
+    "Current Task35 GitHub Actions passed successfully.",
+    "Current Task35 GitHub Actions run is green.",
+    "Current Task35 hosted CI succeeded.",
+    "Current Task35 packaged container smoke passed successfully.",
+    "Current Task35 container-smoke job is green.",
+    "Current Task35 container smoke succeeded.",
+    "Current Task35 workflow green.",
+    "Current Task35 packaged Docker successful.",
+    "Current Task35 container-smoke verified.",
+    "Current Task35 full canonical gate passed 936 tests.",
+    "Current Task35 backend gate succeeded.",
+    "Current Task35 docs-tip workflow passed.",
+    "Full canonical Python gate passed 718 tests.",
+    "Full canonical gate succeeded with 718 tests.",
+    "Final full canonical gate passed 718 tests.",
+    "Current full canonical Python gate passed 718 tests.",
+    "Current Task36 public deployment passed.",
+    "Current Task36 live OpenAI passed.",
+    "Current Task36 container restart and replacement persistence passed.",
+    "Current Task36 GitHub Actions passed successfully.",
+    "Current Task36 GitHub Actions run is green.",
+    "Current Task36 hosted CI succeeded.",
+    "Current Task36 packaged container smoke passed successfully.",
+    "Current Task36 container-smoke job is green.",
+    "Current Task36 container smoke succeeded.",
+    "Current Task36 workflow green.",
+    "Current Task36 packaged Docker successful.",
+    "Current Task36 container-smoke verified.",
+    "Current Task36 backend gate succeeded.",
+    "Current Task36 docs-tip workflow passed.",
+    "Current Task36 hosted CI passed.",
+    "Current Task36 container-smoke passed.",
+    "Current Task36 release passed.",
+    "Current Task36 hosted CI and public deployment succeeded.",
+    "Current Task35 public deployment passed.",
+    "Current Task35 live OpenAI passed.",
+    "Current Task35 container restart and replacement persistence passed.",
+)
+ADDITIONAL_SUPERSEDED_IDENTIFIERS = (
+    "85e1e8ec9147242adca311c4ba10ea8c1c3008dc",
+    "85e1e8e…",
+    "30206582233",
+    "89805619343",
+    "89805788728",
+    "b578680…",
+)
+FORBIDDEN_UNEXPECTED_HOSTED_CLAIMS = (
+    "Hosted validation successor:",
+    "GitHub Actions: [run 999999]",
+    "Result: `verify` ([job 999998]",
+    "Result: `verify` reported `FAILURE`; `container-smoke` reported `SKIPPED`.",
+)
+
+
+def _task36_current_and_history(validation: str) -> tuple[str, str]:
+    assert validation.count(HISTORICAL_HEADING) == 1, "Task36 document structure"
+    return validation.split(HISTORICAL_HEADING, maxsplit=1)
+
+
+def _task36_section(
+    current: str,
+    start_heading: str,
+    end_heading: str,
+    guard: str,
+) -> str:
+    assert current.count(start_heading) == 1, guard
+    assert current.count(end_heading) == 1, guard
+    return current.split(start_heading, maxsplit=1)[1].split(
+        end_heading,
+        maxsplit=1,
+    )[0]
+
+
+def _require_normalized_facts(
+    section: str,
+    facts: tuple[str, ...],
+    guard: str,
+) -> None:
+    normalized = " ".join(section.split())
+    for fact in facts:
+        assert fact in normalized, f"{guard}: missing {fact}"
+
+
+def _assert_actions_link_bindings(
+    section: str,
+    expected: tuple[tuple[str, str, str, str | None], ...],
+    guard: str,
+) -> None:
+    observed = tuple(
+        (kind, label_id, run_id, job_id or None)
+        for kind, label_id, run_id, job_id in re.findall(
+            r"\[(run|job) (\d+)\]\("
+            r"https://github\.com/[^)\s]+/actions/runs/(\d+)"
+            r"(?:/job/(\d+))?\)",
+            section,
+        )
+    )
+    assert observed == expected, guard
+    for kind, label_id, run_id, job_id in observed:
+        if kind == "run":
+            assert label_id == run_id and job_id is None, guard
+        else:
+            assert job_id is not None and label_id == job_id, guard
+
+
+def _assert_all_actions_links_correlated(validation: str) -> None:
+    markdown_bindings = tuple(
+        (kind, label_id, url)
+        for kind, label_id, url in re.findall(
+            r"\[(run|job)\s+(\d+)\]\(([^)\r\n]*)\)",
+            validation,
+            flags=re.IGNORECASE,
+        )
+    )
+    assert markdown_bindings == ALLOWED_ACTION_MARKDOWN_BINDINGS, "Actions Markdown label binding"
+
+    action_urls = tuple(
+        re.findall(
+            (
+                r"(?i)(?:(?:[a-z][a-z0-9+.-]*:)?//)[^\s<>()]*"
+                r"/actions/runs/\d+(?:/job/\d+)?[^\s<>()]*"
+            ),
+            validation,
+        )
+    )
+    assert action_urls == ALLOWED_ACTION_URLS, "Actions Markdown label binding"
+
+    referenced_action_ids = tuple(
+        re.findall(
+            r"(?i)(?<![A-Za-z])(?:run|job)\s+`?(\d{6,})`?",
+            validation,
+        )
+    )
+    assert referenced_action_ids == ALLOWED_ACTION_REFERENCE_IDS, (
+        "Actions provenance identifier allowlist"
+    )
+
+    provenance_tokens = tuple(
+        match.group(0)
+        for match in re.finditer(
+            (
+                r"(?<![0-9A-Za-z_])(?:[0-9A-Fa-f]{64}|"
+                r"[0-9A-Fa-f]{40}|[0-9A-Fa-f]{7}…)"
+                r"(?![0-9A-Za-z_])"
+            ),
+            validation,
+        )
+    )
+    assert provenance_tokens == ALLOWED_PROVENANCE_TOKEN_OCCURRENCES, "provenance token allowlist"
+
+
+def _assert_current_claim_line_allowlists(current: str) -> None:
+    current_lines = tuple(line.strip() for line in current.splitlines() if line.strip())
+    hosted_scope_pattern = re.compile(
+        r"\b(?:CI|GitHub\s+Actions|workflow|verify\s+job|canonical|backend|"
+        r"container(?:-smoke|\s+smoke|\s+job)?|packaged\s+Docker|"
+        r"public\s+deployment|live\s+OpenAI|provider|release|docs-tip)\b",
+        flags=re.IGNORECASE,
+    )
+    observed_hosted_scope_lines = tuple(
+        line for line in current_lines if hosted_scope_pattern.search(line)
+    )
+    assert observed_hosted_scope_lines == EXPECTED_TASK36_HOSTED_SCOPE_LINES, (
+        "current hosted provenance and scope allowlist"
+    )
+
+    positive_word_pattern = re.compile(
+        r"\b(?:pass|passed|passing|green|healthy|clean|cleanly|clear|"
+        r"succeed|succeeded|succeeding|success|successful|successfully|verified|"
+        r"validat(?:e|ed|es|ing)|confirm(?:ed|s|ing)?|ok|complete(?:d|ly)?|"
+        r"operational|live|approv(?:e|ed|ing)|prov(?:e|ed|en|ing)|works?|good|"
+        r"done|ready|red-free)\b"
+        r"|\b(?:completed|finished)\s+(?:cleanly|successfully)\b"
+        r"|\bwithout\s+(?:any\s+)?(?:failures?|errors?)\b"
+        r"|\b(?:no|zero)\s+(?:failures?|errors?)\b"
+        r"|\b(?:failure|error)-free\b"
+        r"|\b(?:returned\s+)?exit(?:\s+code)?\s*(?:[:=]\s*)?0\b"
+        r"|\bstatus\s*(?:[:=]\s*)?0\b",
+        flags=re.IGNORECASE,
+    )
+    observed_positive_lines = tuple(
+        line for line in current_lines if positive_word_pattern.search(line)
+    )
+    assert observed_positive_lines == EXPECTED_TASK36_POSITIVE_LINES, "current positive allowlist"
+
+
+def _assert_task36_common_boundaries(current: str) -> None:
+    sqlite = _task36_section(
+        current,
+        "## SQLite file-permission proof boundary",
+        "## JSON response media proof boundary",
+        "SQLite permission semantic contract",
+    )
+    _require_normalized_facts(
+        sqlite,
+        (
+            "owner-only `0600` regular files",
+            "Constructor-time initialization is the only lane allowed to harden",
+            (
+                "connection and readiness checks are nonmutating and fail closed "
+                "instead of repairing permission drift"
+            ),
+            "URI with `mode=rw`",
+            "Unsupported POSIX capabilities",
+            "unexpected owner",
+            "unprotected directory ancestry",
+            "changed device/inode identity",
+            "insecure database or sidecar permissions all fail closed",
+            "owner-only `0700`",
+            "23 focused tests",
+        ),
+        "SQLite permission semantic contract",
+    )
+
+    media = _task36_section(
+        current,
+        "## JSON response media proof boundary",
+        "## Terminal evidence retry proof boundary",
+        "JSON media semantic contract",
+    )
+    _require_normalized_facts(
+        media,
+        (
+            "exactly one `Content-Type` field",
+            "case-insensitive `application/json` media type",
+            "valid no-comma token or quoted-string parameters",
+            (
+                "missing, wrong, malformed, comma-joined, duplicate parameters, "
+                "and split-quote values"
+            ),
+            "cancels the unlocked wrong-media response body without waiting",
+            "typed IDs, fallback, retry metadata, and provenance remain inactive",
+            "SSE behavior is unchanged",
+            ("ordinary `500` handling and the Task30 exact `503` retry contract remain preserved"),
+        ),
+        "JSON media semantic contract",
+    )
+
+    retry = _task36_section(
+        current,
+        "## Terminal evidence retry proof boundary",
+        "## Async SQLite proof boundary",
+        "terminal retry semantic contract",
+    )
+    _require_normalized_facts(
+        retry,
+        (
+            "HTTP `503`",
+            "code `internal_error`",
+            "`recoveryId` equal to the requested recovery UUID",
+            "`retryAfterSeconds: 1`",
+            "`fallback: null`",
+            "`Retry-After: 1`",
+            "`application/json` media",
+            "exactly three",
+            "one-second automatic retries",
+            "one accessible manual retry",
+            "fresh equally bounded initial-plus-three cycle",
+            ("already verified snapshot, receipt, event, and cursor state remains visible"),
+            "No POST, create, decision, reset, or fallback request",
+        ),
+        "terminal retry semantic contract",
+    )
+
+    async_sqlite = _task36_section(
+        current,
+        "## Async SQLite proof boundary",
+        "## Request-body availability proof boundary",
+        "Async SQLite semantic contract",
+    )
+    _require_normalized_facts(
+        async_sqlite,
+        (
+            "retains the bounded-worker SQLite design",
+            "superseded Task29 section",
+            (
+                "current Task36 activation verifies only its exact local "
+                "source, capture, and smoke lanes"
+            ),
+            "does not prove multi-process or concurrent multi-container SQLite",
+            "target-host scheduling",
+            "abrupt host loss",
+            "public latency",
+            "live provider behavior",
+        ),
+        "Async SQLite semantic contract",
+    )
+
+    request_body = _task36_section(
+        current,
+        "## Request-body availability proof boundary",
+        "## Creation-admission proof boundary",
+        "request-body availability semantic contract",
+    )
+    _require_normalized_facts(
+        request_body,
+        (
+            "manifest source rejects framed `GET` and `HEAD` requests before body reads",
+            "preserves ordinary bodyless receives",
+            "bounds allowed-body pre-buffering with a configurable cooperative deadline",
+            "source and raw-ASGI contract properties",
+            "screenshots do not prove adversarial transport timing",
+            "public-host availability",
+            "hard cancellation of a non-cooperative dependency",
+        ),
+        "request-body availability semantic contract",
+    )
+
+    creation = _task36_section(
+        current,
+        "## Creation-admission proof boundary",
+        "## Live deadline proof boundary",
+        "creation-admission semantic contract",
+    )
+    _require_normalized_facts(
+        creation,
+        (
+            "separate durable UTC-day creation ledger with session, IP, and global limits",
+            "atomic race admission",
+            "rollback on an injected second/third write failure",
+            "validation-before-charge",
+            "live-ledger separation",
+            "reset and restart persistence",
+            "bounded retention",
+            "generic `429`/`Retry-After` contract",
+            "final-build capture lane from `a01f0a3…`",
+            "not public deployment, live OpenAI, container-host durability, tag, or release proof",
+        ),
+        "creation-admission semantic contract",
+    )
+
+    live_deadline = current.split("## Live deadline proof boundary", maxsplit=1)[1]
+    _require_normalized_facts(
+        live_deadline,
+        (
+            "complete live pre-approval graph",
+            "configurable 1..300-second cooperative deadline",
+            "one shared graph budget",
+            "external cancellation propagation",
+            "no partial recovery",
+            "route-gate release",
+            "retained admission charges",
+            "exact public `504 live_timeout` envelopes",
+            "retryable approve/decline claims",
+            "no duplicate dispatch when provider execution committed before the timeout",
+            "transport retries disabled",
+            "not a real OpenAI trace",
+            "hard process-termination proof",
+            "public deployment",
+            "release claim",
+        ),
+        "live deadline semantic contract",
+    )
+
+
+def _assert_validation_matches_current_capture(validation: str) -> None:
+    manifest = json.loads(_read("docs/assets/final/manifest.json"))
+    runtime_input = manifest["runtimeInput"]
+    current, history = _task36_current_and_history(validation)
+    normalized_current = " ".join(current.split())
+    _assert_all_actions_links_correlated(validation)
+
+    assert current.count("## Current Task36 authorization-expiry evidence activation") == 1, (
+        "Task36 document structure"
+    )
+    assert current.count("## Current Task36 authorization-expiry proof boundary") == 1, (
+        "Task36 document structure"
+    )
+    assert current.count("## Current Task36 pending external gates") == 1, (
+        "Task36 document structure"
+    )
+    for unique_heading in (
+        "## Per-SHA proof matrix",
+        "## Hosted container evidence boundary",
+        "## Capture contract",
+        "## SQLite file-permission proof boundary",
+        "## JSON response media proof boundary",
+        "## Terminal evidence retry proof boundary",
+        "## Async SQLite proof boundary",
+        "## Request-body availability proof boundary",
+        "## Creation-admission proof boundary",
+        "## Live deadline proof boundary",
+    ):
+        assert validation.count(unique_heading) == 1, "Task36 document structure"
+    assert not re.search(r"^## ", history, flags=re.MULTILINE), (
+        "Task36 historical heading structure"
+    )
+    historical_sections = tuple(line for line in history.splitlines() if line.startswith("### "))
+    assert historical_sections == (
+        TASK35_HEADING,
+        TASK34_HEADING,
+        "### Client-terminal capture and hosted baselines (superseded)",
+        "### SQLite-permission capture and hosted baselines (superseded)",
+        "### JSON-media capture and hosted baselines (superseded)",
+        "### Terminal-retry capture and hosted baselines (superseded)",
+        "### Async SQLite capture and hosted baseline (superseded)",
+        "### Request-boundary capture and hosted baseline (superseded)",
+        "### Immediate prior capture and hosted baseline (superseded)",
+        "### Prior capture and hosted baseline (superseded)",
+        "### Older hosted baseline (superseded)",
+    ), "Task36 historical heading structure"
+    assert history.splitlines()[2] == TASK35_HEADING, "Task36 historical heading structure"
+
+    activation = _task36_section(
+        current,
+        "## Current Task36 authorization-expiry evidence activation",
+        "## Current Task36 authorization-expiry proof boundary",
+        "Task36 current activation facts",
+    )
+    _require_normalized_facts(
+        activation,
+        (
+            TASK36_FEATURE_SOURCE,
+            TASK36_CAPTURE_SOURCE,
+            TASK36_CAPTURE_COMMIT,
+            "`93 passed`",
+            "`1022 passed`",
+            "3 warnings in 26.36s",
+            "19 files / 382 tests",
+            "production TypeScript/Vite build",
+            "Ruff",
+            "strict MyPy",
+            "OpenAPI verification",
+            "history-aware secret scan",
+            "diff check all passed",
+            "public terminal-evidence tamper cases passed `3 passed`",
+            "snapshot, receipt, and SSE each failed closed",
+            "deterministic stub smoke passed",
+            "local one-process production smoke passed",
+            "Independent source/specification and security reviews passed with no P0-P3",
+            "first Task36 capture audit found a P2 provenance gap",
+            "fresh capture-owned temporary directory",
+            "allowlisted secret-safe environment",
+            "rejects Vite environment files",
+            "discarded pre-fix capture is not claimed",
+            "`npm run test:e2e` then reported `35 passed`",
+            "Google Chrome 150.0.7871.187",
+            "35 capture contracts",
+            "Five PNGs changed from Task35",
+            "`mobile-consent.png` was byte-identical",
+            "both passed with no P0-P3 findings",
+            "`missing_openai_api_key`",
+            "`attempted=1` of `target=3`",
+            "`approvals=0`",
+            "model IDs `[]`",
+            "tools `[]`",
+            "`rootTraceId=null`",
+            "run 30606996966",
+            "job 91081238197",
+            "job 91081310037",
+            "run 30607860082",
+            "job 91083947213",
+            "job 91084012386",
+            "run 30608202642",
+            "job 91084965375",
+            "`264 failed, 758 passed, 1 warning` in 58.16s",
+            "job 91085278851",
+            "No successful current Task36 hosted `verify`",
+        ),
+        "Task36 current activation facts",
+    )
+    actions_base = "https://github.com/charlie2233/backchannel-agent-support/actions/runs"
+    _assert_actions_link_bindings(
+        current,
+        (
+            ("run", "30606996966", "30606996966", None),
+            ("job", "91081238197", "30606996966", "91081238197"),
+            ("job", "91081310037", "30606996966", "91081310037"),
+            ("run", "30607860082", "30607860082", None),
+            ("job", "91083947213", "30607860082", "91083947213"),
+            ("job", "91084012386", "30607860082", "91084012386"),
+            ("run", "30608202642", "30608202642", None),
+            ("job", "91084965375", "30608202642", "91084965375"),
+            ("job", "91085278851", "30608202642", "91085278851"),
+        ),
+        "current hosted provenance",
+    )
+    assert tuple(
+        re.findall(
+            r"https://github\.com/[^)\s]+/actions/runs/\d+(?:/job/\d+)?",
+            current,
+        )
+    ) == (
+        f"{actions_base}/30606996966",
+        f"{actions_base}/30606996966/job/91081238197",
+        f"{actions_base}/30606996966/job/91081310037",
+        f"{actions_base}/30607860082",
+        f"{actions_base}/30607860082/job/91083947213",
+        f"{actions_base}/30607860082/job/91084012386",
+        f"{actions_base}/30608202642",
+        f"{actions_base}/30608202642/job/91084965375",
+        f"{actions_base}/30608202642/job/91085278851",
+    ), "current hosted provenance"
+    for forbidden_hosted_claim in FORBIDDEN_UNEXPECTED_HOSTED_CLAIMS:
+        assert " ".join(forbidden_hosted_claim.split()) not in normalized_current, (
+            f"current hosted provenance: {forbidden_hosted_claim}"
+        )
+
+    expiry_section = _task36_section(
+        current,
+        "## Current Task36 authorization-expiry proof boundary",
+        "## Current Task36 pending external gates",
+        "Task36 authorization-expiry semantic contract",
+    )
+    _require_normalized_facts(
+        expiry_section,
+        (
+            "claimed approval retains the immutable authorization expiry",
+            (
+                "atomically rechecks the claimed decision, session owner, "
+                "generation, policy, scope, expiry, and canonical provider result"
+            ),
+            (
+                "`closed_without_action` + `executionStarted: false` + "
+                "`authorization_expired_before_dispatch`"
+            ),
+            "zero provider dispatch and zero execution",
+            (
+                "`outcome_unknown` + `executionStarted: true` + "
+                "`authorization_expired_with_unresolved_dispatch`"
+            ),
+            "does not infer a successful terminal provider result",
+            "Cancellation after a committed claim wakes the durable lifecycle",
+            "`claimed_at == scope.activated_at <= execution.created_at < expiry`",
+            (
+                "snapshot, receipt, and SSE readers validate the complete "
+                "sealed receipt graph in one transaction"
+            ),
+            "fail closed on tamper or preauthorization evidence",
+            "Task5 migration restores activation from durable `decision.claimed_at`",
+            (
+                "Typed SDK-stub and OpenAI-live responses and receipts require "
+                "the truthful status/reason pairing"
+            ),
+            "Rolling-receipt normalization only fills an omitted `terminalReason` as null",
+            "does not invent an expiry reason or provider execution",
+        ),
+        "Task36 authorization-expiry semantic contract",
+    )
+
+    pending = _task36_section(
+        current,
+        "## Current Task36 pending external gates",
+        "## Per-SHA proof matrix",
+        "Task36 pending external gates",
+    )
+    _require_normalized_facts(
+        pending,
+        (
+            "three exact current Task36 hosted runs above are bounded failures",
+            "skipped container jobs",
+            (
+                "successful activation `verify`, packaged `container-smoke`, "
+                "and documentation-tip CI remain pending"
+            ),
+            "no current Task36 live OpenAI",
+            "public deployment/browser URL",
+            "target host durability/networking",
+            "abrupt-host-loss or backup",
+            "concurrent multi-container SQLite",
+            "real external-provider execution",
+            "tag, or release proof or claim",
+        ),
+        "Task36 pending external gates",
+    )
+
+    matrix = _task36_section(
+        current,
+        "## Per-SHA proof matrix",
+        "## Hosted container evidence boundary",
+        "Task36 current matrix",
+    )
+    rows = tuple(line.strip() for line in matrix.splitlines() if line.strip().startswith("|"))
+    assert rows == (
+        "| Lane | Exact evidence | Status and boundary |",
+        "| --- | --- | --- |",
+        (
+            "| Local source and tests | Feature source `9239410…`: focused 93, "
+            "public-terminal tamper 3, 19 web files / 382 tests, 1022 Python "
+            "tests, build, Ruff, strict MyPy, OpenAPI, secret scan, diff, stub "
+            "smoke, and local production smoke | **Verified locally** in the "
+            "exact named lanes |"
+        ),
+        (
+            "| Local final-build captures | "
+            "[`docs/assets/final/manifest.json`](assets/final/manifest.json); six "
+            "provenance-checked PNGs under [`docs/assets/final`](assets/final) | "
+            "**Local capture evidence only** on clean manifest source `a01f0a3…`, "
+            "capture commit `1030d19…`, and Google Chrome 150.0.7871.187 at "
+            "1440×1024 and 390×844; not CI, container, deployment, live OpenAI, "
+            "or release proof |"
+        ),
+        (
+            "| Live OpenAI | Three-run command stopped at "
+            "`missing_openai_api_key` after attempt 1 of 3, with zero approvals, "
+            "model IDs `[]`, tools `[]`, and null root trace | **Blocked / "
+            "Unverified**; three live runs did not execute |"
+        ),
+        (
+            "| Local Docker | No Docker-family runtime is installed on this Mac | "
+            "**Unverified locally** |"
+        ),
+        (
+            "| GitHub CI/container | Runs `30606996966`, `30607860082`, and "
+            "`30608202642`: all `verify` jobs failed; all `container-smoke` jobs "
+            "were skipped; latest annotations 1 / 0 | **Failed / Unverified**; "
+            "bounded nonproof only, with no current Task36 hosted canonical or "
+            "packaged-container success |"
+        ),
+        (
+            "| Public deployment | No public application origin or browser URL | "
+            "**Blocked / Unverified** |"
+        ),
+        (
+            "| Target host/durability | No target-host networking, abrupt-loss, "
+            "backup, or concurrent multi-container SQLite proof | **Blocked / "
+            "Unverified** |"
+        ),
+        ("| Tag/release | No release tag or GitHub release | **Blocked / Unverified** |"),
+    ), "Task36 current matrix"
+
+    hosted = _task36_section(
+        current,
+        "## Hosted container evidence boundary",
+        "## Capture contract",
+        "Task36 hosted evidence boundary",
+    )
+    _require_normalized_facts(
+        hosted,
+        (
+            "three exact current Task36 hosted `verify` jobs failed",
+            "`container-smoke` jobs were skipped",
+            "latest capture-commit run reached manifest verification and the web suite",
+            "did not reach the later stub, OpenAPI, or secret-scan workflow steps",
+            "bounded nonproof",
+            (
+                "superseded Task35 hosted result below is historical evidence "
+                "for its own exact SHA only"
+            ),
+            "not inherited by Task36",
+            "do not prove packaged Docker",
+            "target-host durability/networking",
+            "concurrent multi-container SQLite",
+            "documentation-tip CI, tag, or release",
+        ),
+        "Task36 hosted evidence boundary",
+    )
+
+    capture = _task36_section(
+        current,
+        "## Capture contract",
+        "## SQLite file-permission proof boundary",
+        "Task36 capture semantic contract",
+    )
+    _require_normalized_facts(
+        capture,
+        (
+            "deliberately omits `OPENAI_API_KEY`",
+            "rejects Vite environment files",
+            "secret-safe build/server environment allowlists",
+            "Google Chrome 150.0.7871.187",
+            "stable `chrome` channel in headless mode",
+            "builds the frontend into a newly owned temporary directory",
+            "rejects a pre-existing or symlinked destination",
+            "serves that exact directory",
+            "rechecks that source commit and runtime input did not change",
+            "stale ignored repository `web/dist` therefore cannot supply the named capture",
+            TASK36_CAPTURE_SOURCE,
+            TASK36_RUNTIME_DIGEST,
+            "across 85 runtime paths",
+            "capture profile `keyless_sdk_stub`",
+            "`en-US` / `UTC` / `reduce` / `light`",
+            "Feature source `9239410…`",
+            "capture evidence commit `1030d19…`",
+            "browser capture remained local; CI did not execute it",
+        ),
+        "Task36 capture semantic contract",
+    )
+
+    _assert_task36_common_boundaries(current)
+
+    assert manifest["sourceCommit"] == TASK36_CAPTURE_SOURCE, "Task36 manifest source contract"
+    assert runtime_input["digest"] == TASK36_RUNTIME_DIGEST, (
+        "Task36 manifest runtime digest contract"
+    )
+    assert len(runtime_input["paths"]) == 85, "Task36 manifest runtime paths contract"
+    assert runtime_input["paths"] == sorted(runtime_input["paths"]), (
+        "Task36 manifest runtime paths contract"
+    )
+    assert len(runtime_input["paths"]) == len(set(runtime_input["paths"])), (
+        "Task36 manifest runtime paths contract"
+    )
+    assert manifest["browser"] == {
+        "name": "Google Chrome",
+        "version": "150.0.7871.187",
+        "channel": "chrome",
+        "headless": True,
+    }, "Task36 manifest browser contract"
+    assert manifest["environment"] == {
+        "locale": "en-US",
+        "timezone": "UTC",
+        "reducedMotion": "reduce",
+        "colorScheme": "light",
+    }, "Task36 manifest environment contract"
+    assert tuple(
+        (
+            item["filename"],
+            item["sha256"],
+            item["state"],
+            item["scenarioId"],
+            item["executionMode"],
+            item["width"],
+            item["height"],
+        )
+        for item in manifest["artifacts"]
+    ) == (
+        (
+            "desktop-consent.png",
+            "94966bc9013aef5ed86e757f217b08c429c0a4783720908d154b5a6ac8bb59a5",
+            "consent",
+            "hotel",
+            "sdk_stub",
+            1440,
+            1024,
+        ),
+        (
+            "desktop-completed.png",
+            "2eb641903f8fbe12f5c50e613b7b5aae1a89670e3199665da3485a16ec59db6b",
+            "completed",
+            "hotel",
+            "sdk_stub",
+            1440,
+            1024,
+        ),
+        (
+            "desktop-declined.png",
+            "c5e1a2c9a9ae44750b19b7c10d957a6274e4c62795cd0a6f3c5be11af08f0427",
+            "declined",
+            "hotel",
+            "sdk_stub",
+            1440,
+            1024,
+        ),
+        (
+            "mobile-consent.png",
+            "654d6ea317bd132489d7369df9699ccf7cdd0d420829a47a75e65204201dfcb8",
+            "consent",
+            "hotel",
+            "sdk_stub",
+            390,
+            844,
+        ),
+        (
+            "mobile-completed.png",
+            "1254dab752c3652cb1d8148261036bbc39bfedac1ff3d3e8993de934f018f44d",
+            "completed",
+            "hotel",
+            "sdk_stub",
+            390,
+            844,
+        ),
+        (
+            "mobile-declined.png",
+            "03d184a8be747dee880ba5d2a63d805335881bde7273b26b071695edb3a735f7",
+            "declined",
+            "hotel",
+            "sdk_stub",
+            390,
+            844,
+        ),
+    ), "Task36 manifest artifacts contract"
+
+    task35, older = history.split(TASK34_HEADING, maxsplit=1)
+    normalized_task35 = " ".join(task35.split())
+    for task35_fact in (
+        "21d9b0f8dbeb59454e3f3b3d3d9138af28af02ad",
+        "60fe1243a5eeb760984d78d667f7efdc33630adc",
+        "6533a3f2e212d9a7c4e1af9f1d2dd77f7bd45a18",
+        "eabc2743f9475e384fe7a49344f42a9635d2f57277f788708d23425edd845385",
+        "29 capture contracts",
+        "2 failed, 17 deselected",
+        "DID NOT RAISE `ReceiptTransitionError`",
+        "3 passed, 17 deselected",
+        "20 passed",
+        "951 passed",
+        "957 passed",
+        "Independent Task35 specification and quality reviews passed with no P0-P3",
+        "one-time `terminal` add/backfill",
+        "exact database-byte stability across a second reopen",
+        "foreign-key check was empty",
+        "integrity check returned `ok`",
+        "run 30595724271",
+        "job 91047571247",
+        "job 91047810594",
+        "run 30598406930",
+        "job 91055708186",
+        "job 91055968348",
+        "Both job annotation APIs returned `[]`",
+        "6cbafce70fa1ea60cf00e315062e4e14a5ffb934",
+        "run 30603151491",
+        "job 91069887646",
+        "job 91070162086",
+        "`992 passed, 1 warning` in 44.62s",
+        "Both final-tip job annotation APIs returned `[]`",
+        (
+            "Task35 final documentation-tip CI passed only the exact hosted "
+            "canonical and packaged-container lanes"
+        ),
+        (
+            "Task35 retained no live OpenAI, public deployment/browser URL, "
+            "local-Docker, target-host durability/networking, abrupt-host-loss "
+            "or backup, concurrent multi-container SQLite, real "
+            "external-provider execution, tag, or release proof or claim"
+        ),
+        "final documentation tip `6cbafce…`",
+        "final documentation tip adds no new browser claim",
+        "across 84 runtime paths",
+    ):
+        assert task35_fact in normalized_task35, (
+            f"Task35 historical factual preservation: missing {task35_fact}"
+        )
+    _assert_actions_link_bindings(
+        task35,
+        (
+            ("run", "30595724271", "30595724271", None),
+            ("job", "91047571247", "30595724271", "91047571247"),
+            ("job", "91047810594", "30595724271", "91047810594"),
+            ("run", "30598406930", "30598406930", None),
+            ("job", "91055708186", "30598406930", "91055708186"),
+            ("job", "91055968348", "30598406930", "91055968348"),
+            ("run", "30603151491", "30603151491", None),
+            ("job", "91069887646", "30603151491", "91069887646"),
+            ("job", "91070162086", "30603151491", "91070162086"),
+        ),
+        "Task35 historical hosted provenance",
+    )
+    assert tuple(
+        re.findall(
+            r"https://github\.com/[^)\s]+/actions/runs/\d+(?:/job/\d+)?",
+            task35,
+        )
+    ) == (
+        f"{actions_base}/30595724271",
+        f"{actions_base}/30595724271/job/91047571247",
+        f"{actions_base}/30595724271/job/91047810594",
+        f"{actions_base}/30598406930",
+        f"{actions_base}/30598406930/job/91055708186",
+        f"{actions_base}/30598406930/job/91055968348",
+        f"{actions_base}/30603151491",
+        f"{actions_base}/30603151491/job/91069887646",
+        f"{actions_base}/30603151491/job/91070162086",
+    ), "Task35 historical hosted provenance"
+    assert "#### Task35 SQLite file-permission proof boundary" not in task35, (
+        "Task35 historical scope"
+    )
+    assert "#### Task35 JSON response media proof boundary" not in task35, "Task35 historical scope"
+    for current_identifier in (
+        TASK36_FEATURE_SOURCE,
+        TASK36_CAPTURE_SOURCE,
+        TASK36_CAPTURE_COMMIT,
+        TASK36_RUNTIME_DIGEST,
+        "9239410…",
+        "a01f0a3…",
+        "1030d19…",
+        "168e315…",
+    ):
+        assert current_identifier not in history, (
+            f"Task36 current identifier historical exclusion: {current_identifier}"
+        )
+
+    task33_heading = "### Client-terminal capture and hosted baselines (superseded)"
+    task34 = (
+        (TASK34_HEADING + older)
+        .split(TASK34_HEADING, maxsplit=1)[1]
+        .split(
+            task33_heading,
+            maxsplit=1,
+        )[0]
+    )
+    _assert_actions_link_bindings(
+        task34,
+        (
+            ("run", "30593858167", "30593858167", None),
+            ("job", "91041814602", "30593858167", "91041814602"),
+            ("job", "91042106744", "30593858167", "91042106744"),
+            ("run", "30594431983", "30594431983", None),
+            ("job", "91043601366", "30594431983", "91043601366"),
+            ("job", "91043886907", "30594431983", "91043886907"),
+        ),
+        "Task34 ordered Actions bindings",
+    )
+    assert tuple(
+        re.findall(
+            r"https://github\.com/[^)\s]+/actions/runs/\d+(?:/job/\d+)?",
+            task34,
+        )
+    ) == (
+        f"{actions_base}/30593858167",
+        f"{actions_base}/30593858167/job/91041814602",
+        f"{actions_base}/30593858167/job/91042106744",
+        f"{actions_base}/30594431983",
+        f"{actions_base}/30594431983/job/91043601366",
+        f"{actions_base}/30594431983/job/91043886907",
+    ), "Task34 ordered Actions bindings"
+    _require_normalized_facts(
+        task34,
+        (
+            "5364dd4f9f825f5d68c85ea005ceb277ab943e4c",
+            "19 web test files / 369 tests",
+            "strict MyPy over 35 source files",
+            "944 Python tests with 1 warning in 43.54s",
+            "runtime user `10001:10001`",
+            "offline network-none `deterministic-qa` and `deployed-readonly` profiles",
+            "Both activation job annotation APIs returned `[]`",
+            "Both final-tip job annotation APIs returned `[]`",
+        ),
+        "Task34 historical facts",
+    )
+    assert _normalized_digest(task34) == TASK34_HISTORY_DIGEST, "Task34 historical facts"
+
+    task32_heading = "### SQLite-permission capture and hosted baselines (superseded)"
+    task32_end_heading = "### JSON-media capture and hosted baselines (superseded)"
+    task32 = history.split(task32_heading, maxsplit=1)[1].split(
+        task32_end_heading,
+        maxsplit=1,
+    )[0]
+    _assert_actions_link_bindings(
+        task32,
+        (
+            ("run", "30588357735", "30588357735", None),
+            ("job", "91024909140", "30588357735", "91024909140"),
+            ("job", "91025281220", "30588357735", "91025281220"),
+            ("run", "30589435325", "30589435325", None),
+            ("job", "91028250060", "30589435325", "91028250060"),
+            ("job", "91028596793", "30589435325", "91028596793"),
+        ),
+        "older history ordered Actions bindings",
+    )
+    assert tuple(
+        re.findall(
+            r"https://github\.com/[^)\s]+/actions/runs/\d+(?:/job/\d+)?",
+            task32,
+        )
+    ) == (
+        f"{actions_base}/30588357735",
+        f"{actions_base}/30588357735/job/91024909140",
+        f"{actions_base}/30588357735/job/91025281220",
+        f"{actions_base}/30589435325",
+        f"{actions_base}/30589435325/job/91028250060",
+        f"{actions_base}/30589435325/job/91028596793",
+    ), "older history ordered Actions bindings"
+    _require_normalized_facts(
+        task32,
+        (
+            "c6c60d4354eba7348aef3245d19e787661544fa7",
+            "abdf644b4c35ecfaee2d22917c4c621f9d123a5b",
+            "Both pre-CI jobs passed and both pre-CI job annotation APIs returned `[]`",
+            "Both final-tip jobs passed and both final-tip job annotation APIs returned `[]`",
+            "796 Python tests",
+            "owner-only `/data` mode `0700`",
+            "runtime user `10001:10001`",
+            "offline network-none `deterministic-qa` and `deployed-readonly` profiles",
+        ),
+        "older history semantic facts",
+    )
+    for forbidden_history_text in (
+        "The pre-CI verify job failed.",
+        "The final container-smoke job was skipped.",
+        "The hosted verify gate covered 344 web tests.",
+        "The final hosted gate covered 795 Python tests.",
+        "The local exact gate completed in 29.51s.",
+    ):
+        assert forbidden_history_text not in task32, (
+            f"older history semantic contract: {forbidden_history_text}"
+        )
+    assert _normalized_digest(task32) == TASK32_HISTORY_DIGEST, "older history semantic facts"
+
+    historical_identifiers = set(
+        re.findall(
+            r"(?<![0-9A-Za-z])(?:[0-9a-f]{40,64}|[0-9a-f]{7}…|\d{11})"
+            r"(?![0-9A-Za-z])",
+            history,
+        )
+    )
+    for historical_identifier in historical_identifiers:
+        assert historical_identifier not in current, (
+            f"superseded provenance exclusion: {historical_identifier}"
+        )
+    for superseded_identifier in ADDITIONAL_SUPERSEDED_IDENTIFIERS:
+        assert superseded_identifier not in current, (
+            f"superseded provenance exclusion: {superseded_identifier}"
+        )
+    for old_identifier in (
+        "21d9b0f8dbeb59454e3f3b3d3d9138af28af02ad",
+        "60fe1243a5eeb760984d78d667f7efdc33630adc",
+        "6533a3f2e212d9a7c4e1af9f1d2dd77f7bd45a18",
+        "eabc2743f9475e384fe7a49344f42a9635d2f57277f788708d23425edd845385",
+    ):
+        assert old_identifier not in current, (
+            f"Task35 superseded identifier current exclusion: {old_identifier}"
+        )
+    for unsupported_claim in (
+        "Current Task36 hosted CI passed",
+        "Current Task36 container-smoke passed",
+        "Current Task36 live OpenAI passed",
+        "Current Task36 public deployment passed",
+        "Current Task36 release passed",
+    ):
+        assert unsupported_claim not in current, (
+            f"Task36 unsupported positive claim: {unsupported_claim}"
+        )
+    normalized_current_claims = " ".join(current.split())
+    for forbidden_claim in FORBIDDEN_CURRENT_POSITIVE_CLAIMS:
+        assert " ".join(forbidden_claim.split()) not in normalized_current_claims, (
+            f"current positive allowlist: {forbidden_claim}"
+        )
+    _assert_current_claim_line_allowlists(current)
+
+    assert _normalized_digest(current) == TASK36_CURRENT_DIGEST, "Task36 current normalized digest"
+    assert _normalized_digest(task35) == TASK35_HISTORY_DIGEST, (
+        "Task35 historical normalized digest"
+    )
+    assert "not current Task35" not in older, "older historical current-task labels"
+    assert older.count("not current Task36") == 7, "older historical current-task labels"
+    assert _normalized_digest(TASK34_HEADING + older) == OLDER_HISTORY_DIGEST, (
+        "older historical normalized digest"
+    )
+    assert TASK36_FEATURE_SOURCE in normalized_current
+
+
+def test_task36_current_authorization_expiry_evidence_contract() -> None:
+    _assert_validation_matches_current_capture(_read("docs/validation.md"))
+
+
+@pytest.mark.parametrize(
+    ("original", "replacement", "expected_guard"),
+    (
+        (
+            TASK36_FEATURE_SOURCE,
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            "Task36 current activation facts",
+        ),
+        (
+            TASK36_CAPTURE_SOURCE,
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            "Task36 current activation facts",
+        ),
+        (
+            "`1022 passed`",
+            "`1021 passed`",
+            "Task36 current activation facts",
+        ),
+        (
+            "19 files / 382 tests",
+            "19 files / 381 tests",
+            "Task36 current activation facts",
+        ),
+        (
+            (
+                "`closed_without_action` + `executionStarted: false` + "
+                "`authorization_expired_before_dispatch`"
+            ),
+            "`completed` / `authorization_extended`",
+            "Task36 authorization-expiry semantic contract",
+        ),
+        (
+            (
+                "`outcome_unknown` + `executionStarted: true` + "
+                "`authorization_expired_with_unresolved_dispatch`"
+            ),
+            "`completed` / `dispatch_assumed`",
+            "Task36 authorization-expiry semantic contract",
+        ),
+        (
+            "`claimed_at == scope.activated_at <= execution.created_at < expiry`",
+            "`execution.created_at <= expiry`",
+            "Task36 authorization-expiry semantic contract",
+        ),
+        (
+            "three exact current Task36 hosted runs above are bounded failures",
+            "current Task36 hosted runs passed",
+            "Task36 pending external gates",
+        ),
+        (
+            "No successful current Task36 hosted `verify`",
+            "Current Task36 hosted `verify` passed",
+            "Task36 current activation facts",
+        ),
+        (
+            "stale ignored repository `web/dist` therefore cannot supply the named capture",
+            "repository `web/dist` may supply the named capture",
+            "Task36 capture semantic contract",
+        ),
+    ),
+)
+def test_task36_current_fact_mutation_fails_closed(
+    original: str,
+    replacement: str,
+    expected_guard: str,
+) -> None:
+    validation = _read("docs/validation.md")
+    current, history = _task36_current_and_history(validation)
+    pattern = re.compile(re.escape(original).replace(r"\ ", r"\s+"))
+    assert pattern.search(current)
+    polluted, replacement_count = pattern.subn(replacement, current, count=1)
+    assert replacement_count == 1
+    if replacement.startswith("deadbeef"):
+        expected_guard = rf"(?:provenance token allowlist|{expected_guard})"
+    with pytest.raises(AssertionError, match=expected_guard):
+        _assert_validation_matches_current_capture(polluted + HISTORICAL_HEADING + history)
+
+
+@pytest.mark.parametrize(
+    "unsupported_claim",
+    (
+        "Current Task36 hosted CI passed",
+        "Current Task36 container-smoke passed",
+        "Current Task36 live OpenAI passed",
+        "Current Task36 public deployment passed",
+        "Current Task36 release passed",
+    ),
+)
+def test_task36_rejects_unobserved_positive_claim(unsupported_claim: str) -> None:
+    validation = _read("docs/validation.md")
+    polluted = validation.replace(
+        HISTORICAL_HEADING,
+        f"{unsupported_claim}\n\n{HISTORICAL_HEADING}",
+        1,
+    )
+    with pytest.raises(AssertionError, match="Task36 unsupported positive claim"):
+        _assert_validation_matches_current_capture(polluted)
+
+
+def test_task36_rejects_duplicate_current_matrix_and_history_reordering() -> None:
+    validation = _read("docs/validation.md")
+    duplicate_matrix = validation.replace(
+        HISTORICAL_HEADING,
+        f"## Per-SHA proof matrix\n\n{HISTORICAL_HEADING}",
+        1,
+    )
+    with pytest.raises(AssertionError, match="Task36 document structure"):
+        _assert_validation_matches_current_capture(duplicate_matrix)
+
+    reordered = validation.replace(
+        TASK35_HEADING,
+        "### Task35 moved after Task34 (superseded)",
+        1,
+    )
+    with pytest.raises(AssertionError, match="Task36 historical heading structure"):
+        _assert_validation_matches_current_capture(reordered)
+
+
+@pytest.mark.parametrize(
+    ("original", "replacement"),
+    (
+        ("957 passed, 1 warning", "956 passed, 2 warnings"),
+        ("91069887646", "99999999998"),
+        (
+            "Both final-tip job annotation APIs returned `[]`",
+            "Final-tip annotations were not inspected",
+        ),
+    ),
+)
+def test_task35_historical_fact_mutation_fails_closed(
+    original: str,
+    replacement: str,
+) -> None:
+    validation = _read("docs/validation.md")
+    current, history = _task36_current_and_history(validation)
+    task35, older = history.split(TASK34_HEADING, maxsplit=1)
+    pattern = re.compile(re.escape(original).replace(r"\ ", r"\s+"))
+    assert pattern.search(task35)
+    polluted_task35, replacement_count = pattern.subn(
+        replacement,
+        task35,
+        count=1,
+    )
+    assert replacement_count == 1
+    polluted_history = polluted_task35 + TASK34_HEADING + older
+    expected_guard = r"Task35 historical (?:factual preservation|normalized digest)"
+    if original.isdigit():
+        expected_guard = rf"(?:Actions Markdown label binding|{expected_guard})"
+    with pytest.raises(AssertionError, match=expected_guard):
+        _assert_validation_matches_current_capture(current + HISTORICAL_HEADING + polluted_history)
+
+
+def _replace_whitespace_flexible_once(
+    text: str,
+    original: str,
+    replacement: str,
+) -> str:
+    pattern = re.compile(re.escape(original).replace(r"\ ", r"\s+"))
+    assert pattern.search(text)
+    mutated, count = pattern.subn(replacement, text, count=1)
+    assert count == 1
+    return mutated
+
+
+def _task36_current_slice(validation: str, slice_name: str) -> tuple[str, str, str]:
+    current, history = _task36_current_and_history(validation)
+    boundaries = {
+        "activation": (
+            "## Current Task36 authorization-expiry evidence activation",
+            "## Current Task36 authorization-expiry proof boundary",
+        ),
+        "expiry": (
+            "## Current Task36 authorization-expiry proof boundary",
+            "## Current Task36 pending external gates",
+        ),
+        "pending": (
+            "## Current Task36 pending external gates",
+            "## Per-SHA proof matrix",
+        ),
+        "matrix": (
+            "## Per-SHA proof matrix",
+            "## Hosted container evidence boundary",
+        ),
+        "hosted": (
+            "## Hosted container evidence boundary",
+            "## Capture contract",
+        ),
+        "capture": (
+            "## Capture contract",
+            "## SQLite file-permission proof boundary",
+        ),
+        "async": (
+            "## Async SQLite proof boundary",
+            "## Request-body availability proof boundary",
+        ),
+        "request": (
+            "## Request-body availability proof boundary",
+            "## Creation-admission proof boundary",
+        ),
+        "creation": (
+            "## Creation-admission proof boundary",
+            "## Live deadline proof boundary",
+        ),
+    }
+    start, end = boundaries[slice_name]
+    prefix, remainder = current.split(start, maxsplit=1)
+    body, suffix = remainder.split(end, maxsplit=1)
+    return prefix + start, body, end + suffix + HISTORICAL_HEADING + history
+
+
+def test_task36_current_evidence_and_task35_history_contract() -> None:
+    # Retained function name preserves the prior collection surface; Task36 is
+    # now current and Task35 is verified as the first historical section.
+    _assert_validation_matches_current_capture(_read("docs/validation.md"))
+
+
+def test_validation_normalized_digests_match_current_document() -> None:
+    validation = _read("docs/validation.md")
+    current, history = _task36_current_and_history(validation)
+    task35, older = history.split(TASK34_HEADING, maxsplit=1)
+    assert _normalized_digest(current) == TASK36_CURRENT_DIGEST
+    assert _normalized_digest(task35) == TASK35_HISTORY_DIGEST
+    assert _normalized_digest(TASK34_HEADING + older) == OLDER_HISTORY_DIGEST
+
+
+@pytest.mark.parametrize(
+    ("needle", "expected_guard"),
+    (
+        (
+            "This file records only `codex/backchannel-v0.3` evidence.",
+            "Task36 current normalized digest",
+        ),
+        (
+            "Reopen performs no repair and preserves exact event-row",
+            "Task35 historical normalized digest",
+        ),
+        (
+            "The prior Task33 source gate covered",
+            "older historical normalized digest",
+        ),
+    ),
+)
+def test_validation_normalized_digest_rejects_section_mutation(
+    needle: str,
+    expected_guard: str,
+) -> None:
+    validation = _read("docs/validation.md")
+    assert needle in validation
+    polluted = validation.replace(needle, f"{needle} mutated", 1)
+    with pytest.raises(AssertionError, match=expected_guard):
+        _assert_validation_matches_current_capture(polluted)
+
+
+@pytest.mark.parametrize(
+    "history_heading",
+    (
+        TASK35_HEADING,
+        TASK34_HEADING,
+    ),
+)
+@pytest.mark.parametrize(
+    "current_identifier",
+    (
+        TASK36_FEATURE_SOURCE,
+        "9239410…",
+        TASK36_CAPTURE_SOURCE,
+        "a01f0a3…",
+        TASK36_CAPTURE_COMMIT,
+        "1030d19…",
+        TASK36_RUNTIME_DIGEST,
+        "168e315…",
+    ),
+)
+def test_validation_current_identifier_loop_rejects_history_body_leakage(
+    history_heading: str,
+    current_identifier: str,
+) -> None:
+    validation = _read("docs/validation.md")
+    polluted = validation.replace(
+        history_heading,
+        f"{history_heading}\n\nInjected current provenance: {current_identifier}",
+        1,
+    )
+    with pytest.raises(
+        AssertionError,
+        match=(
+            r"(?:provenance token allowlist|"
+            r"Task36 current identifier historical exclusion)"
+        ),
+    ):
+        _assert_validation_matches_current_capture(polluted)
+
+
+@pytest.mark.parametrize(
+    ("slice_name", "original", "replacement", "expected_guard"),
+    (
+        (
+            "activation",
+            TASK36_FEATURE_SOURCE,
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            "Task36 current activation facts",
+        ),
+        (
+            "activation",
+            TASK36_CAPTURE_SOURCE,
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            "Task36 current activation facts",
+        ),
+        (
+            "activation",
+            TASK36_CAPTURE_COMMIT,
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            "Task36 current activation facts",
+        ),
+        (
+            "activation",
+            "`93 passed`",
+            "`92 passed`",
+            "Task36 current activation facts",
+        ),
+        (
+            "activation",
+            "`1022 passed`",
+            "`1021 passed`",
+            "Task36 current activation facts",
+        ),
+        (
+            "activation",
+            "3 warnings in 26.36s",
+            "4 warnings in 27.36s",
+            "Task36 current activation facts",
+        ),
+        (
+            "activation",
+            "19 files / 382 tests",
+            "19 files / 381 tests",
+            "Task36 current activation facts",
+        ),
+        (
+            "activation",
+            "public terminal-evidence tamper cases passed `3 passed`",
+            "public terminal evidence was not checked",
+            "Task36 current activation facts",
+        ),
+        (
+            "activation",
+            "Independent source/specification and security reviews passed with no P0-P3",
+            "reviews had unresolved findings",
+            "Task36 current activation facts",
+        ),
+        (
+            "activation",
+            "first Task36 capture audit found a P2 provenance gap",
+            "first capture audit was clean",
+            "Task36 current activation facts",
+        ),
+        (
+            "activation",
+            "rejects Vite environment files",
+            "loads Vite environment files",
+            "Task36 current activation facts",
+        ),
+        (
+            "activation",
+            "`npm run test:e2e` then reported `35 passed`",
+            "`npm run test:e2e` reported `34 passed`",
+            "Task36 current activation facts",
+        ),
+        (
+            "activation",
+            "Google Chrome 150.0.7871.187",
+            "Chromium 150",
+            "Task36 current activation facts",
+        ),
+        (
+            "activation",
+            "`mobile-consent.png` was byte-identical",
+            "`mobile-consent.png` was not reviewed",
+            "Task36 current activation facts",
+        ),
+        (
+            "activation",
+            "`missing_openai_api_key`",
+            "`live_provider_passed`",
+            "Task36 current activation facts",
+        ),
+        (
+            "activation",
+            "run 30606996966",
+            "run 99999999991",
+            "Task36 current activation facts",
+        ),
+        (
+            "activation",
+            "job 91081238197",
+            "job 99999999992",
+            "Task36 current activation facts",
+        ),
+        (
+            "activation",
+            "run 30607860082",
+            "run 99999999993",
+            "Task36 current activation facts",
+        ),
+        (
+            "activation",
+            "job 91083947213",
+            "job 99999999994",
+            "Task36 current activation facts",
+        ),
+        (
+            "activation",
+            "run 30608202642",
+            "run 99999999995",
+            "Task36 current activation facts",
+        ),
+        (
+            "activation",
+            "job 91084965375",
+            "job 99999999996",
+            "Task36 current activation facts",
+        ),
+        (
+            "activation",
+            "`264 failed, 758 passed, 1 warning` in 58.16s",
+            "`1022 passed`",
+            "Task36 current activation facts",
+        ),
+        (
+            "activation",
+            "job 91085278851",
+            "job 99999999997",
+            "Task36 current activation facts",
+        ),
+        (
+            "expiry",
+            (
+                "`closed_without_action` + `executionStarted: false` + "
+                "`authorization_expired_before_dispatch`"
+            ),
+            "`completed` + `executionStarted: true`",
+            "Task36 authorization-expiry semantic contract",
+        ),
+        (
+            "expiry",
+            (
+                "`outcome_unknown` + `executionStarted: true` + "
+                "`authorization_expired_with_unresolved_dispatch`"
+            ),
+            "`completed` + `executionStarted: false`",
+            "Task36 authorization-expiry semantic contract",
+        ),
+        (
+            "expiry",
+            "`claimed_at == scope.activated_at <= execution.created_at < expiry`",
+            "`execution.created_at <= expiry`",
+            "Task36 authorization-expiry semantic contract",
+        ),
+        (
+            "capture",
+            "stale ignored repository `web/dist` therefore cannot supply the named capture",
+            "repository `web/dist` may supply the named capture",
+            "Task36 capture semantic contract",
+        ),
+        (
+            "matrix",
+            "latest annotations 1 / 0",
+            "latest annotations 0 / 0",
+            "Task36 current matrix",
+        ),
+        (
+            "hosted",
+            "bounded nonproof",
+            "hosted success",
+            "Task36 hosted evidence boundary",
+        ),
+        (
+            "pending",
+            "documentation-tip CI remain pending",
+            "documentation-tip CI passed",
+            "Task36 pending external gates",
+        ),
+    ),
+)
+def test_validation_rejects_current_activation_fact_mutation(
+    slice_name: str,
+    original: str,
+    replacement: str,
+    expected_guard: str,
+) -> None:
+    prefix, body, suffix = _task36_current_slice(
+        _read("docs/validation.md"),
+        slice_name,
+    )
+    polluted_body = _replace_whitespace_flexible_once(body, original, replacement)
+    if original.startswith(("run ", "job ")):
+        expected_guard = rf"(?:Actions Markdown label binding|{expected_guard})"
+    if replacement.startswith("deadbeef"):
+        expected_guard = rf"(?:provenance token allowlist|{expected_guard})"
+    with pytest.raises(AssertionError, match=expected_guard):
+        _assert_validation_matches_current_capture(prefix + polluted_body + suffix)
+
+
+@pytest.mark.parametrize(
+    ("label", "replacement"),
+    (
+        ("[run 30606996966]", "[run 99999999990]"),
+        ("[job 91081238197]", "[job 99999999991]"),
+        ("[job 91069887646]", "[job 99999999992]"),
+        ("[job 91041814602]", "[job 99999999993]"),
+        ("[job 91024909140]", "[job 99999999994]"),
+    ),
+)
+def test_actions_markdown_label_only_mutation_fails_closed(
+    label: str,
+    replacement: str,
+) -> None:
+    validation = _read("docs/validation.md")
+    assert validation.count(label) == 1
+    polluted = validation.replace(label, replacement, 1)
+    with pytest.raises(
+        AssertionError,
+        match="Actions Markdown label binding",
+    ):
+        _assert_validation_matches_current_capture(polluted)
+
+
+@pytest.mark.parametrize(
+    ("url", "replacement"),
+    (
+        (
+            ("https://github.com/charlie2233/backchannel-agent-support/actions/runs/30606996966)"),
+            ("https://github.com/charlie2233/backchannel-agent-support/actions/runs/99999999990)"),
+        ),
+        (
+            (
+                "https://github.com/charlie2233/backchannel-agent-support/"
+                "actions/runs/30606996966/job/91081238197"
+            ),
+            (
+                "https://github.com/charlie2233/backchannel-agent-support/"
+                "actions/runs/30606996966/job/99999999991"
+            ),
+        ),
+        (
+            (
+                "https://github.com/charlie2233/backchannel-agent-support/"
+                "actions/runs/30603151491/job/91069887646"
+            ),
+            (
+                "https://github.com/charlie2233/backchannel-agent-support/"
+                "actions/runs/30603151491/job/99999999992"
+            ),
+        ),
+        (
+            (
+                "https://github.com/charlie2233/backchannel-agent-support/"
+                "actions/runs/30593858167/job/91041814602"
+            ),
+            (
+                "https://github.com/charlie2233/backchannel-agent-support/"
+                "actions/runs/30593858167/job/99999999993"
+            ),
+        ),
+        (
+            (
+                "https://github.com/charlie2233/backchannel-agent-support/"
+                "actions/runs/30588357735/job/91024909140"
+            ),
+            (
+                "https://github.com/charlie2233/backchannel-agent-support/"
+                "actions/runs/30588357735/job/99999999994"
+            ),
+        ),
+    ),
+)
+def test_actions_markdown_url_only_mutation_fails_closed(
+    url: str,
+    replacement: str,
+) -> None:
+    validation = _read("docs/validation.md")
+    assert validation.count(url) == 1
+    polluted = validation.replace(url, replacement, 1)
+    with pytest.raises(
+        AssertionError,
+        match="Actions Markdown label binding",
+    ):
+        _assert_validation_matches_current_capture(polluted)
+
+
+@pytest.mark.parametrize(
+    ("original", "replacement"),
+    (
+        (
+            "[run 30606996966](https://github.com/",
+            "[run 30606996966](https://evil.example/",
+        ),
+        (
+            "[job 91081238197]",
+            "[job 91081310037]",
+        ),
+        (
+            "actions/runs/30606996966/job/91081238197)",
+            "actions/runs/30606996966/job/91081238197?view=1)",
+        ),
+        (
+            "actions/runs/30606996966/job/91081238197)",
+            "actions/workflows/30606996966/job/91081238197)",
+        ),
+        (
+            "[job 91081238197]",
+            "[JOB 91081238197]",
+        ),
+    ),
+)
+def test_actions_markdown_domain_path_and_binding_mutations_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    original: str,
+    replacement: str,
+) -> None:
+    validation = _read("docs/validation.md")
+    current, history = _task36_current_and_history(validation)
+    assert current.count(original) == 1
+    polluted_current = current.replace(original, replacement, 1)
+    monkeypatch.setitem(
+        globals(),
+        "TASK36_CURRENT_DIGEST",
+        _normalized_digest(polluted_current),
+    )
+    with pytest.raises(
+        AssertionError,
+        match="Actions Markdown label binding",
+    ):
+        _assert_validation_matches_current_capture(polluted_current + HISTORICAL_HEADING + history)
+
+
+@pytest.mark.parametrize(
+    ("injection", "expected_guard"),
+    (
+        (
+            (
+                "Additional evidence: [job 999998]"
+                "(https://evil.example/actions/runs/999999/job/999998)."
+            ),
+            "Actions Markdown label binding",
+        ),
+        (
+            "Additional evidence job 999998 from run 999999.",
+            "Actions provenance identifier allowlist",
+        ),
+        (
+            ("Additional source evidence: deadbeefdeadbeefdeadbeefdeadbeefdeadbeef."),
+            "provenance token allowlist",
+        ),
+        (
+            ("Additional source evidence: DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF."),
+            "provenance token allowlist",
+        ),
+        (
+            "Additional source evidence: deadbee….",
+            "provenance token allowlist",
+        ),
+        (
+            f"Repeated source evidence: {TASK36_FEATURE_SOURCE}.",
+            "provenance token allowlist",
+        ),
+        (
+            "Repeated source evidence: 9239410….",
+            "provenance token allowlist",
+        ),
+        (
+            "Repeated run 30606996966.",
+            "Actions provenance identifier allowlist",
+        ),
+        (
+            "Repeated job 91081238197.",
+            "Actions provenance identifier allowlist",
+        ),
+        (
+            "Target-host backup evidence: 9239410….",
+            "provenance token allowlist",
+        ),
+        (
+            "Abrupt-loss evidence job 91081238197.",
+            "Actions provenance identifier allowlist",
+        ),
+    ),
+)
+def test_unknown_provenance_with_recomputed_digest_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    injection: str,
+    expected_guard: str,
+) -> None:
+    validation = _read("docs/validation.md")
+    current, history = _task36_current_and_history(validation)
+    polluted_current = f"{current.rstrip()}\n\n{injection}\n\n"
+    monkeypatch.setitem(
+        globals(),
+        "TASK36_CURRENT_DIGEST",
+        _normalized_digest(polluted_current),
+    )
+    with pytest.raises(AssertionError, match=expected_guard):
+        _assert_validation_matches_current_capture(polluted_current + HISTORICAL_HEADING + history)
+
+
+@pytest.mark.parametrize(
+    ("injection", "expected_guard"),
+    (
+        (
+            "The Task36 workflow completed successfully.",
+            "current hosted provenance and scope allowlist",
+        ),
+        (
+            "All hosted validation is successful.",
+            "current positive allowlist",
+        ),
+        (
+            "Task36 is ready for release.",
+            "current hosted provenance and scope allowlist",
+        ),
+        (
+            "Everything completed cleanly.",
+            "current positive allowlist",
+        ),
+    ),
+)
+def test_current_claim_line_allowlists_survive_digest_recomputation(
+    monkeypatch: pytest.MonkeyPatch,
+    injection: str,
+    expected_guard: str,
+) -> None:
+    validation = _read("docs/validation.md")
+    current, history = _task36_current_and_history(validation)
+    polluted_current = f"{current.rstrip()}\n\n{injection}\n\n"
+    monkeypatch.setitem(
+        globals(),
+        "TASK36_CURRENT_DIGEST",
+        _normalized_digest(polluted_current),
+    )
+    with pytest.raises(AssertionError, match=expected_guard):
+        _assert_validation_matches_current_capture(polluted_current + HISTORICAL_HEADING + history)
+
+
+def test_provenance_boundary_decoys_do_not_match() -> None:
+    validation = _read("docs/validation.md")
+    decoys = (
+        "\nNeutral metadata: "
+        "xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefy; "
+        "_deadbeefdeadbeefdeadbeefdeadbeefdeadbeef_; "
+        "runner 999999; jobless 999998; "
+        "https://example.test/actions-not/runs/999997.\n"
+    )
+    _assert_all_actions_links_correlated(validation + decoys)
+
+
+@pytest.mark.parametrize(
+    ("start", "end", "first_job", "second_job", "expected_guard"),
+    (
+        (
+            "## Current Task36 authorization-expiry evidence activation",
+            "## Current Task36 authorization-expiry proof boundary",
+            "91081238197",
+            "91081310037",
+            "current hosted provenance",
+        ),
+        (
+            TASK35_HEADING,
+            TASK34_HEADING,
+            "91069887646",
+            "91070162086",
+            "Task35 historical hosted provenance",
+        ),
+        (
+            TASK34_HEADING,
+            "### Client-terminal capture and hosted baselines (superseded)",
+            "91041814602",
+            "91042106744",
+            "Task34 ordered Actions bindings",
+        ),
+        (
+            "### SQLite-permission capture and hosted baselines (superseded)",
+            "### JSON-media capture and hosted baselines (superseded)",
+            "91024909140",
+            "91025281220",
+            "older history ordered Actions bindings",
+        ),
+    ),
+)
+def test_actions_markdown_per_section_job_swap_fails_closed(
+    start: str,
+    end: str,
+    first_job: str,
+    second_job: str,
+    expected_guard: str,
+) -> None:
+    validation = _read("docs/validation.md")
+    prefix, remainder = validation.split(start, maxsplit=1)
+    section, suffix = remainder.split(end, maxsplit=1)
+    assert section.count(first_job) >= 2
+    assert section.count(second_job) >= 2
+    swapped = (
+        section.replace(first_job, "__FIRST_ACTIONS_JOB__")
+        .replace(second_job, first_job)
+        .replace("__FIRST_ACTIONS_JOB__", second_job)
+    )
+    assert swapped != section
+    with pytest.raises(
+        AssertionError,
+        match=rf"(?:Actions Markdown label binding|{expected_guard})",
+    ):
+        _assert_validation_matches_current_capture(prefix + start + swapped + end + suffix)
+
+
+@pytest.mark.parametrize(
+    ("slice_name", "original", "replacement", "expected_guard"),
+    (
+        (
+            "activation",
+            "`1022 passed`",
+            "`1021 passed`",
+            "Task36 current activation facts",
+        ),
+        (
+            "expiry",
+            "zero provider dispatch and zero execution",
+            "one provider dispatch",
+            "Task36 authorization-expiry semantic contract",
+        ),
+        (
+            "pending",
+            "documentation-tip CI remain pending",
+            "documentation-tip CI passed",
+            "Task36 pending external gates",
+        ),
+        (
+            "hosted",
+            "bounded nonproof",
+            "hosted success",
+            "Task36 hosted evidence boundary",
+        ),
+        (
+            "capture",
+            "rejects Vite environment files",
+            "loads Vite environment files",
+            "Task36 capture semantic contract",
+        ),
+    ),
+)
+def test_current_dedicated_guard_is_nonvacuous(
+    monkeypatch: pytest.MonkeyPatch,
+    slice_name: str,
+    original: str,
+    replacement: str,
+    expected_guard: str,
+) -> None:
+    prefix, body, suffix = _task36_current_slice(
+        _read("docs/validation.md"),
+        slice_name,
+    )
+    polluted = (
+        prefix
+        + _replace_whitespace_flexible_once(
+            body,
+            original,
+            replacement,
+        )
+        + suffix
+    )
+    original_require = _require_normalized_facts
+
+    def bypass_one_guard(section: str, facts: tuple[str, ...], guard: str) -> None:
+        if guard != expected_guard:
+            original_require(section, facts, guard)
+
+    monkeypatch.setitem(globals(), "_require_normalized_facts", bypass_one_guard)
+    try:
+        _assert_validation_matches_current_capture(polluted)
+    except AssertionError as error:
+        assert not str(error).startswith(expected_guard), (
+            f"dedicated guard {expected_guard} was vacuous"
+        )
+    else:
+        raise AssertionError(f"dedicated guard {expected_guard} was vacuous")
+
+
 @pytest.mark.parametrize(
     ("bullet_prefix", "original", "replacement"),
     (
@@ -1928,11 +2952,7 @@ def test_validation_rejects_generic_current_positive_claims(
             "3 passed, 17 deselected",
             "2 passed, 18 deselected",
         ),
-        (
-            "The full Python suite passed",
-            "951 passed",
-            "950 passed",
-        ),
+        ("The full Python suite passed", "951 passed", "950 passed"),
         (
             "Independent Task35 specification and quality reviews",
             "passed with no P0-P3 findings",
@@ -1946,416 +2966,44 @@ def test_validation_rejects_evidence_timing_mutation(
     replacement: str,
 ) -> None:
     validation = _read("docs/validation.md")
-    bullet_match = re.search(
-        rf"^- {re.escape(bullet_prefix)}.*?(?=^- |\n## |\Z)",
-        validation,
+    current, history = _task36_current_and_history(validation)
+    task35, older = history.split(TASK34_HEADING, maxsplit=1)
+    bullet = re.search(
+        rf"^- {re.escape(bullet_prefix)}.*?(?=^- |\n#### |\Z)",
+        task35,
         flags=re.MULTILINE | re.DOTALL,
     )
-    assert bullet_match is not None
-    bullet = bullet_match.group(0)
-    original_pattern = re.compile(re.escape(original).replace(r"\ ", r"\s+"))
-    assert original_pattern.search(bullet)
-    polluted_bullet = original_pattern.sub(replacement, bullet, count=1)
-    polluted_validation = validation.replace(bullet, polluted_bullet, 1)
-
-    with pytest.raises(AssertionError, match="current evidence facts"):
-        _assert_validation_matches_current_capture(polluted_validation)
-
-
-def _named_current_mutation_slice(
-    validation: str,
-    slice_name: str,
-) -> tuple[int, int]:
-    activation_heading = "## Current Task35 final evidence activation"
-    transition_heading = "## Current Task35 transition-marker proof boundary"
-    pending_heading = "## Current Task35 pending external gates"
-    matrix_heading = "## Per-SHA proof matrix"
-    boundary_heading = "## Hosted container evidence boundary"
-    capture_heading = "## Capture contract"
-    section_map = {
-        "canonical": (
-            activation_heading,
-            transition_heading,
-            "The exact local canonical gate on final evidence activation",
-            "bullet",
-        ),
-        "local_smoke": (
-            activation_heading,
-            transition_heading,
-            "The local deterministic stub smoke reported",
-            "bullet",
-        ),
-        "hosted_old": (
-            activation_heading,
-            transition_heading,
-            "The earlier capture evidence activation",
-            "bullet",
-        ),
-        "hosted_final": (
-            activation_heading,
-            transition_heading,
-            "Final evidence activation GitHub Actions",
-            "bullet",
-        ),
-        "pending_primary": (
-            pending_heading,
-            matrix_heading,
-            "Within the source, capture, and hosted activation lane",
-            "bullet",
-        ),
-        "matrix_live": (
-            matrix_heading,
-            boundary_heading,
-            "| Live OpenAI |",
-            "line",
-        ),
-        "matrix_github": (
-            matrix_heading,
-            boundary_heading,
-            "| GitHub CI/container |",
-            "line",
-        ),
-        "hosted_boundary": (
-            boundary_heading,
-            capture_heading,
-            "",
-            "section",
-        ),
-    }
-    start_heading, end_heading, selector, selector_kind = section_map[slice_name]
-    assert validation.count(start_heading) == 1
-    assert validation.count(end_heading) == 1
-    section_start = validation.index(start_heading) + len(start_heading)
-    section_end = validation.index(end_heading, section_start)
-    if selector_kind == "section":
-        return section_start, section_end
-    section = validation[section_start:section_end]
-    selector_pattern = (
-        rf"^- {re.escape(selector)}.*?(?=^- |\Z)"
-        if selector_kind == "bullet"
-        else rf"^{re.escape(selector)}.*$"
-    )
-    matches = tuple(
-        re.finditer(
-            selector_pattern,
-            section,
-            flags=re.MULTILINE | (re.DOTALL if selector_kind == "bullet" else 0),
-        )
-    )
-    assert len(matches) == 1
-    return section_start + matches[0].start(), section_start + matches[0].end()
-
-
-def _mutate_once_in_named_current_slice(
-    validation: str,
-    slice_name: str,
-    original: str,
-    replacement: str,
-) -> str:
-    historical_heading = "## Superseded historical hosted baseline"
-    original_history = validation.split(historical_heading, maxsplit=1)[1]
-    slice_start, slice_end = _named_current_mutation_slice(validation, slice_name)
-    target = validation[slice_start:slice_end]
-    pattern = re.compile(re.escape(original).replace(r"\ ", r"\s+"))
-    assert len(tuple(pattern.finditer(target))) == 1
-    mutated_target, replacement_count = pattern.subn(replacement, target, count=1)
-    assert replacement_count == 1
-    polluted_validation = (
-        validation[:slice_start] + mutated_target + validation[slice_end:]
-    )
-    assert polluted_validation[:slice_start] == validation[:slice_start]
-    assert polluted_validation[
-        slice_start + len(mutated_target) :
-    ] == validation[slice_end:]
-    assert (
-        polluted_validation.split(historical_heading, maxsplit=1)[1]
-        == original_history
-    )
-    return polluted_validation
-
-
-def _assert_current_mutation_hits_guard(
-    polluted_validation: str,
-    expected_guard: str,
-) -> None:
-    try:
-        _assert_validation_matches_current_capture(polluted_validation)
-    except AssertionError as error:
-        if re.match(rf"^{re.escape(expected_guard)}", str(error)):
-            return
-        raise AssertionError(
-            f"expected dedicated guard {expected_guard}"
-        ) from error
-    raise AssertionError(f"expected dedicated guard {expected_guard}")
-
-
-@pytest.mark.parametrize(
-    ("slice_name", "original", "replacement", "expected_guard"),
-    (
-        (
-            "canonical",
-            "6533a3f2e212d9a7c4e1af9f1d2dd77f7bd45a18",
-            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-            "current canonical/local evidence",
-        ),
-        (
-            "canonical",
-            "`capture_manifest_valid`",
-            "`capture_manifest_invalid`",
-            "current canonical/local evidence",
-        ),
-        (
-            "canonical",
-            "19 web test files / 369 tests",
-            "18 web test files / 368 tests",
-            "current canonical/local evidence",
-        ),
-        (
-            "canonical",
-            "strict MyPy over 35 source files",
-            "strict MyPy over 34 source files",
-            "current canonical/local evidence",
-        ),
-        (
-            "canonical",
-            "`957 passed`, 3 warnings, in 25.36s",
-            "`956 passed`, 4 warnings",
-            "current canonical/local evidence",
-        ),
-        (
-            "local_smoke",
-            "local deterministic stub smoke reported `PASS`",
-            "local deterministic stub smoke reported `FAILURE`",
-            "current canonical/local evidence",
-        ),
-        (
-            "local_smoke",
-            "local production `deterministic-qa` smoke reported `PASS`",
-            "local production `deterministic-qa` smoke reported `FAILURE`",
-            "current canonical/local evidence",
-        ),
-        (
-            "local_smoke",
-            "OpenAPI verification and the history-aware secret scan also "
-            "reported `PASS`",
-            "OpenAPI and secret scan were not inspected",
-            "current canonical/local evidence",
-        ),
-        (
-            "matrix_live",
-            "`missing_openai_api_key`",
-            "`live_provider_passed`",
-            "current matrix",
-        ),
-        (
-            "matrix_live",
-            "attempt 1 of 3",
-            "attempt 3 of 3",
-            "current matrix",
-        ),
-        (
-            "matrix_live",
-            "zero approvals and no model IDs, tools, or root trace",
-            "one approval with a model ID",
-            "current matrix",
-        ),
-        (
-            "matrix_github",
-            "run `30598406930`",
-            "run `99999999999`",
-            "current matrix",
-        ),
-        (
-            "hosted_final",
-            "[job 91055708186]",
-            "[job 99999999998]",
-            "current hosted provenance",
-        ),
-        (
-            "hosted_final",
-            "reported `PASS` with `957 passed, 1 warning` in 46.45s",
-            "reported `FAILURE`",
-            "current hosted provenance",
-        ),
-        (
-            "hosted_final",
-            "[job 91055968348]",
-            "[job 99999999997]",
-            "current hosted provenance",
-        ),
-        (
-            "hosted_final",
-            "reported `PASS`, built the packaged image",
-            "reported `SKIPPED`",
-            "current hosted provenance",
-        ),
-        (
-            "hosted_final",
-            "Both job annotation APIs returned `[]`",
-            "Job annotations were not inspected",
-            "current hosted provenance",
-        ),
-        (
-            "hosted_old",
-            "60fe1243a5eeb760984d78d667f7efdc33630adc",
-            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-            "current hosted provenance",
-        ),
-        (
-            "hosted_old",
-            "[job 91047571247]",
-            "[job 99999999995]",
-            "current hosted provenance",
-        ),
-        (
-            "hosted_old",
-            "reported `FAILURE` with `1 failed, 950 passed, 1 warning` in 41.89s",
-            "reported `PASS`",
-            "current hosted provenance",
-        ),
-        (
-            "hosted_old",
-            "[job 91047810594]",
-            "[job 99999999994]",
-            "current hosted provenance",
-        ),
-        (
-            "hosted_old",
-            "reported `SKIPPED`, with container annotations `[]`",
-            "reported `PASS`",
-            "current hosted provenance",
-        ),
-        (
-            "pending_primary",
-            "Within the source, capture, and hosted activation lane",
-            "Across every external lane",
-            "current pending bullets",
-        ),
-        (
-            "hosted_boundary",
-            "`10001:10001`",
-            "`0:0`",
-            "current hosted boundary",
-        ),
-        (
-            "hosted_boundary",
-            "offline network-none `deterministic-qa` and `deployed-readonly` profiles",
-            "one online profile",
-            "current hosted boundary",
-        ),
-        (
-            "hosted_boundary",
-            "`30595724271`",
-            "`99999999996`",
-            "current hosted boundary",
-        ),
-    ),
-)
-def test_validation_rejects_current_activation_fact_mutation(
-    slice_name: str,
-    original: str,
-    replacement: str,
-    expected_guard: str,
-) -> None:
-    polluted_validation = _mutate_once_in_named_current_slice(
-        _read("docs/validation.md"),
-        slice_name,
+    assert bullet is not None
+    mutated_bullet = _replace_whitespace_flexible_once(
+        bullet.group(0),
         original,
         replacement,
     )
-    _assert_current_mutation_hits_guard(polluted_validation, expected_guard)
-
-
-@pytest.mark.parametrize(
-    ("guard_function", "slice_name", "original", "replacement", "expected_guard"),
-    (
-        (
-            "_assert_current_hosted_provenance",
-            "hosted_final",
-            "[job 91055708186]",
-            "[job 99999999998]",
-            "current hosted provenance",
-        ),
-        (
-            "_assert_current_pending_bullets",
-            "pending_primary",
-            "Within the source, capture, and hosted activation lane",
-            "Across every external lane",
-            "current pending bullets",
-        ),
-        (
-            "_assert_current_matrix",
-            "matrix_github",
-            "run `30598406930`",
-            "run `99999999999`",
-            "current matrix",
-        ),
-        (
-            "_assert_current_hosted_boundary",
-            "hosted_boundary",
-            "`10001:10001`",
-            "`0:0`",
-            "current hosted boundary",
-        ),
-        (
-            "_assert_current_canonical_local_evidence",
-            "canonical",
-            "`capture_manifest_valid`",
-            "`capture_manifest_invalid`",
-            "current canonical/local evidence",
-        ),
-    ),
-)
-def test_current_dedicated_guard_is_nonvacuous(
-    monkeypatch: pytest.MonkeyPatch,
-    guard_function: str,
-    slice_name: str,
-    original: str,
-    replacement: str,
-    expected_guard: str,
-) -> None:
-    polluted_validation = _mutate_once_in_named_current_slice(
-        _read("docs/validation.md"),
-        slice_name,
-        original,
-        replacement,
-    )
-    monkeypatch.setitem(globals(), guard_function, lambda _current_evidence: None)
-
+    polluted_task35 = task35.replace(bullet.group(0), mutated_bullet, 1)
     with pytest.raises(
         AssertionError,
-        match=rf"^expected dedicated guard {re.escape(expected_guard)}$",
+        match=r"Task35 historical (?:factual preservation|normalized digest)",
     ):
-        _assert_current_mutation_hits_guard(polluted_validation, expected_guard)
+        _assert_validation_matches_current_capture(
+            current + HISTORICAL_HEADING + polluted_task35 + TASK34_HEADING + older
+        )
 
 
 @pytest.mark.parametrize(
     ("original", "replacement"),
     (
-        (
-            "clearing the sole `terminal = 1` marker",
-            "retaining a terminal marker",
-        ),
+        ("clearing the sole `terminal = 1` marker", "retaining a terminal marker"),
         (
             "fail closed with `ReceiptTransitionError`",
             "reopens successfully",
         ),
-        (
-            "Reopen performs no repair",
-            "Reopen repairs the marker",
-        ),
+        ("Reopen performs no repair", "Reopen repairs the marker"),
         (
             "exact event-row and text-byte stability",
             "event rows may change",
         ),
-        (
-            "one-time `terminal` add/backfill",
-            "repeated schema rebuilds",
-        ),
-        (
-            "exact database-byte stability",
-            "database bytes may change",
-        ),
+        ("one-time `terminal` add/backfill", "repeated schema rebuilds"),
+        ("exact database-byte stability", "database bytes may change"),
         (
             "foreign-key check was empty and the integrity check returned `ok`",
             "database checks were not observed",
@@ -2367,27 +3015,20 @@ def test_validation_transition_marker_guard_rejects_contract_mutation(
     replacement: str,
 ) -> None:
     validation = _read("docs/validation.md")
-    terminal_heading = "## Current Task35 transition-marker proof boundary"
-    terminal_end_heading = "## Current Task35 pending external gates"
-    terminal_evidence = validation.split(terminal_heading, maxsplit=1)[1].split(
-        terminal_end_heading,
-        maxsplit=1,
-    )[0]
-    original_pattern = re.compile(re.escape(original).replace(r"\ ", r"\s+"))
-    assert original_pattern.search(terminal_evidence)
-    polluted_terminal_evidence = original_pattern.sub(
+    current, history = _task36_current_and_history(validation)
+    task35, older = history.split(TASK34_HEADING, maxsplit=1)
+    polluted_task35 = _replace_whitespace_flexible_once(
+        task35,
+        original,
         replacement,
-        terminal_evidence,
-        count=1,
     )
-    polluted_validation = validation.replace(
-        terminal_evidence,
-        polluted_terminal_evidence,
-        1,
-    )
-
-    with pytest.raises(AssertionError, match="transition marker semantic contract"):
-        _assert_validation_matches_current_capture(polluted_validation)
+    with pytest.raises(
+        AssertionError,
+        match=r"Task35 historical (?:factual preservation|normalized digest)",
+    ):
+        _assert_validation_matches_current_capture(
+            current + HISTORICAL_HEADING + polluted_task35 + TASK34_HEADING + older
+        )
 
 
 @pytest.mark.parametrize(
@@ -2405,15 +3046,101 @@ def test_validation_rejects_transition_marker_contradictions(
     contradiction: str,
 ) -> None:
     validation = _read("docs/validation.md")
-    terminal_end_heading = "## Current Task35 pending external gates"
-    polluted_validation = validation.replace(
-        terminal_end_heading,
-        f"{contradiction}\n\n{terminal_end_heading}",
-        1,
-    )
+    current, history = _task36_current_and_history(validation)
+    task35, older = history.split(TASK34_HEADING, maxsplit=1)
+    polluted_task35 = task35 + f"\n{contradiction}\n"
+    with pytest.raises(AssertionError, match="Task35 historical normalized digest"):
+        _assert_validation_matches_current_capture(
+            current + HISTORICAL_HEADING + polluted_task35 + TASK34_HEADING + older
+        )
 
-    with pytest.raises(AssertionError, match="transition marker semantic contract"):
-        _assert_validation_matches_current_capture(polluted_validation)
+
+@pytest.mark.parametrize(
+    ("slice_name", "replacement", "expected_guard"),
+    (
+        (
+            "async",
+            "Current Task36 hosted CI and public deployment succeeded.",
+            "Async SQLite semantic contract",
+        ),
+        (
+            "request",
+            "Request bodies are accepted without bounds.",
+            "request-body availability semantic contract",
+        ),
+        (
+            "creation",
+            "Creation admission is in-memory and unbounded.",
+            "creation-admission semantic contract",
+        ),
+    ),
+)
+def test_task36_retained_boundary_body_replacement_fails_closed(
+    slice_name: str,
+    replacement: str,
+    expected_guard: str,
+) -> None:
+    prefix, _body, suffix = _task36_current_slice(
+        _read("docs/validation.md"),
+        slice_name,
+    )
+    with pytest.raises(
+        AssertionError,
+        match=rf"(?:provenance token allowlist|{expected_guard})",
+    ):
+        _assert_validation_matches_current_capture(prefix + f"\n\n{replacement}\n\n" + suffix)
+
+
+def test_release_docs_contract_forbids_disabled_test_functions() -> None:
+    source = _read("tests/scripts/test_release_docs_contract.py")
+    disabled_assignment = ".__test__" + " = False"
+    assert disabled_assignment not in source
+    disabled = tuple(
+        name
+        for name, value in globals().items()
+        if name.startswith("test_") and getattr(value, "__test__", True) is False
+    )
+    assert disabled == ()
+    module = ast.parse(source)
+    definition_names = tuple(
+        node.name
+        for node in module.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    )
+    duplicate_definitions = tuple(
+        sorted(name for name in set(definition_names) if definition_names.count(name) > 1)
+    )
+    assert duplicate_definitions == ()
+    reference_definitions = tuple(name for name in definition_names if name.endswith("_reference"))
+    assert reference_definitions == ()
+
+    functions = {
+        node.name: node
+        for node in module.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    call_graph = {
+        name: {
+            candidate.id
+            for candidate in ast.walk(node)
+            if isinstance(candidate, ast.Name)
+            and isinstance(candidate.ctx, ast.Load)
+            and candidate.id in functions
+        }
+        for name, node in functions.items()
+    }
+    reachable: set[str] = set()
+    pending = [name for name in functions if name.startswith("test_")]
+    while pending:
+        name = pending.pop()
+        if name in reachable:
+            continue
+        reachable.add(name)
+        pending.extend(call_graph[name] - reachable)
+    unreachable_private_helpers = tuple(
+        sorted(name for name in functions if name.startswith("_") and name not in reachable)
+    )
+    assert unreachable_private_helpers == ()
 
 
 @pytest.mark.parametrize(
@@ -2483,8 +3210,7 @@ def test_validation_rejects_sqlite_permission_contract_mutation(
             "arbitrary comma-joined parameters",
         ),
         (
-            "missing, wrong, malformed, comma-joined, duplicate parameters, and "
-            "split-quote values",
+            "missing, wrong, malformed, comma-joined, duplicate parameters, and split-quote values",
             "only wrong media types",
         ),
         (
@@ -2497,8 +3223,7 @@ def test_validation_rejects_sqlite_permission_contract_mutation(
         ),
         ("SSE behavior is unchanged", "SSE behavior also uses this parser"),
         (
-            "ordinary `500` handling and the Task30 exact `503` retry contract remain "
-            "preserved",
+            "ordinary `500` handling and the Task30 exact `503` retry contract remain preserved",
             "ordinary errors share the new media failure",
         ),
     ),
@@ -2599,10 +3324,8 @@ def test_package_wires_capture_contract_and_manifest_verifier_into_check() -> No
         "node --test e2e/judge-flow.test.mjs e2e/capture-manifest.test.mjs"
     )
     assert scripts["capture:verify"] == "node e2e/capture-manifest.mjs"
-    assert scripts["pretest:e2e"] == "npm run build"
-    assert scripts["test:e2e"] == (
-        "npm run test:capture-contract && node e2e/judge-flow.mjs"
-    )
+    assert "pretest:e2e" not in scripts
+    assert scripts["test:e2e"] == ("npm run test:capture-contract && node e2e/judge-flow.mjs")
     assert scripts["capture:judge"] == "npm run test:e2e"
     assert scripts["check"] == (
         "npm run test:capture-contract && npm run capture:verify && "
@@ -2610,10 +3333,7 @@ def test_package_wires_capture_contract_and_manifest_verifier_into_check() -> No
         "uv run mypy server scripts/start.py scripts/docker_smoke.py "
         "scripts/export_openapi.py scripts/secret_scan.py && uv run pytest -q"
     )
-    assert (
-        "      - name: Run canonical checks\n"
-        "        run: npm run check\n"
-    ) in workflow
+    assert ("      - name: Run canonical checks\n        run: npm run check\n") in workflow
 
     ignored = _read(".gitignore").splitlines()
     assert "output/playwright/" in ignored
@@ -2624,10 +3344,10 @@ def test_capture_runner_is_final_build_chrome_only_and_never_added_to_ci() -> No
     runner = _read("e2e/judge-flow.mjs")
     workflow = _read(".github/workflows/ci.yml")
 
-    assert "from \"playwright-core\"" in runner
-    assert "channel: \"chrome\"" in runner
+    assert 'from "playwright-core"' in runner
+    assert 'channel: "chrome"' in runner
     assert "headless: true" in runner
-    assert "new URL(\"http://127.0.0.1" in runner
+    assert 'new URL("http://127.0.0.1' in runner
     assert '[".venv/bin/python", "scripts/start.py"]' in runner
     assert "BACKCHANNEL_FRONTEND_DIST_PATH" in runner
     assert "BACKCHANNEL_DEMO_RESET_ENABLED" in runner
@@ -2638,11 +3358,11 @@ def test_capture_runner_is_final_build_chrome_only_and_never_added_to_ci() -> No
     assert "document.fonts.ready" in runner
     assert "requestAnimationFrame" in runner
     assert "deviceScaleFactor: 1" in runner
-    assert "locale: \"en-US\"" in runner
-    assert "timezoneId: \"UTC\"" in runner
-    assert "colorScheme: \"light\"" in runner
-    assert "reducedMotion: \"reduce\"" in runner
-    assert "page.route(\"**/*\"" in runner
+    assert 'locale: "en-US"' in runner
+    assert 'timezoneId: "UTC"' in runner
+    assert 'colorScheme: "light"' in runner
+    assert 'reducedMotion: "reduce"' in runner
+    assert 'page.route("**/*"' in runner
     assert "capture_external_origin" in runner
     assert "fullPage: false" in runner
 
@@ -2665,12 +3385,12 @@ def test_capture_runner_uses_session_owned_api_truth_and_exact_six_outputs() -> 
     assert "page.waitForResponse" in runner
     assert "/api/recoveries/" in runner
     assert "/api/demo/reset" in runner
-    assert "credentials: \"same-origin\"" in runner
+    assert 'credentials: "same-origin"' in runner
     assert "assertResetResponse" in runner
     assert "sessionStorage.clear()" in runner
-    assert "getByRole(\"link\", { name: \"Review exact remedy\" })" in runner
-    assert "getByRole(\"button\", { name: \"Approve remedy\" })" in runner
-    assert "getByRole(\"button\", { name: \"Decline\" })" in runner
+    assert 'getByRole("link", { name: "Review exact remedy" })' in runner
+    assert 'getByRole("button", { name: "Approve remedy" })' in runner
+    assert 'getByRole("button", { name: "Decline" })' in runner
     assert 'getByRole("complementary", {' in runner
     assert 'name: "Completed receipt"' in runner
     assert 'name: "Closed without action"' in runner
@@ -2703,9 +3423,7 @@ def test_readme_first_screen_is_judge_runnable_and_truthful() -> None:
     assert first_screen.index("uv sync --frozen --all-groups") < first_screen.index(
         "npm run capture:judge"
     )
-    assert first_screen.index("Google Chrome Stable") < first_screen.index(
-        "npm run capture:judge"
-    )
+    assert first_screen.index("Google Chrome Stable") < first_screen.index("npm run capture:judge")
     assert "SDK QA first" in first_screen
     assert "provider mutation remains inside the local `HotelSimulator`" in first_screen
     assert "SDK stub makes no OpenAI call" in first_screen
@@ -2778,14 +3496,13 @@ def test_release_docs_cover_architecture_protocol_and_evidence_boundaries() -> N
 
     validation = _read("docs/validation.md")
     assert "`codex/backchannel-v0.3`" in validation
-    assert "## Current Task35 final evidence activation" in validation
+    assert "## Current Task36 authorization-expiry evidence activation" in validation
+    assert TASK35_HEADING in validation
     assert "## SQLite file-permission proof boundary" in validation
     assert "## JSON response media proof boundary" in validation
     assert "## Superseded historical hosted baseline" in validation
     assert "### JSON-media capture and hosted baselines (superseded)" in validation
-    assert (
-        "### Terminal-retry capture and hosted baselines (superseded)" in validation
-    )
+    assert "### Terminal-retry capture and hosted baselines (superseded)" in validation
     assert "### Async SQLite capture and hosted baseline (superseded)" in validation
     assert "### Immediate prior capture and hosted baseline (superseded)" in validation
     assert "### Prior capture and hosted baseline (superseded)" in validation
@@ -2904,9 +3621,7 @@ def test_fidelity_ledger_distinguishes_concepts_from_runtime_proof() -> None:
         ("mobile-consent.png", "mobile-consent.png"),
     )
     for final_name, concept_name in expected_pairs:
-        assert (
-            f"docs/assets/final/{final_name}` ↔ `docs/design/{concept_name}" in ledger
-        )
+        assert f"docs/assets/final/{final_name}` ↔ `docs/design/{concept_name}" in ledger
     assert "mobile-completed.png` — no concept counterpart" in ledger
     assert "mobile-declined.png` — no concept counterpart" in ledger
     for classification in (
