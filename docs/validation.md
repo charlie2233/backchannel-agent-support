@@ -300,11 +300,11 @@ or user-namespace isolation, network-egress isolation, volume encryption/durabil
 cleanup, or target-host parity.
 
 The GitHub-hosted `container-smoke` job in
-[CI run 30605239475](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30605239475),
-job `91076408372`, is verified packaged container evidence for exact source commit
-`250a70a08c95346bac409c98c198499d7395276b`; both that job and verify job `91076029786`
+[CI run 30612785373](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30612785373),
+job `91099627816`, is verified packaged container evidence for exact source commit
+`9defc8fd533d47c50268a44b187b0fc6ca3959c0`; both that job and verify job `91099142646`
 completed with zero annotations. Verify passed 297 web tests, TypeScript/Vite, Ruff, strict
-mypy across 27 source files, 1,033 Python tests, the deterministic stub and local one-process
+mypy across 27 source files, 1,101 Python tests, the deterministic stub and local one-process
 production smokes, OpenAPI freshness, and the history secret scan. The container job used
 `docker build --pull`, resolved the reviewed Node, Python, and `uv` tag-plus-OCI-index-digest
 references, completed the Docker build, started the image, and waited for readiness. The
@@ -314,6 +314,17 @@ separately exercised approval, decline, authoritative receipts, and SSE resume. 
 kept a masked secret canary out of responses and assets and verified the signed session boundary,
 secure cookie, and cross-session isolation. This remains an API/static packaged proof in an
 ephemeral GitHub Actions runtime, not a browser UI interaction.
+Before readiness, that primary container successfully reported `daemonRuntimeConfig` and
+`kernelProcessProbe`: the daemon configuration used UID/GID 10001, a read-only root, all
+capabilities dropped, no-new-privileges, the requested built-in seccomp profile, private
+namespaces, a finite process limit, loopback-only publishing, and exactly one writable named
+`/data` volume. The live process probe observed the expected PID 1 identity, supplementary groups,
+zero capability sets, `NoNewPrivs: 1`, active seccomp filter mode, owner-only writable `/data`,
+file-backed SQLite temporary operation, and root-filesystem write denial. The replacement smoke
+repeated both markers for containers A and B. The final named cleanup step removed the primary
+container and volume and verified absence. This is observed GitHub-runner state, not proof of the
+byte-for-byte seccomp profile, a trustworthy host/daemon/base, target-host parity, or abrupt-runner
+cleanup.
 
 The same job also performed a planned replacement of two distinct single-worker containers. A
 and B ran sequentially with the same disposable named volume mounted at `/data` and the same

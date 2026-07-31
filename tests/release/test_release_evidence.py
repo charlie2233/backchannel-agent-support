@@ -544,11 +544,11 @@ def test_ci_is_keyless_lockfile_based_and_declares_external_gates() -> None:
 
 
 def test_release_docs_separate_hosted_container_proof_from_external_gates() -> None:
-    source_sha = "250a70a08c95346bac409c98c198499d7395276b"
-    run_id = "30605239475"
-    verify_job_id = "91076029786"
-    container_job_id = "91076408372"
-    run_url = "https://github.com/charlie2233/backchannel-agent-support/actions/runs/30605239475"
+    source_sha = "9defc8fd533d47c50268a44b187b0fc6ca3959c0"
+    run_id = "30612785373"
+    verify_job_id = "91099142646"
+    container_job_id = "91099627816"
+    run_url = "https://github.com/charlie2233/backchannel-agent-support/actions/runs/30612785373"
     documents = {
         "validation": _read("docs/validation.md"),
         "judge checklist": _read("docs/judge-checklist.md"),
@@ -596,6 +596,44 @@ def test_release_docs_separate_hosted_container_proof_from_external_gates() -> N
                 r"(?:^|[.!?]\s)the container(?: job)? used "
                 r"`docker build --pull`(?: and|,) resolved the reviewed "
                 r"node, python, and `uv` tag-plus-oci-index-digest references",
+                evidence_scope,
+            ), name
+            if name == "validation":
+                assert re.search(
+                    r"both that job and verify job `\d+` completed with zero annotations\. "
+                    r"verify passed 297 web tests, .*? 1,101 python tests,",
+                    evidence_scope,
+                ), name
+                assert (
+                    "the daemon configuration used uid/gid 10001, a read-only root, all "
+                    "capabilities dropped, no-new-privileges, the requested built-in seccomp "
+                    "profile"
+                ) in evidence_scope, name
+                assert (
+                    "the live process probe observed the expected pid 1 identity, supplementary "
+                    "groups, zero capability sets, `nonewprivs: 1`, active seccomp filter mode, "
+                    "owner-only writable `/data`, file-backed sqlite temporary operation, and "
+                    "root-filesystem write denial"
+                ) in evidence_scope, name
+            else:
+                assert re.search(
+                    r"verify job `\d+` and container job `\d+`, both with zero annotations; "
+                    r"verify passed 297 web tests and 1,101 python tests\.",
+                    evidence_scope,
+                ), name
+                assert (
+                    "with a read-only root, dropped capabilities, no-new-privileges, active "
+                    "built-in seccomp filtering, owner-only writable `/data`, and "
+                    "root-filesystem write denial"
+                ) in evidence_scope, name
+            assert re.search(
+                r"before readiness(?:, that primary container successfully reported| it passed) "
+                r"`daemonruntimeconfig` and `kernelprocessprobe`",
+                evidence_scope,
+            ), name
+            assert re.search(
+                r"(?:the final named cleanup step removed the primary container and volume and "
+                r"verified absence|cleanup verified owned resources absent)",
                 evidence_scope,
             ), name
         assert "built frontend assets" in normalized, name
