@@ -12,7 +12,7 @@ _SHA256_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 _PARSER_DIRECTIVE = re.compile(r"#\s*(?:syntax|escape|check)\s*=", re.IGNORECASE)
 _C_STYLE_SYNTAX_DIRECTIVE = re.compile(r"//\s*syntax\s*=", re.IGNORECASE)
 _REVIEWED_CONTAINER_INPUT_DIGESTS = {
-    "Dockerfile": "d659491d8736864fc81919a48f48cc97bea944f3eaa3d4b542f3798dd506995a",
+    "Dockerfile": "fb2733676b467a2bf5395d5fefcb07808ac495cd8e4397fab012a9ceed8c60b9",
     ".dockerignore": "996f2172e36bce0e306651d5f9a7880457f5f5e604a880f8b122eef9a23cfdc0",
 }
 _EXPECTED_STAGE_BASES = {
@@ -25,12 +25,12 @@ _EXPECTED_STAGE_BASES = {
         "sha256:452e02b117acd2d4eb3ba81a607bed9733b101b6c49492e352b1973463389012"
     ),
     "python-build": (
-        "python:3.12.12-slim-bookworm@"
-        "sha256:593bd06efe90efa80dc4eee3948be7c0fde4134606dd40d8dd8dbcade98e669c"
+        "python:3.12.13-slim-bookworm@"
+        "sha256:d50fb7611f86d04a3b0471b46d7557818d88983fc3136726336b2a4c657aa30b"
     ),
     "runtime": (
-        "python:3.12.12-slim-bookworm@"
-        "sha256:593bd06efe90efa80dc4eee3948be7c0fde4134606dd40d8dd8dbcade98e669c"
+        "python:3.12.13-slim-bookworm@"
+        "sha256:d50fb7611f86d04a3b0471b46d7557818d88983fc3136726336b2a4c657aa30b"
     ),
 }
 _EXPECTED_COPY_INSTRUCTIONS = (

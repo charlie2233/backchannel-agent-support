@@ -13,7 +13,7 @@ RUN npm run build
 FROM ghcr.io/astral-sh/uv:0.10.1@sha256:452e02b117acd2d4eb3ba81a607bed9733b101b6c49492e352b1973463389012 AS uv-bin
 
 
-FROM python:3.12.12-slim-bookworm@sha256:593bd06efe90efa80dc4eee3948be7c0fde4134606dd40d8dd8dbcade98e669c AS python-build
+FROM python:3.12.13-slim-bookworm@sha256:d50fb7611f86d04a3b0471b46d7557818d88983fc3136726336b2a4c657aa30b AS python-build
 
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
 WORKDIR /app
@@ -23,7 +23,7 @@ COPY server ./server
 RUN uv sync --frozen --no-dev
 
 
-FROM python:3.12.12-slim-bookworm@sha256:593bd06efe90efa80dc4eee3948be7c0fde4134606dd40d8dd8dbcade98e669c AS runtime
+FROM python:3.12.13-slim-bookworm@sha256:d50fb7611f86d04a3b0471b46d7557818d88983fc3136726336b2a4c657aa30b AS runtime
 
 ENV BACKCHANNEL_DB_PATH=/data/backchannel.sqlite3 BACKCHANNEL_DEPLOYED_MODE=true PATH=/app/.venv/bin:$PATH PORT=8000 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 SQLITE_TMPDIR=/data
 

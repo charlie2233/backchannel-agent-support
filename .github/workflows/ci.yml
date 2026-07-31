@@ -25,8 +25,20 @@ jobs:
           cache: npm
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
-          python-version: "3.12"
+          python-version: "3.12.13"
+          architecture: x64
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          version: "0.10.1"
+          checksum: "8b5af2d678da1bdae80a5107c934f6ab010c6cdeb2de5b8e07568031d9486051"
+      - name: Verify pinned CI toolchain
+        run: |
+          test "$RUNNER_ARCH" = "X64"
+          test "$(python -I -S -c 'import platform; print(platform.python_version())')" = "3.12.13"
+          test "$(uv --version)" = "uv 0.10.1"
+          printf '%s  %s\n' \
+            "e5571c1b0f31deec7f79ca60381f04a89f6cfe68f9b0d1c98cc2d372ec844bca" \
+            "$(command -v uv)" | sha256sum --check --status
       - run: npm ci
       - run: uv sync --frozen --all-groups
       - run: npm run check
@@ -50,8 +62,20 @@ jobs:
           cache: npm
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
-          python-version: "3.12"
+          python-version: "3.12.13"
+          architecture: x64
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          version: "0.10.1"
+          checksum: "8b5af2d678da1bdae80a5107c934f6ab010c6cdeb2de5b8e07568031d9486051"
+      - name: Verify pinned CI toolchain
+        run: |
+          test "$RUNNER_ARCH" = "X64"
+          test "$(python -I -S -c 'import platform; print(platform.python_version())')" = "3.12.13"
+          test "$(uv --version)" = "uv 0.10.1"
+          printf '%s  %s\n' \
+            "e5571c1b0f31deec7f79ca60381f04a89f6cfe68f9b0d1c98cc2d372ec844bca" \
+            "$(command -v uv)" | sha256sum --check --status
       - run: npm ci
       - run: uv sync --frozen --all-groups
       - run: docker build --pull -t backchannel:build-week .

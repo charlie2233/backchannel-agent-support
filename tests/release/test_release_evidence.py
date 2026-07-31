@@ -534,13 +534,92 @@ def test_ci_is_keyless_lockfile_based_and_declares_external_gates() -> None:
     for job in (verify_job, container_job):
         assert job.count("node-version-file: .node-version") == 1
         assert job.count("cache: npm") == 1
-        assert job.count('python-version: "3.12"') == 1
+        assert job.count('python-version: "3.12.13"') == 1
 
     validation = _read("docs/validation.md").lower()
     assert "head-ancestry file blobs" in validation
     assert "current release inputs" in validation
     assert "shallow" in validation and "fail closed" in validation
     assert "path or byte ceilings" in validation
+
+
+def test_ci_toolchain_matches_the_packaged_python_and_uv_versions() -> None:
+    workflow = _read(".github/workflows/ci.yml")
+    verify_job, container_job = workflow.split("  container-smoke:", 1)
+    dockerfile = _read("Dockerfile")
+    python_versions = set(
+        re.findall(
+            r"^FROM python:(\d+\.\d+\.\d+)-slim-bookworm@sha256:[0-9a-f]{64}",
+            dockerfile,
+            flags=re.MULTILINE,
+        )
+    )
+    uv_versions = set(
+        re.findall(
+            r"^FROM ghcr\.io/astral-sh/uv:(\d+\.\d+\.\d+)@sha256:[0-9a-f]{64}",
+            dockerfile,
+            flags=re.MULTILINE,
+        )
+    )
+    assert python_versions == {"3.12.13"}
+    assert uv_versions == {"0.10.1"}
+
+    setup_python_pin = (
+        "actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0"
+    )
+    setup_uv_pin = (
+        "astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0"
+    )
+    uv_checksum = "8b5af2d678da1bdae80a5107c934f6ab010c6cdeb2de5b8e07568031d9486051"
+    uv_binary_checksum = (
+        "e5571c1b0f31deec7f79ca60381f04a89f6cfe68f9b0d1c98cc2d372ec844bca"
+    )
+    toolchain_check = (
+        "      - name: Verify pinned CI toolchain\n"
+        "        run: |\n"
+        '          test "$RUNNER_ARCH" = "X64"\n'
+        "          test \"$(python -I -S -c 'import platform; "
+        "print(platform.python_version())')\" = \"3.12.13\"\n"
+        "          test \"$(uv --version)\" = \"uv 0.10.1\"\n"
+        "          printf '%s  %s\\n' \\\n"
+        f'            "{uv_binary_checksum}" \\\n'
+        '            "$(command -v uv)" | sha256sum --check --status\n'
+    )
+
+    def action_input_block(job: str, action_pin: str) -> str:
+        matches = re.findall(
+            rf"(?m)^      - uses: {re.escape(action_pin)}\n"
+            r"((?:        .*\n|          .*\n)*)",
+            job,
+        )
+        assert len(matches) == 1, action_pin
+        return matches[0]
+
+    for job in (verify_job, container_job):
+        assert action_input_block(job, setup_python_pin) == (
+            "        with:\n"
+            '          python-version: "3.12.13"\n'
+            "          architecture: x64\n"
+        )
+        assert action_input_block(job, setup_uv_pin) == (
+            "        with:\n"
+            '          version: "0.10.1"\n'
+            f'          checksum: "{uv_checksum}"\n'
+        )
+        assert job.count(toolchain_check) == 1
+        assert job.index(setup_uv_pin) < job.index(toolchain_check) < job.index(
+            "- run: npm ci"
+        )
+
+    architecture = " ".join(_read("docs/architecture.md").lower().split())
+    for boundary in (
+        "same exact python and `uv` versions",
+        "x86_64 linux release archive",
+        "actual installed `uv` executable",
+        "not a publisher attestation",
+        "trusted github runner",
+    ):
+        assert boundary in architecture, boundary
 
 
 def test_release_docs_separate_hosted_container_proof_from_external_gates() -> None:

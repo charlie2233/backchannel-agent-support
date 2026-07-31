@@ -334,6 +334,12 @@ base keeps a readable version tag plus a reviewed immutable OCI index digest. A 
 binds the frontend, package installer, Python build, and runtime stages to those exact references
 and requires both Python stages to share one base. Updating a base therefore requires a deliberate
 tag-and-digest change followed by the packaged build/smoke gate.
+The hosted GitHub Actions jobs pin the same exact Python and `uv` versions as the packaged build.
+The setup action receives the SHA-256 of the `uv` x86_64 Linux release archive; before dependency
+installation, a separate step checks both reported versions and the actual installed `uv`
+executable against its reviewed SHA-256. This prevents a preseeded tool-cache entry from silently
+changing the binary under test. It is not a publisher attestation or Python binary identity proof,
+and it still assumes the pinned actions, official distributions, and a trusted GitHub runner.
 The root build context recursively excludes local `uv` caches, browser/runtime capture output,
 common private-key container formats, and npm/Python/netrc credential files before transfer to
 the builder. The release contract binds the complete root ignore-rule set, rejects ignore-file
