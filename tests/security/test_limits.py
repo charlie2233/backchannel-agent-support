@@ -15,7 +15,11 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
-from server.config import RuntimeSettings
+from server.config import (
+    MAX_DEMO_SESSION_COOKIE_NAME_LENGTH,
+    MAX_DEMO_SESSION_COOKIE_VALUE_LENGTH,
+    RuntimeSettings,
+)
 from server.controls import (
     ClientIdentity,
     LiveAdmissionCode,
@@ -385,6 +389,66 @@ def test_invalid_cookie_name_environment_fails_during_settings_load(
         match="demo_session_cookie_name must be a safe cookie token",
     ):
         RuntimeSettings.from_environment()
+
+
+def test_cookie_name_length_reserves_the_bounded_signed_value_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert (
+        MAX_DEMO_SESSION_COOKIE_NAME_LENGTH
+        + MAX_DEMO_SESSION_COOKIE_VALUE_LENGTH
+        == 4_096
+    )
+    boundary_name = "a" * MAX_DEMO_SESSION_COOKIE_NAME_LENGTH
+    oversized_name = boundary_name + "a"
+
+    assert (
+        RuntimeSettings(
+            live_ready=False,
+            demo_session_cookie_name=boundary_name,
+        ).demo_session_cookie_name
+        == boundary_name
+    )
+    with pytest.raises(
+        ValueError,
+        match="demo_session_cookie_name must be a safe cookie token",
+    ):
+        RuntimeSettings(
+            live_ready=False,
+            demo_session_cookie_name=oversized_name,
+        )
+
+    monkeypatch.setenv("BACKCHANNEL_DEMO_SESSION_COOKIE_NAME", oversized_name)
+    with pytest.raises(
+        ValueError,
+        match="demo_session_cookie_name must be a safe cookie token",
+    ):
+        RuntimeSettings.from_environment()
+
+
+def test_boundary_cookie_name_round_trips_without_rotating_session_identity(
+    tmp_path: Path,
+) -> None:
+    cookie_name = "a" * MAX_DEMO_SESSION_COOKIE_NAME_LENGTH
+    store = SQLiteStore(tmp_path / "boundary-cookie-name.sqlite3")
+    app = create_app(
+        RuntimeSettings(
+            live_ready=False,
+            demo_session_cookie_name=cookie_name,
+        ),
+        store=store,
+    )
+
+    with TestClient(app) as client:
+        first = client.get("/health")
+        second = client.get("/health")
+
+    cookie_value = first.cookies[cookie_name]
+    assert first.status_code == 200
+    assert len(cookie_name) + len(cookie_value) <= 4_096
+    assert second.status_code == 200
+    assert "set-cookie" not in second.headers
+    store.close()
 
 
 def test_event_stream_limits_have_bounded_defaults_and_environment_overrides(

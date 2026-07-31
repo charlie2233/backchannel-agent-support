@@ -26,7 +26,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import Request
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from server.config import RuntimeSettings
+from server.config import MAX_DEMO_SESSION_COOKIE_VALUE_LENGTH, RuntimeSettings
 from server.logging import get_safe_logger, log_safe_exception
 
 if TYPE_CHECKING:
@@ -37,7 +37,6 @@ logger = get_safe_logger(__name__)
 
 _SESSION_COOKIE_VERSION = "v1"
 _SESSION_COOKIE_DOMAIN = "backchannel.demo-session-cookie"
-_SESSION_COOKIE_MAX_LENGTH = 160
 _SESSION_NONCE_LENGTH = 43
 _SESSION_SIGNATURE_LENGTH = 64
 _API_CONTENT_SECURITY_POLICY = (
@@ -202,7 +201,7 @@ class PublicDemoControls:
         *,
         current: datetime,
     ) -> tuple[str, datetime] | None:
-        if not 1 <= len(raw_cookie) <= _SESSION_COOKIE_MAX_LENGTH:
+        if not 1 <= len(raw_cookie) <= MAX_DEMO_SESSION_COOKIE_VALUE_LENGTH:
             return None
         parts = raw_cookie.split(".")
         if len(parts) != 4:

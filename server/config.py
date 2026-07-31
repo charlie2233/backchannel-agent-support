@@ -19,6 +19,10 @@ DEFAULT_MAX_RECOVERY_CREATIONS_GLOBAL = 2_048
 MAX_RECOVERY_CREATIONS_PER_SESSION = 4_096
 MAX_RECOVERY_CREATIONS_PER_IP = 100_000
 MAX_RECOVERY_CREATIONS_GLOBAL = 100_000
+MAX_DEMO_SESSION_COOKIE_VALUE_LENGTH = 160
+MAX_DEMO_SESSION_COOKIE_NAME_LENGTH = (
+    4_096 - MAX_DEMO_SESSION_COOKIE_VALUE_LENGTH
+)
 _COOKIE_TOKEN_CHARACTERS = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
     "!#$%&'*+-.^_`|~"
@@ -207,6 +211,7 @@ class RuntimeSettings:
         if (
             not isinstance(cookie_name, str)
             or not cookie_name
+            or len(cookie_name) > MAX_DEMO_SESSION_COOKIE_NAME_LENGTH
             or any(character not in _COOKIE_TOKEN_CHARACTERS for character in cookie_name)
         ):
             raise ValueError("demo_session_cookie_name must be a safe cookie token")
