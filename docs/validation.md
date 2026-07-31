@@ -268,16 +268,17 @@ and identity configuration, and no build-time API key. Because the image healthc
 application contract, but it is not container-runtime proof.
 
 The GitHub-hosted `container-smoke` job in
-[CI run 30602953030](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30602953030),
-job `91069638145`, is verified packaged container evidence for exact source commit
-`3c818e049bd8f5ad4c9f57da3e1b83e805d0bade`; both that job and verify job `91069313987`
+[CI run 30605239475](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30605239475),
+job `91076408372`, is verified packaged container evidence for exact source commit
+`250a70a08c95346bac409c98c198499d7395276b`; both that job and verify job `91076029786`
 completed with zero annotations. Verify passed 297 web tests, TypeScript/Vite, Ruff, strict
-mypy, 978 Python tests, the deterministic stub and local one-process production smokes,
-OpenAPI freshness, and the history secret scan. The container job completed the Docker build,
-started the image, and waited for readiness. The packaged app then validated its canonical
-bounded SHA-256 frontend manifest and served the built frontend assets, including the HTML title,
-CSP headers, and emitted asset files; API calls separately exercised approval, decline,
-authoritative receipts, and SSE resume. The smoke also
+mypy across 27 source files, 1,033 Python tests, the deterministic stub and local one-process
+production smokes, OpenAPI freshness, and the history secret scan. The container job used
+`docker build --pull`, resolved the reviewed Node, Python, and `uv` tag-plus-OCI-index-digest
+references, completed the Docker build, started the image, and waited for readiness. The
+packaged app then validated its canonical bounded SHA-256 frontend manifest and served the built
+frontend assets, including the HTML title, CSP headers, and emitted asset files; API calls
+separately exercised approval, decline, authoritative receipts, and SSE resume. The smoke also
 kept a masked secret canary out of responses and assets and verified the signed session boundary,
 secure cookie, and cross-session isolation. This remains an API/static packaged proof in an
 ephemeral GitHub Actions runtime, not a browser UI interaction.
@@ -305,7 +306,9 @@ stop and does not claim a server-delivered EOF or that every buffered client byt
 
 This evidence does not prove local Docker; abrupt host loss or backup recovery; target-host
 durability or target-host networking; concurrent multi-container SQLite; public deployment or
-public reachability; or live OpenAI or real provider execution. Those remain independent gates.
+public reachability; live OpenAI or real provider execution; image signing, builder attestation,
+SBOM or vulnerability scanning, publisher trust, target-host admission, or cross-platform
+bit-identical images. Those remain independent gates.
 
 ## Browser and release artifacts
 

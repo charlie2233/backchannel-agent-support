@@ -504,10 +504,11 @@ def test_ci_is_keyless_lockfile_based_and_declares_external_gates() -> None:
 
 
 def test_release_docs_separate_hosted_container_proof_from_external_gates() -> None:
-    run_url = "https://github.com/charlie2233/backchannel-agent-support/actions/runs/30602953030"
-    stale_run_url = (
-        "https://github.com/charlie2233/backchannel-agent-support/actions/runs/29797660785"
-    )
+    source_sha = "250a70a08c95346bac409c98c198499d7395276b"
+    run_id = "30605239475"
+    verify_job_id = "91076029786"
+    container_job_id = "91076408372"
+    run_url = "https://github.com/charlie2233/backchannel-agent-support/actions/runs/30605239475"
     documents = {
         "validation": _read("docs/validation.md"),
         "judge checklist": _read("docs/judge-checklist.md"),
@@ -516,12 +517,47 @@ def test_release_docs_separate_hosted_container_proof_from_external_gates() -> N
     for name, document in documents.items():
         normalized = " ".join(document.lower().split())
         assert run_url in document, name
-        assert stale_run_url not in document, name
-        assert "3c818e049bd8f5ad4c9f57da3e1b83e805d0bade" in document, name
-        assert "91069313987" in document, name
-        assert "91069638145" in document, name
+        assert set(
+            re.findall(
+                r"https://github\.com/charlie2233/backchannel-agent-support/actions/runs/\d+",
+                document,
+            )
+        ) == {run_url}, name
+        assert set(re.findall(r"(?<![0-9a-f])[0-9a-f]{40}(?![0-9a-f])", normalized)) == {
+            source_sha
+        }, name
+        assert set(re.findall(r"(?<!\d)\d{11}(?!\d)", document)) == {
+            run_id,
+            verify_job_id,
+            container_job_id,
+        }, name
+        assert source_sha in document, name
+        assert verify_job_id in document, name
+        assert container_job_id in document, name
         assert "github-hosted" in normalized, name
         assert "packaged container" in normalized, name
+        if name == "validation":
+            evidence_scopes = [
+                " ".join(paragraph.lower().split())
+                for paragraph in re.split(r"\n\s*\n", document)
+                if run_url in paragraph
+            ]
+        else:
+            evidence_scopes = [
+                " ".join(line.lower().split())
+                for line in document.splitlines()
+                if run_url in line
+            ]
+        assert evidence_scopes, name
+        for evidence_scope in evidence_scopes:
+            assert source_sha in evidence_scope, name
+            assert container_job_id in evidence_scope, name
+            assert re.search(
+                r"(?:^|[.!?]\s)the container(?: job)? used "
+                r"`docker build --pull`(?: and|,) resolved the reviewed "
+                r"node, python, and `uv` tag-plus-oci-index-digest references",
+                evidence_scope,
+            ), name
         assert "built frontend assets" in normalized, name
         assert "title" in normalized and "csp" in normalized, name
         assert "api calls" in normalized, name
@@ -574,6 +610,13 @@ def test_release_docs_separate_hosted_container_proof_from_external_gates() -> N
             "public reachability",
             "live openai",
             "provider execution",
+            "image signing",
+            "builder attestation",
+            "sbom",
+            "vulnerability scanning",
+            "publisher trust",
+            "target-host admission",
+            "cross-platform bit-identical images",
         ):
             assert excluded_gate in normalized, (name, excluded_gate)
 
