@@ -75,6 +75,19 @@ def restart_smoke() -> ModuleType:
     return docker_restart_smoke
 
 
+@pytest.fixture(autouse=True)
+def _stub_runtime_inspection(
+    restart_smoke: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        restart_smoke,
+        "verify_container_runtime",
+        lambda **_kwargs: None,
+        raising=False,
+    )
+
+
 def test_restart_smoke_script_exists() -> None:
     assert SCRIPT.is_file()
 
@@ -189,6 +202,7 @@ def test_replacement_uses_distinct_containers_one_volume_and_memory_only_cookie(
         approval_snapshot={"recoveryId": "approval-id", "status": "pending_approval"}
     )
     verify_calls: list[tuple[object, object, object]] = []
+    runtime_inspections: list[dict[str, object]] = []
     monkeypatch.setattr(restart_smoke, "_docker", fake_docker)
     monkeypatch.setattr(restart_smoke, "_available_port", lambda: 43127)
     monkeypatch.setattr(restart_smoke, "_wait_for_ready", fake_readiness)
@@ -209,6 +223,18 @@ def test_replacement_uses_distinct_containers_one_volume_and_memory_only_cookie(
         "_verify_restart_fixture",
         lambda owner, foreign, evidence: verify_calls.append((owner, foreign, evidence)),
     )
+    monkeypatch.setattr(
+        restart_smoke,
+        "verify_container_runtime",
+        lambda **kwargs: (
+            lifecycle.append(
+                "runtime_a"
+                if kwargs["container_name"] == "a" * 64
+                else "runtime_b"
+            ),
+            runtime_inspections.append(kwargs),
+        ),
+    )
 
     result = restart_smoke.run_container_restart_smoke(
         image="backchannel:test",
@@ -227,8 +253,38 @@ def test_replacement_uses_distinct_containers_one_volume_and_memory_only_cookie(
     first_mount = first_arguments[first_arguments.index("--mount") + 1]
     second_mount = second_arguments[second_arguments.index("--mount") + 1]
     assert first_mount == second_mount
-    assert "type=volume" in first_mount
-    assert "target=/data" in first_mount
+    expected_mount = (
+        "type=volume,"
+        f"source={first_mount.split('source=', 1)[1].split(',', 1)[0]},"
+        "target=/data"
+    )
+    assert first_mount == expected_mount
+    for arguments in (first_arguments, second_arguments):
+        assert arguments.count("--user=10001:10001") == 1
+        assert arguments.count("--read-only") == 1
+        assert arguments.count("--cap-drop=ALL") == 1
+        assert arguments.count("--security-opt=no-new-privileges:true") == 1
+        assert arguments.count("--security-opt=seccomp=builtin") == 1
+        assert arguments.count("--ipc=private") == 1
+        assert arguments.count("--cgroupns=private") == 1
+        assert arguments.count("--network=bridge") == 1
+        assert arguments.count("--pids-limit=128") == 1
+        assert arguments.count("--restart=no") == 1
+        assert "--privileged" not in arguments
+        assert not any(argument.startswith("--cap-add") for argument in arguments)
+        assert arguments.count("--mount") == 1
+    assert runtime_inspections == [
+        {
+            "container_name": "a" * 64,
+            "expected_volume": first_mount.split("source=", 1)[1].split(",", 1)[0],
+            "expected_port": 43127,
+        },
+        {
+            "container_name": "b" * 64,
+            "expected_volume": second_mount.split("source=", 1)[1].split(",", 1)[0],
+            "expected_port": 43127,
+        },
+    ]
     assert readiness == [
         ("http://127.0.0.1:43127", "first_container"),
         ("http://127.0.0.1:43127", "replacement_container"),
@@ -274,12 +330,14 @@ def test_replacement_uses_distinct_containers_one_volume_and_memory_only_cookie(
     assert stop_index < second_run_index
     assert lifecycle == [
         "run_a",
+        "runtime_a",
         "open_a_stream",
         "capacity_probe",
         "stop_a",
         "inspect_a",
         "close_a_stream",
         "run_b",
+        "runtime_b",
     ]
     assert held_stream.close_calls == 1
     cleanup = [arguments for arguments, _, allow_failure in calls if allow_failure]
@@ -306,11 +364,14 @@ def test_replacement_uses_distinct_containers_one_volume_and_memory_only_cookie(
         "pendingRecoveryResume": "passed",
         "proofLane": "packaged_replacement_container",
         "receiptPersistence": "passed",
+        "daemonRuntimeConfig": "passed",
+        "kernelProcessProbe": "passed",
         "sessionIsolation": "passed",
         "smoke": "passed",
         "ssePersistence": "passed",
         "terminalReplayPersistence": "passed",
         "volumePersistence": "passed",
+        "writableDataMount": "passed",
     }
 
 
@@ -808,12 +869,130 @@ def test_cleanup_is_attempted_when_first_container_api_proof_fails(
     cleanup = [arguments for arguments, allow_failure in calls if allow_failure]
     assert len(
         [arguments for arguments in cleanup if arguments[:2] == ("container", "ls")]
-    ) == 2
+    ) == 3
     assert len([arguments for arguments in cleanup if arguments[:2] == ("rm", "-f")]) == 1
-    assert len([arguments for arguments in cleanup if arguments[:2] == ("volume", "ls")]) == 1
+    assert len([arguments for arguments in cleanup if arguments[:2] == ("volume", "ls")]) == 2
     assert len([arguments for arguments in cleanup if arguments[:3] == ("volume", "rm", "-f")]) == 1
     assert not containers
     assert not volumes
+
+
+def test_cleanup_rejects_a_remove_echo_when_the_resource_still_exists(
+    restart_smoke: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+    responses = iter(("runtime-a", "runtime-a", "runtime-a"))
+
+    def fake_cleanup(arguments: list[str]) -> str:
+        calls.append(tuple(arguments))
+        return next(responses)
+
+    monkeypatch.setattr(restart_smoke, "_try_cleanup_docker", fake_cleanup)
+
+    assert (
+        restart_smoke._cleanup_named_resource(
+            expected_name="runtime-a",
+            list_arguments=["container", "ls", "--filter", "name=runtime-a"],
+            remove_arguments=["rm", "-f", "runtime-a"],
+        )
+        is False
+    )
+    assert calls == [
+        ("container", "ls", "--filter", "name=runtime-a"),
+        ("rm", "-f", "runtime-a"),
+        ("container", "ls", "--filter", "name=runtime-a"),
+    ]
+
+
+def test_runtime_contract_failure_skips_readiness_and_cleans_owned_resources(
+    restart_smoke: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lifecycle: list[str] = []
+    containers: set[str] = set()
+    volumes: set[str] = set()
+
+    def fake_docker(
+        arguments: list[str],
+        *,
+        environment: dict[str, str] | None = None,
+        allow_failure: bool = False,
+    ) -> str | None:
+        del environment
+        if arguments[:2] == ["volume", "create"]:
+            volumes.add(arguments[-1])
+            lifecycle.append("volume_create")
+            return arguments[-1]
+        if arguments[0] == "run":
+            containers.add(arguments[arguments.index("--name") + 1])
+            lifecycle.append("run")
+            return "d" * 64
+        if arguments[:2] == ["container", "ls"]:
+            name = arguments[arguments.index("--filter") + 1].removeprefix("name=")
+            lifecycle.append("container_list")
+            return name if name in containers else ""
+        if arguments[:2] == ["volume", "ls"]:
+            name = arguments[arguments.index("--filter") + 1].removeprefix("name=")
+            lifecycle.append("volume_list")
+            return name if name in volumes else ""
+        if arguments[:2] == ["rm", "-f"]:
+            assert allow_failure is True
+            containers.remove(arguments[-1])
+            lifecycle.append("container_remove")
+            return arguments[-1]
+        if arguments[:3] == ["volume", "rm", "-f"]:
+            assert allow_failure is True
+            volumes.remove(arguments[-1])
+            lifecycle.append("volume_remove")
+            return arguments[-1]
+        raise AssertionError(arguments)
+
+    def fail_runtime_contract(**kwargs: object) -> None:
+        assert kwargs["container_name"] == "d" * 64
+        assert kwargs["expected_port"] == 43128
+        lifecycle.append("runtime_contract")
+        raise restart_smoke.ContainerRuntimeContractFailure(
+            "private runtime detail"
+        )
+
+    monkeypatch.setattr(restart_smoke, "_docker", fake_docker)
+    monkeypatch.setattr(restart_smoke, "_available_port", lambda: 43128)
+    monkeypatch.setattr(
+        restart_smoke,
+        "verify_container_runtime",
+        fail_runtime_contract,
+    )
+    monkeypatch.setattr(
+        restart_smoke,
+        "_wait_for_ready",
+        lambda *_args, **_kwargs: pytest.fail("readiness must not begin"),
+    )
+
+    with pytest.raises(
+        restart_smoke.ContainerRestartFailure,
+        match="^Packaged container runtime contract failed$",
+    ) as captured:
+        restart_smoke.run_container_restart_smoke(
+            image="backchannel:test",
+            canary="canary-kept-out-of-output",
+        )
+
+    assert lifecycle == [
+        "volume_create",
+        "run",
+        "runtime_contract",
+        "container_list",
+        "container_remove",
+        "container_list",
+        "container_list",
+        "volume_list",
+        "volume_remove",
+        "volume_list",
+    ]
+    assert not containers
+    assert not volumes
+    assert "private" not in str(captured.value)
 
 
 def test_first_container_creates_two_pending_sdk_recoveries_and_terminal_replay(
@@ -1472,18 +1651,19 @@ def test_cleanup_failure_attempts_every_resource_and_fails_closed(
         for arguments, observed_runs in calls
         if observed_runs == 2 and arguments[0] != "run"
     ]
-    assert len(cleanup_calls) == 5
+    assert len(cleanup_calls) == 6
     assert cleanup_calls[0][:2] == ("container", "ls")
     assert cleanup_calls[1][:2] == ("container", "ls")
     assert cleanup_calls[2][:2] == ("rm", "-f")
     assert cleanup_calls[3][:2] == ("volume", "ls")
     assert cleanup_calls[4][:3] == ("volume", "rm", "-f")
+    assert cleanup_calls[5][:2] == ("volume", "ls")
     assert "secret" not in str(captured.value)
     assert "canary" not in str(captured.value)
     assert "private" not in str(captured.value)
 
 
-def test_cleanup_failure_preserves_primary_failure_and_attempts_every_resource(
+def test_cleanup_failure_combines_unexpected_failure_and_attempts_every_resource(
     restart_smoke: ModuleType,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1563,7 +1743,7 @@ def test_cleanup_failure_preserves_primary_failure_and_attempts_every_resource(
 
     with pytest.raises(
         restart_smoke.ContainerRestartFailure,
-        match="^Packaged restart smoke failed during replacement API verification$",
+        match="^Unexpected packaged restart failure left incomplete cleanup$",
     ) as captured:
         restart_smoke.run_container_restart_smoke(
             image="backchannel:test",
@@ -1575,7 +1755,8 @@ def test_cleanup_failure_preserves_primary_failure_and_attempts_every_resource(
         for arguments, observed_runs in calls
         if observed_runs == 2 and arguments[0] != "run"
     ]
-    assert len(cleanup_calls) == 5
-    assert "cleanup" not in str(captured.value).lower()
+    assert len(cleanup_calls) == 6
+    assert cleanup_calls[-1][:2] == ("volume", "ls")
+    assert "cleanup" in str(captured.value).lower()
     assert "canary" not in str(captured.value)
     assert "private" not in str(captured.value)

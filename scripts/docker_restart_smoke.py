@@ -22,6 +22,10 @@ from typing import Any, Literal
 from urllib.request import urlopen
 
 if __package__:
+    from scripts.docker_runtime_contract import (
+        ContainerRuntimeContractFailure,
+        verify_container_runtime,
+    )
     from scripts.docker_smoke import (
         SmokeClient,
         SmokeFailure,
@@ -30,6 +34,10 @@ if __package__:
         _sse_ids_and_payloads,
     )
 else:
+    from docker_runtime_contract import (  # type: ignore[no-redef]
+        ContainerRuntimeContractFailure,
+        verify_container_runtime,
+    )
     from docker_smoke import (  # type: ignore[no-redef]
         SmokeClient,
         SmokeFailure,
@@ -417,6 +425,16 @@ def _container_arguments(
         "-d",
         "--name",
         name,
+        "--user=10001:10001",
+        "--read-only",
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges:true",
+        "--security-opt=seccomp=builtin",
+        "--ipc=private",
+        "--cgroupns=private",
+        "--network=bridge",
+        "--pids-limit=128",
+        "--restart=no",
         "-p",
         f"127.0.0.1:{port}:{_CONTAINER_PORT}",
         "--mount",
@@ -461,6 +479,16 @@ def _start_container(
         "Docker did not return a valid container identity",
     )
     assert isinstance(container_id, str)
+    try:
+        verify_container_runtime(
+            container_name=container_id,
+            expected_volume=volume,
+            expected_port=port,
+        )
+    except ContainerRuntimeContractFailure:
+        raise ContainerRestartFailure(
+            "Packaged container runtime contract failed"
+        ) from None
     return container_id
 
 
@@ -502,7 +530,10 @@ def _cleanup_named_resource(
     if listed_names != [expected_name]:
         return False
     removed = _try_cleanup_docker(remove_arguments)
-    return removed == expected_name
+    if removed != expected_name:
+        return False
+    remaining = _try_cleanup_docker(list_arguments)
+    return remaining == ""
 
 
 def _cleanup_resources(
@@ -643,6 +674,14 @@ def run_container_restart_smoke(*, image: str, canary: str) -> dict[str, object]
         second_name=second_name,
         volume=volume,
     )
+    if primary_failure is not None and not cleanup_succeeded:
+        raise ContainerRestartFailure(
+            "Packaged restart smoke failed and cleanup was incomplete"
+        ) from None
+    if unexpected_failure_message is not None and not cleanup_succeeded:
+        raise ContainerRestartFailure(
+            "Unexpected packaged restart failure left incomplete cleanup"
+        ) from None
     if primary_failure is not None:
         raise primary_failure from None
     if unexpected_failure_message is not None:
@@ -661,11 +700,14 @@ def run_container_restart_smoke(*, image: str, canary: str) -> dict[str, object]
         "pendingRecoveryResume": "passed",
         "proofLane": "packaged_replacement_container",
         "receiptPersistence": "passed",
+        "daemonRuntimeConfig": "passed",
+        "kernelProcessProbe": "passed",
         "sessionIsolation": "passed",
         "smoke": "passed",
         "ssePersistence": "passed",
         "terminalReplayPersistence": "passed",
         "volumePersistence": "passed",
+        "writableDataMount": "passed",
     }
 
 

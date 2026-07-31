@@ -25,9 +25,9 @@ RUN uv sync --frozen --no-dev
 
 FROM python:3.12.12-slim-bookworm@sha256:593bd06efe90efa80dc4eee3948be7c0fde4134606dd40d8dd8dbcade98e669c AS runtime
 
-ENV BACKCHANNEL_DB_PATH=/data/backchannel.sqlite3 BACKCHANNEL_DEPLOYED_MODE=true PATH=/app/.venv/bin:$PATH PORT=8000 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+ENV BACKCHANNEL_DB_PATH=/data/backchannel.sqlite3 BACKCHANNEL_DEPLOYED_MODE=true PATH=/app/.venv/bin:$PATH PORT=8000 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 SQLITE_TMPDIR=/data
 
-RUN groupadd --gid 10001 backchannel && useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin backchannel && install -d -o backchannel -g backchannel /data
+RUN groupadd --gid 10001 backchannel && useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin backchannel && install -d -m 0700 -o backchannel -g backchannel /data
 
 WORKDIR /app
 COPY --from=python-build /app/.venv ./.venv

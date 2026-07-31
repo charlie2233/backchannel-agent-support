@@ -12,7 +12,7 @@ _SHA256_DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 _PARSER_DIRECTIVE = re.compile(r"#\s*(?:syntax|escape|check)\s*=", re.IGNORECASE)
 _C_STYLE_SYNTAX_DIRECTIVE = re.compile(r"//\s*syntax\s*=", re.IGNORECASE)
 _REVIEWED_CONTAINER_INPUT_DIGESTS = {
-    "Dockerfile": "d3f6a544655af6cb7075658f8b40e65e50507af9ef46277d1f29cff94d2bde1f",
+    "Dockerfile": "d659491d8736864fc81919a48f48cc97bea944f3eaa3d4b542f3798dd506995a",
     ".dockerignore": "996f2172e36bce0e306651d5f9a7880457f5f5e604a880f8b122eef9a23cfdc0",
 }
 _EXPECTED_STAGE_BASES = {
@@ -52,7 +52,7 @@ _EXPECTED_RUN_INSTRUCTIONS = (
     (
         "RUN groupadd --gid 10001 backchannel && useradd --uid 10001 --gid 10001 "
         "--create-home --shell /usr/sbin/nologin backchannel && install -d "
-        "-o backchannel -g backchannel /data"
+        "-m 0700 -o backchannel -g backchannel /data"
     ),
 )
 _EXPECTED_DOCKERIGNORE_PATTERNS = frozenset(
@@ -233,6 +233,13 @@ def test_python_build_and_runtime_share_one_exact_base() -> None:
     stages = _stage_bases(dockerfile)
 
     assert stages["python-build"] == stages["runtime"]
+
+
+def test_runtime_routes_sqlite_temporary_files_to_owner_only_data() -> None:
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "SQLITE_TMPDIR=/data" in dockerfile
+    assert "install -d -m 0700 -o backchannel -g backchannel /data" in dockerfile
 
 
 def test_provenance_parser_rejects_an_unaliased_or_noncanonical_stage() -> None:

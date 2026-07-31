@@ -276,6 +276,29 @@ and identity configuration, and no build-time API key. Because the image healthc
 `BACKCHANNEL_ALLOWED_HOSTS`. A local production smoke is useful evidence for the packaged
 application contract, but it is not container-runtime proof.
 
+The current workflow and replacement runner also require the exact packaged runtime profile before
+readiness: UID/GID `10001:10001`, read-only root, all capabilities dropped, no-new-privileges,
+the Docker built-in seccomp profile, private IPC and cgroup namespaces, bridge networking, a
+128-process limit, no automatic restart, loopback-only port publishing, and exactly one writable
+local named volume at `/data`. The image sets `/data` to owner-only `0700` and
+`SQLITE_TMPDIR=/data`; the process probe opens a file-backed temporary SQLite database so
+read-only-root success does not rely only on small queries that happen to remain in memory.
+
+`scripts/docker_runtime_contract.py` uses the returned immutable-format container ID, a finite
+Docker deadline, suppressed stderr, file-backed inspect capture with a 32 KiB acceptance ceiling,
+and a projection that excludes `Config.Env` and host mount source paths. It binds the
+daemon-recorded configuration, including supplementary-group and device-cgroup controls, then runs
+a fixed, output-suppressed probe through `/usr/local/bin/python -I -S -B`. The probe checks PID 1
+UID/GID and supplementary groups, zero capability sets, `NoNewPrivs: 1`, seccomp filter mode,
+owner-only writable `/data`, SQLite temporary-database operation, and root-filesystem write denial.
+The primary CI cleanup and the replacement runner attempt every owned container before the named
+volume and fail if removal or absence verification fails. Static tests prove the command and
+validation contracts; only a passing container job for the exact commit proves that a Docker
+runtime executed them. Even then, `Seccomp: 2` does not identify the byte-for-byte built-in profile,
+and this lane does not prove a trustworthy daemon/kernel/base interpreter/dynamic loader, rootless
+or user-namespace isolation, network-egress isolation, volume encryption/durability, abrupt-runner
+cleanup, or target-host parity.
+
 The GitHub-hosted `container-smoke` job in
 [CI run 30605239475](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30605239475),
 job `91076408372`, is verified packaged container evidence for exact source commit

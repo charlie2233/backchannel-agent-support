@@ -62,12 +62,29 @@ jobs:
           printf 'BACKCHANNEL_SMOKE_CANARY=%s\n' "$release_canary" >> "$GITHUB_ENV"
       - name: Start packaged app
         run: |
-          docker run --rm -d --name backchannel-ci -p 8000:8000 \
+          docker volume create backchannel-ci-data >/dev/null
+          container_id="$(docker run -d --name backchannel-ci \
+            --user=10001:10001 \
+            --read-only \
+            --cap-drop=ALL \
+            --security-opt=no-new-privileges:true \
+            --security-opt=seccomp=builtin \
+            --ipc=private \
+            --cgroupns=private \
+            --network=bridge \
+            --pids-limit=128 \
+            --restart=no \
+            --mount type=volume,source=backchannel-ci-data,target=/data \
+            -p 127.0.0.1:8000:8000 \
             -e BACKCHANNEL_ALLOWED_HOSTS=127.0.0.1 \
             -e BACKCHANNEL_CORS_ORIGINS=https://judge.example \
             -e BACKCHANNEL_IDENTITY_HASH_SECRET=ci-container-identity-boundary-0123456789 \
             -e OPENAI_API_KEY="$BACKCHANNEL_SMOKE_CANARY" \
-            backchannel:build-week
+            backchannel:build-week)"
+          uv run python scripts/docker_runtime_contract.py \
+            --container "$container_id" \
+            --volume backchannel-ci-data \
+            --port 8000
           for attempt in $(seq 1 40); do
             if curl --fail --silent http://127.0.0.1:8000/readyz >/dev/null; then
               exit 0
@@ -77,5 +94,46 @@ jobs:
           exit 1
       - run: npm run smoke:docker
       - run: npm run smoke:container:restart
-      - if: always()
-        run: docker stop backchannel-ci || true
+      - name: Clean packaged resources
+        if: always()
+        run: |
+          cleanup_failed=0
+          if ! container_names="$(
+            docker container ls --all --filter name=backchannel-ci --format '{{.Names}}'
+          )"; then
+            cleanup_failed=1
+            container_names=""
+          elif [ -n "$container_names" ]; then
+            if [ "$container_names" != "backchannel-ci" ]; then
+              cleanup_failed=1
+            elif ! docker rm -f backchannel-ci >/dev/null; then
+              cleanup_failed=1
+            fi
+          fi
+          if ! volume_names="$(
+            docker volume ls --filter name=backchannel-ci-data --format '{{.Name}}'
+          )"; then
+            cleanup_failed=1
+            volume_names=""
+          elif [ -n "$volume_names" ]; then
+            if [ "$volume_names" != "backchannel-ci-data" ]; then
+              cleanup_failed=1
+            elif ! docker volume rm -f backchannel-ci-data >/dev/null; then
+              cleanup_failed=1
+            fi
+          fi
+          if ! container_names="$(
+            docker container ls --all --filter name=backchannel-ci --format '{{.Names}}'
+          )"; then
+            cleanup_failed=1
+          elif [ -n "$container_names" ]; then
+            cleanup_failed=1
+          fi
+          if ! volume_names="$(
+            docker volume ls --filter name=backchannel-ci-data --format '{{.Name}}'
+          )"; then
+            cleanup_failed=1
+          elif [ -n "$volume_names" ]; then
+            cleanup_failed=1
+          fi
+          test "$cleanup_failed" -eq 0

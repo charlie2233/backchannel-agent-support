@@ -480,6 +480,46 @@ def test_ci_is_keyless_lockfile_based_and_declares_external_gates() -> None:
     assert "-e BACKCHANNEL_ALLOWED_HOSTS=127.0.0.1" in packaged_start
     assert '-e OPENAI_API_KEY="$BACKCHANNEL_SMOKE_CANARY"' in workflow
     assert "docker build --pull -t backchannel:build-week ." in container_job
+    assert "docker volume create backchannel-ci-data" in packaged_start
+    assert (
+        "--mount type=volume,source=backchannel-ci-data,target=/data"
+        in packaged_start
+    )
+    assert packaged_start.count("--read-only") == 1
+    assert packaged_start.count("--user=10001:10001") == 1
+    assert packaged_start.count("--cap-drop=ALL") == 1
+    assert packaged_start.count("--security-opt=no-new-privileges:true") == 1
+    assert packaged_start.count("--security-opt=seccomp=builtin") == 1
+    assert packaged_start.count("--ipc=private") == 1
+    assert packaged_start.count("--cgroupns=private") == 1
+    assert packaged_start.count("--network=bridge") == 1
+    assert packaged_start.count("--pids-limit=128") == 1
+    assert packaged_start.count("--restart=no") == 1
+    assert packaged_start.count("-p 127.0.0.1:8000:8000") == 1
+    assert packaged_start.count("--mount") == 1
+    assert "--rm" not in packaged_start
+    assert "--privileged" not in packaged_start
+    assert "--cap-add" not in packaged_start
+    assert "uv run python scripts/docker_runtime_contract.py" in packaged_start
+    assert '--container "$container_id"' in packaged_start
+    assert "--volume backchannel-ci-data" in packaged_start
+    assert "--port 8000" in packaged_start
+    assert packaged_start.index("scripts/docker_runtime_contract.py") < (
+        packaged_start.index("for attempt")
+    )
+    assert "docker volume rm -f backchannel-ci-data" in container_job
+    assert "docker rm -f backchannel-ci" in container_job
+    cleanup = container_job.split("- name: Clean packaged resources", 1)[1]
+    assert "if: always()" in cleanup
+    assert "cleanup_failed=0" in cleanup
+    assert cleanup.index("docker rm -f backchannel-ci") < cleanup.index(
+        "docker volume rm -f backchannel-ci-data"
+    )
+    assert cleanup.count("docker container ls") == 2
+    assert cleanup.count("docker volume ls") == 2
+    assert 'test "$cleanup_failed" -eq 0' in cleanup
+    assert "prune" not in cleanup
+    assert "|| true" not in container_job
     assert "BACKCHANNEL_DEMO_RESET_ENABLED" not in packaged_start
     assert re.search(r"sk-[A-Za-z0-9_-]{20,}", workflow) is None
 

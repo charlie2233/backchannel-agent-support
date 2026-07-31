@@ -346,6 +346,31 @@ instruction to the reviewed lists and rejects every direct `ADD` source. This mi
 builder-visible local data. It does not prove a malicious builder or external cache is
 trustworthy, erase content retained by an earlier build, or identify secrets stored under an
 unknown future filename.
+
+The checked-in packaged launch profiles make the runtime boundary explicit. Both the primary
+container smoke and the planned replacement smoke request UID/GID `10001:10001`, a read-only root
+filesystem, all Linux capabilities dropped, no-new-privileges, Docker's built-in seccomp profile,
+private IPC and cgroup namespaces, bridge networking, a 128-process ceiling, no restart policy,
+and a loopback-only published port. Exactly one writable local named volume is mounted at `/data`;
+the image creates that directory as owner-only `0700` and routes SQLite temporary files there with
+`SQLITE_TMPDIR=/data`.
+
+Before readiness, a secret-safe helper inspects the returned container ID rather than its mutable
+name. Its projection excludes environment values and host mount sources while binding the
+daemon-recorded user, privilege, capability, namespace, device, process, restart, port, and mount
+configuration. Inspect output is captured outside the Python heap and accepted only below 32 KiB.
+A separate suppressed-output `docker exec` probe uses the pinned base interpreter in isolated,
+no-site, no-bytecode mode. It observes PID 1 as UID/GID 10001 with no unexpected supplementary
+groups, zero capability sets, `NoNewPrivs: 1`, and seccomp filter mode; verifies `/data` ownership
+and writeability; exercises a file-backed SQLite temporary database; and confirms an owner-writable
+image directory is read-only at runtime. Cleanup attempts the owned containers before their
+volume, checks both are absent, and fails closed without broad prune operations or masked errors.
+This proves the requested daemon configuration and observed process state only on the exact
+runtime that executes the helper. It does not identify the byte-for-byte built-in seccomp profile,
+trust the daemon, kernel, pinned base interpreter, or dynamic loader, prove
+user-namespace/rootless isolation, constrain outbound network access, encrypt the volume, survive
+abrupt runner loss, or establish target-host parity.
+
 Readiness coalesces separate database and static-artifact probes behind process-local locks. Both
 success and failure are cached for five seconds, so a newly damaged or repaired static tree can
 remain stale for less than one cache interval. A database refresh uses a
