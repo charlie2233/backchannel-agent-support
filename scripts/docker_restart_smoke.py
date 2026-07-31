@@ -468,12 +468,12 @@ def _stop_and_remove_container(name: str) -> None:
     elapsed = time.monotonic() - started_at
     _require(
         elapsed < CONTAINER_STOP_TIMEOUT_SECONDS,
-        "First container exceeded its graceful stop budget",
+        "First container exceeded its clean stop budget",
     )
     exit_code = _docker(["inspect", "--format", "{{.State.ExitCode}}", name])
     _require(
-        exit_code in {"0", "143"},
-        "First container did not exit gracefully",
+        exit_code == "0",
+        "First container did not exit cleanly",
     )
     _docker(["rm", "-f", name])
 
@@ -654,7 +654,7 @@ def run_container_restart_smoke(*, image: str, canary: str) -> dict[str, object]
         "containerReplacement": "passed",
         "containers": "distinct",
         "decline": "closed_without_action_after_replacement",
-        "gracefulActiveSseShutdown": "passed",
+        "cleanExitWithActiveSse": "passed",
         "pendingRecoveryResume": "passed",
         "proofLane": "packaged_replacement_container",
         "receiptPersistence": "passed",

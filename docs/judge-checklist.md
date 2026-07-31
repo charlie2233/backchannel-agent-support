@@ -31,6 +31,13 @@ execution is not real provider execution. The replay receipt content matched exa
 decoding; replay SSE bytes matched exactly. Approval and decline then produced authoritative
 receipts and terminal SSE in B.
 
+The current replacement runner holds one authorized SSE while confirming the second connection
+receives the exact finite capacity frame. `docker stop` must return inside a fixed five-second
+budget and inspection must report exact process exit code `0`; signal exit `143` fails before a
+replacement starts. Its `cleanExitWithActiveSse` marker therefore means only that PID 1 reached a
+clean application exit while the SSE was open. The client closes its retained handle after the
+stop and does not claim a server-delivered EOF or that every buffered client byte flushed.
+
 This evidence does not prove local Docker; abrupt host loss or backup recovery; target-host
 durability or target-host networking; concurrent multi-container SQLite; public deployment or
 public reachability; or live OpenAI or real provider execution. Those remain independent gates.

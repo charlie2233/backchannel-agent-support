@@ -112,7 +112,7 @@ def test_replacement_uses_distinct_containers_one_volume_and_memory_only_cookie(
         if arguments[0] == "inspect":
             assert held_stream.is_open
             lifecycle.append("inspect_a")
-            return "143"
+            return "0"
         if arguments[:2] == ["container", "ls"]:
             name = arguments[arguments.index("--filter") + 1].removeprefix("name=")
             return name if name in containers else ""
@@ -298,7 +298,7 @@ def test_replacement_uses_distinct_containers_one_volume_and_memory_only_cookie(
         "containerReplacement": "passed",
         "containers": "distinct",
         "decline": "closed_without_action_after_replacement",
-        "gracefulActiveSseShutdown": "passed",
+        "cleanExitWithActiveSse": "passed",
         "pendingRecoveryResume": "passed",
         "proofLane": "packaged_replacement_container",
         "receiptPersistence": "passed",
@@ -310,18 +310,16 @@ def test_replacement_uses_distinct_containers_one_volume_and_memory_only_cookie(
     }
 
 
-@pytest.mark.parametrize("exit_code", ["0", "143"])
-def test_stop_inspects_graceful_exit_before_removal_with_strict_budget(
+def test_stop_requires_exact_clean_exit_before_removal_with_strict_budget(
     restart_smoke: ModuleType,
     monkeypatch: pytest.MonkeyPatch,
-    exit_code: str,
 ) -> None:
     calls: list[tuple[str, ...]] = []
     clock = iter((100.0, 104.999))
 
     def fake_docker(arguments: list[str], **_kwargs: object) -> str:
         calls.append(tuple(arguments))
-        return exit_code if arguments[0] == "inspect" else "restart-a"
+        return "0" if arguments[0] == "inspect" else "restart-a"
 
     monkeypatch.setattr(restart_smoke, "_docker", fake_docker)
     monkeypatch.setattr(restart_smoke.time, "monotonic", lambda: next(clock))
@@ -338,7 +336,7 @@ def test_stop_inspects_graceful_exit_before_removal_with_strict_budget(
 
 @pytest.mark.parametrize(
     "exit_code",
-    ["137", "1", "-1", "+0", "0 extra", "", None],
+    ["143", "137", "1", "-1", "+0", "0 extra", "", None],
 )
 def test_stop_rejects_forced_malformed_missing_or_other_exit_before_removal(
     restart_smoke: ModuleType,
@@ -356,7 +354,7 @@ def test_stop_rejects_forced_malformed_missing_or_other_exit_before_removal(
 
     with pytest.raises(
         restart_smoke.ContainerRestartFailure,
-        match="^First container did not exit gracefully$",
+        match="^First container did not exit cleanly$",
     ):
         restart_smoke._stop_and_remove_container("restart-a")
 
@@ -381,11 +379,79 @@ def test_stop_rejects_elapsed_time_at_fixed_boundary_before_inspect_or_remove(
 
     with pytest.raises(
         restart_smoke.ContainerRestartFailure,
-        match="^First container exceeded its graceful stop budget$",
+        match="^First container exceeded its clean stop budget$",
     ):
         restart_smoke._stop_and_remove_container("restart-a")
 
     assert calls == [("stop", "--time", "5", "restart-a")]
+
+
+def test_sigterm_exit_cannot_start_replacement_or_return_success(
+    restart_smoke: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[tuple[str, ...], bool]] = []
+    owner = FakeActiveSseOwner()
+
+    def fake_docker(
+        arguments: list[str],
+        *,
+        environment: dict[str, str] | None = None,
+        allow_failure: bool = False,
+    ) -> str:
+        del environment
+        calls.append((tuple(arguments), allow_failure))
+        if arguments[:2] == ["volume", "create"]:
+            return arguments[-1]
+        if arguments[0] == "run":
+            return "a" * 64
+        if arguments[0] == "stop":
+            return arguments[-1]
+        if arguments[0] == "inspect":
+            return "143"
+        if arguments[:2] in (["container", "ls"], ["volume", "ls"]):
+            return ""
+        return ""
+
+    monkeypatch.setattr(restart_smoke, "_docker", fake_docker)
+    monkeypatch.setattr(restart_smoke, "_available_port", lambda: 43128)
+    monkeypatch.setattr(
+        restart_smoke,
+        "_wait_for_ready",
+        lambda _url, *, phase: None,
+    )
+    monkeypatch.setattr(
+        restart_smoke,
+        "SmokeClient",
+        lambda _url, _canary: owner,
+    )
+    monkeypatch.setattr(
+        restart_smoke,
+        "_create_restart_fixture",
+        lambda _owner: _active_sse_fixture(),
+    )
+    monkeypatch.setattr(
+        restart_smoke,
+        "_verify_restart_fixture",
+        lambda *_args: pytest.fail("replacement verification must not begin"),
+    )
+
+    with pytest.raises(
+        restart_smoke.ContainerRestartFailure,
+        match="^First container did not exit cleanly$",
+    ):
+        restart_smoke.run_container_restart_smoke(
+            image="backchannel:test",
+            canary="canary-kept-out-of-output",
+        )
+
+    run_calls = [arguments for arguments, _ in calls if arguments[0] == "run"]
+    assert len(run_calls) == 1
+    assert owner.close_calls == 1
+    assert not any(
+        arguments[:2] == ("rm", "-f") and not allow_failure
+        for arguments, allow_failure in calls
+    )
 
 
 @pytest.mark.parametrize(
@@ -1161,7 +1227,7 @@ def test_unexpected_orchestration_failures_map_to_fixed_secret_safe_phase(
         if arguments[0] == "run":
             return next(container_ids)
         if arguments[0] == "inspect":
-            return "143"
+            return "0"
         return ""
 
     readiness_calls = 0
@@ -1341,7 +1407,7 @@ def test_cleanup_failure_attempts_every_resource_and_fails_closed(
         if arguments[0] == "stop":
             return arguments[-1]
         if arguments[0] == "inspect":
-            return "143"
+            return "0"
         if arguments[:2] == ["container", "ls"]:
             name = arguments[arguments.index("--filter") + 1].removeprefix("name=")
             return name if name in containers else ""
@@ -1444,7 +1510,7 @@ def test_cleanup_failure_preserves_primary_failure_and_attempts_every_resource(
         if arguments[0] == "stop":
             return arguments[-1]
         if arguments[0] == "inspect":
-            return "143"
+            return "0"
         if arguments[:2] == ["container", "ls"]:
             name = arguments[arguments.index("--filter") + 1].removeprefix("name=")
             return name if name in containers else ""

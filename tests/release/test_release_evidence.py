@@ -543,6 +543,13 @@ def test_release_docs_separate_hosted_container_proof_from_external_gates() -> N
             "this deterministic demo-adapter execution is not real provider execution",
             "replay receipt content matched exactly after json decoding",
             "replay sse bytes matched exactly",
+            "exact process exit code `0`",
+            "signal exit `143` fails before a replacement starts",
+            "`cleanexitwithactivesse`",
+            (
+                "does not claim a server-delivered eof or that every buffered "
+                "client byte flushed"
+            ),
         ):
             assert restart_claim in normalized, (name, restart_claim)
         for ambiguous_claim in (
