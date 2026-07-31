@@ -200,6 +200,11 @@ remaining open, one-shot preservation of the capacity status at stream EOF, tran
 clearing, and unchanged terminal closure. These tests prove at most the configured polling loops
 in this application process. They do not prove a shared limit across workers or containers;
 `scripts/start.py` is separately asserted to launch one worker.
+Owner-reset coverage removes sole-owner access after admission under ASGI 2.3 and 2.4, proves
+frame-free final completion with the lease already released, and reacquires the slot. A shared
+recovery case proves reset detaches only that owner and preserves the other session. Terminal
+stream then reset stays finite, while retained access pointing to a missing recovery still
+propagates an integrity failure and releases the lease.
 The terminal-read integrity suite proves public snapshot, receipt, and initial SSE authorization
 precedes any targeted expiry mutation inside the same SQLite transaction; a stale outer access
 result cannot close another session's recovery. It proves rollback-safe validation before stream

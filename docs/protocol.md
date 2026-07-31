@@ -171,6 +171,12 @@ existing durable replay, polling, heartbeat, disconnect, and terminal rules. The
 lease is also released on cancellation, iterator/store/encoding errors, response construction
 failure, and ASGI send failure.
 
+If successful demo reset removes this session's access after admission, the next public-ledger
+poll ends the stream normally without a synthetic event and releases its lease. Reconnecting
+with the detached session receives the ordinary generic 404; access held by another session is
+unchanged. This narrow EOF applies only to missing caller access. A retained access row whose
+recovery is missing remains an integrity failure rather than being normalized to disconnect.
+
 Every admitted public stream is also bound to the exact UTC expiry verified from its signed
 session cookie. The generator checks that deadline before consuming the buffered admission
 batch, before and after every later public-ledger read, immediately before each event or

@@ -15,7 +15,7 @@ from server.models import (
     ReplayScenarioDefinition,
     ScenarioId,
 )
-from server.store import SQLiteStore
+from server.store import PublicRecoveryAccessRevokedError, SQLiteStore
 
 HEARTBEAT_SECONDS = 15.0
 POLL_INTERVAL_SECONDS = 0.25
@@ -228,12 +228,15 @@ async def stream_recovery_events(
             public_session_key is not None
             and public_replay_scenarios is not None
         ):
-            persisted, recovery_status = store.read_public_event_batch(
-                recovery_id,
-                after_seq=cursor,
-                session_key=public_session_key,
-                replay_scenarios=public_replay_scenarios,
-            )
+            try:
+                persisted, recovery_status = store.read_public_event_batch(
+                    recovery_id,
+                    after_seq=cursor,
+                    session_key=public_session_key,
+                    replay_scenarios=public_replay_scenarios,
+                )
+            except PublicRecoveryAccessRevokedError:
+                return
         else:
             persisted, recovery_status = store.read_event_batch(
                 recovery_id,

@@ -314,6 +314,10 @@ class RecoveryNotFoundError(LookupError):
     """Raised when a durable recovery or receipt does not exist."""
 
 
+class PublicRecoveryAccessRevokedError(RecoveryNotFoundError):
+    """Raised when an admitted public reader no longer has recovery access."""
+
+
 class ReceiptTransitionError(ValueError):
     """Raised when receipt provenance does not match its terminal transition."""
 
@@ -4291,13 +4295,15 @@ class SQLiteStore:
                 (recovery_id, session_key),
             ).fetchone()
             if access is None:
-                raise RecoveryNotFoundError("Recovery not found")
+                raise PublicRecoveryAccessRevokedError("Recovery not found")
             row = connection.execute(
                 "SELECT * FROM recoveries WHERE id = ?",
                 (recovery_id,),
             ).fetchone()
             if row is None:
-                raise RecoveryNotFoundError("Recovery not found")
+                raise PublicEvidenceIntegrityError(
+                    "Public recovery access references a missing recovery"
+                )
             if seal_expired:
                 current_time = self._now()
                 if (

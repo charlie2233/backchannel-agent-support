@@ -254,6 +254,12 @@ taking a writer lock. A stale outer access result can therefore neither mutate a
 recovery nor inspect its integrity; validation failure rolls back a just-sealed expiry. Decision
 requests retain their exact targeted sweep before claim handling.
 
+Post-admission public polling distinguishes access revocation from corrupt storage. Demo reset
+removing the caller's access produces a normal frame-free EOF and releases the process-local
+stream lease; a reconnect by that caller reaches the existing generic 404 boundary, while any
+other session's access remains valid. If access still exists but its recovery row is missing,
+the public evidence fence raises an integrity failure instead of disguising it as disconnect.
+
 Terminal public evidence requires one receipt and exactly one final terminal event, with exact
 recovery, mode, status, model/trace/version provenance, scenario semantics, and one shared
 timezone-aware UTC seal across the recovery update, receipt, and terminal event. Every dynamic

@@ -815,7 +815,9 @@ def test_event_stream_success_response_is_documented_as_sse() -> None:
         "An admitted stream is bound to the exact verified signed-session expiry "
         "and emits no later buffered events, polled events, or heartbeats. A "
         "non-empty ASGI body send still blocked at expiry is cancelled before "
-        "completion; final teardown is bounded."
+        "completion; final teardown is bounded. If that session loses recovery "
+        "access after admission, the stream closes without a synthetic event and "
+        "a later reconnect receives the ordinary generic not-found response."
         in operation["description"]
     )
 
