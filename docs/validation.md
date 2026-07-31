@@ -6,12 +6,14 @@ container, live OpenAI, deployment, or release evidence.
 This file records only `codex/backchannel-v0.3` evidence. It does not import or claim
 results from any sibling branch.
 
-## Current Task35 capture and evidence activation
+## Current Task35 final evidence activation
 
 - Capture source / frozen runtime:
   `21d9b0f8dbeb59454e3f3b3d3d9138af28af02ad`
-- Evidence activation:
+- Capture evidence activation:
   `60fe1243a5eeb760984d78d667f7efdc33630adc`
+- Final evidence activation:
+  `6533a3f2e212d9a7c4e1af9f1d2dd77f7bd45a18`
 - `npm run test:e2e` reported `29 passed` against the clean capture source
   in Google Chrome 150.0.7871.187 and produced six manifest-bound PNGs at
   1440×1024 and 390×844. The run covered 29 capture contracts.
@@ -28,14 +30,39 @@ results from any sibling branch.
 - Independent Task35 specification and quality reviews passed with no P0-P3
   findings after the quality review required and implementation added the
   explicit second-reopen proof.
-- Capture activation GitHub Actions
+- The exact local canonical gate on final evidence activation
+  `6533a3f2e212d9a7c4e1af9f1d2dd77f7bd45a18` covered 29 capture contracts,
+  `capture_manifest_valid`, 19 web test files / 369 tests, the production
+  TypeScript/Vite build, Ruff, strict MyPy over 35 source files, and
+  `957 passed`, 3 warnings, in 25.36s.
+- The local deterministic stub smoke reported `PASS`. The local production
+  `deterministic-qa` smoke reported `PASS` for health, readiness, session
+  isolation, SSE reconnect, approval, decline, and bounded SIGTERM. OpenAPI
+  verification and the history-aware secret scan also reported `PASS`.
+- The live three-run command remained blocked at its
+  `missing_openai_api_key` preflight after `attempted=1` of `target=3`, with
+  `approvals=0` and no model IDs, tools, or root trace. It did not execute three
+  live runs.
+- The earlier capture evidence activation
+  `60fe1243a5eeb760984d78d667f7efdc33630adc` and GitHub Actions
   [run 30595724271](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30595724271)
-  is observed nonproof: `verify`
+  remain bounded historical nonproof: `verify`
   ([job 91047571247](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30595724271/job/91047571247))
   reported `FAILURE` with `1 failed, 950 passed, 1 warning` in 41.89s and
   exactly one observed annotation; `container-smoke`
   ([job 91047810594](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30595724271/job/91047810594))
   reported `SKIPPED`, with container annotations `[]`.
+- Final evidence activation GitHub Actions
+  [run 30598406930](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30598406930)
+  passed the exact named hosted lanes. `verify`
+  ([job 91055708186](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30598406930/job/91055708186))
+  reported `PASS` with `957 passed, 1 warning` in 46.45s and covered the
+  canonical gate, deterministic stub smoke, OpenAPI verification, and the
+  history-aware secret scan. `container-smoke`
+  ([job 91055968348](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30598406930/job/91055968348))
+  reported `PASS`, built the packaged image, confirmed runtime user
+  `10001:10001`, and passed the offline network-none `deterministic-qa` and
+  `deployed-readonly` profiles. Both job annotation APIs returned `[]`.
 
 ## Current Task35 transition-marker proof boundary
 
@@ -50,36 +77,44 @@ the foreign-key check was empty and the integrity check returned `ok`.
 
 ## Current Task35 pending external gates
 
-- A new documentation successor and its full canonical gate are pending.
-- Hosted GitHub `verify`, packaged-container, and final docs-tip CI for that new
-  successor are pending.
+- Within the source, capture, and hosted activation lane, only final
+  documentation-tip CI for the resulting documentation successor remains
+  pending.
 - There is no current Task35 live OpenAI, public deployment, tag, or release
-  proof or claim.
+  proof or claim. The blocked missing-key attempt did not execute three live
+  runs or prove a real provider mutation.
 
 ## Per-SHA proof matrix
 
 | Lane | Exact evidence | Status and boundary |
 | --- | --- | --- |
-| Local source and tests | Focused Task35 transition-marker gates on `21d9b0f…` | **Verified locally** in the named lanes; the current full canonical gate remains pending |
+| Local source and tests | Exact final evidence activation canonical gate on `6533a3f…`: 29 capture contracts, manifest verification, 19 web files / 369 tests, build, Ruff, strict MyPy over 35 files, and 957 Python tests | **Verified locally** in the exact named lanes |
 | Local final-build captures | [`docs/assets/final/manifest.json`](assets/final/manifest.json); six provenance-checked PNGs under [`docs/assets/final`](assets/final) | **Local capture evidence only** on source `21d9b0f…` in Google Chrome at 1440×1024 and 390×844; not container, deployment, live OpenAI, or release proof |
-| Live OpenAI | No current Task35 live run | **Blocked / Unverified** |
+| Live OpenAI | Three-run command stopped at `missing_openai_api_key` after attempt 1 of 3, with zero approvals and no model IDs, tools, or root trace | **Blocked / Unverified**; three live runs did not execute |
 | Local Docker | No Docker-family runtime is installed on this Mac | **Unverified locally** |
-| GitHub CI/container | Activation `60fe124…`; run `30595724271`; `verify` job `91047571247` = `FAILURE`; `container-smoke` job `91047810594` = `SKIPPED` | **Observed nonproof / Unverified**; a new documentation successor, successful hosted verification, packaged-container result, and final docs-tip CI remain pending |
+| GitHub CI/container | Final activation `6533a3f…`; run `30598406930`; `verify` job `91055708186` = `PASS`; `container-smoke` job `91055968348` = `PASS`; both annotation APIs `[]` | **Verified for the exact hosted canonical and packaged-container smoke lanes**; final docs-tip CI remains pending within that activation lane |
 | Public deployment | No public application origin | **Blocked / Unverified** |
 | Tag/release | No release tag or GitHub release | **Blocked / Unverified** |
 
 ## Hosted container evidence boundary
 
-The current activation has one bounded hosted nonproof result: `verify` failed
-and `container-smoke` was skipped. It does not verify hosted CI or a packaged
-container and does not prove local Docker, browser capture in CI, public
-deployment or browser URL, live OpenAI, real provider execution, container
-replacement or restart, long-lived `/data` volume persistence, target-host
+The final activation passed the exact hosted canonical lane and packaged
+container smoke lane. The container job built the packaged image, confirmed
+runtime user `10001:10001`, and passed only the offline network-none
+`deterministic-qa` and `deployed-readonly` profiles. This does not prove local
+Docker, browser capture in CI, public deployment or browser URL, live OpenAI,
+real provider execution, container replacement or restart durability beyond
+those exact profiles, long-lived `/data` volume persistence, target-host
 durability/networking, abrupt host loss or backup, concurrent multi-container
-SQLite, final documentation-tip CI, tag, or release. A new documentation
-successor, its full canonical gate, successful hosted verification,
-packaged-container result, and final docs-tip CI remain pending. The current
-browser capture remained local; CI did not execute the browser capture.
+SQLite, final documentation-tip CI, tag, or release.
+
+The earlier capture activation run `30595724271` remains bounded historical
+nonproof: `verify` failed and `container-smoke` was skipped. The successful
+final activation does not erase that result. Within the source, capture, and
+hosted activation lane, only final docs-tip CI remains pending. Live OpenAI,
+public deployment, local Docker, tag, and release remain separate blocked or
+unverified lanes. The browser capture remained local; CI did not execute the
+browser capture.
 
 ## Capture contract
 
@@ -95,12 +130,13 @@ across 84 runtime paths, capture profile `keyless_sdk_stub`, environment
 `en-US` / `UTC` / `reduce` / `light`, and all six artifact hashes, states, and
 dimensions.
 
-Capture source `21d9b0f…`; evidence activation `60fe124…`; runtime digest
-`eabc274…`. The browser capture was
-produced against the clean source SHA, and the activation successor added the captured
-files. CI did not execute the browser capture. The six images prove only the local keyless
-SDK-stub final build; they do not prove live OpenAI, a public deployment, a container,
-a release, or a real provider mutation.
+Capture source `21d9b0f…`; capture evidence activation `60fe124…`; final
+evidence activation `6533a3f…`; runtime digest `eabc274…`. The browser capture
+was produced against the clean source SHA, and the capture activation successor
+added the captured files. CI did not execute the browser capture. The six images
+prove only the local keyless SDK-stub final build; they do not prove live
+OpenAI, a public deployment, a container, a release, or a real provider
+mutation.
 
 A later documentation-only successor does not inherit a new browser claim. Keep the
 capture lane bound to `21d9b0f…` unless `npm run test:e2e` is observed again on a
@@ -158,9 +194,10 @@ timing, public latency, or hosted behavior.
 
 The current source retains the bounded-worker SQLite design. The superseded Task29
 section below records the exact focused, full, and hosted evidence for that earlier
-checkpoint; the current Task35 local gate does not promote it into current hosted or
-container proof. It does not prove multi-process or concurrent multi-container SQLite,
-target-host scheduling, abrupt host loss, public latency, or live provider behavior.
+checkpoint. The current Task35 activation verifies only its exact canonical and
+offline container-smoke profiles; it does not prove multi-process or concurrent
+multi-container SQLite, target-host scheduling, abrupt host loss, public latency,
+or live provider behavior.
 
 ## Request-body availability proof boundary
 
