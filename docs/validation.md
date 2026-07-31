@@ -25,33 +25,60 @@ results from any sibling branch.
   check also passed.
 - Independent Task34 specification and security/quality reviews passed with no
   P0-P3 findings.
-- Hosted verification and a full canonical gate are intentionally excluded from
-  this activation checkpoint.
-- No current Task34 full canonical, GitHub Actions, or packaged container result
-  has been observed.
+- Local exact clean gate on evidence activation
+  `5364dd4f9f825f5d68c85ea005ceb277ab943e4c`: 29 capture contracts,
+  `capture_manifest_valid`, 19 web test files / 369 tests and the TypeScript/Vite
+  build, Ruff, strict MyPy over 35 source files, 944 / 944 Python tests with 3
+  warnings in 25.73s, deterministic stub and local
+  production/static/API/SSE/reconnect/shutdown smokes, OpenAPI verification, the
+  history-aware secret scan, and the diff check all passed.
+- The live three-run command stopped at its missing-`OPENAI_API_KEY` preflight:
+  `attemptedRunCount: 1`, `targetRunCount: 3`, `approvalCount: 0`, with no model
+  IDs, tools, or root trace. It did not execute three live runs.
+
+## Current Task34 hosted CI and packaged-container evidence
+
+- Hosted validation commit:
+  `5364dd4f9f825f5d68c85ea005ceb277ab943e4c`
+- GitHub Actions:
+  [run 30593858167](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30593858167).
+- Result: `verify`
+  ([job 91041814602](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30593858167/job/91041814602))
+  reported `PASS`; `container-smoke`
+  ([job 91042106744](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30593858167/job/91042106744))
+  reported `PASS`.
+- Both current job annotation APIs returned `[]`.
+- Hosted `verify` passed `capture_manifest_valid`, 19 web test files / 369
+  tests, Ruff, strict MyPy over 35 source files, 944 Python tests with 1 warning
+  in 43.54s, deterministic stub smoke, OpenAPI verification, and the
+  history-aware secret scan.
+- Hosted `container-smoke` built the packaged image, confirmed runtime user
+  `10001:10001`, and passed the offline network-none `deterministic-qa` and
+  `deployed-readonly` profiles, including readiness, session isolation, SSE,
+  reconnect, and bounded shutdown checks.
+- A later final documentation tip and its CI remain pending and are not claimed.
 
 ## Per-SHA proof matrix
 
 | Lane | Exact evidence | Status and boundary |
 | --- | --- | --- |
-| Local source and tests | Focused and full Python source gates on `8942517…`; no current full canonical result | **Verified locally** only in the named server/model/store/OpenAPI lanes; not full canonical, hosted CI, container, browser deployment, live OpenAI, or release proof |
+| Local source and tests | Focused source gates on `8942517…`; exact clean canonical gate on activation `5364dd4…` | **Verified locally** in the named lanes; not local Docker, browser deployment, live OpenAI, or release proof |
 | Local final-build captures | [`docs/assets/final/manifest.json`](assets/final/manifest.json); six provenance-checked PNGs under [`docs/assets/final`](assets/final) | **Local capture evidence only** on source `8942517…` in Google Chrome at 1440×1024 and 390×844; not container, deployment, live OpenAI, or release proof |
-| Live OpenAI | [`live-validation.md`](live-validation.md) records only a redacted invalid-key result | **Blocked / Unverified**; no valid `OPENAI_API_KEY`, one-run trace, or three consecutive successes |
+| Live OpenAI | Missing-key preflight on activation `5364dd4…`: attempted 1 of 3 target runs, zero approvals, no models/tools/root trace | **Blocked / Unverified**; no valid `OPENAI_API_KEY`, executed live run, trace, or three consecutive successes |
 | Local Docker | No Docker-family runtime is installed on this Mac | **Unverified locally** |
-| GitHub CI/container | No current Task34 GitHub Actions run or packaged container job has been observed | **Unverified** for this source/capture checkpoint; superseded Task33 proof is retained only below and is not inherited |
+| GitHub CI/container | Exact activation `5364dd4…`; run `30593858167`; `verify` job `91041814602`; `container-smoke` job `91042106744` | **Verified in GitHub CI** for the exact hosted and packaged-container lanes above; not local Docker, browser capture in CI, public deployment, live OpenAI, final docs-tip CI, or release proof |
 | Public deployment | No public application origin | **Blocked / Unverified** |
 | Tag/release | No release tag or GitHub release | **Blocked / Unverified** |
 
 ## Hosted container evidence boundary
 
-There is no current Task34 hosted-container result. The superseded historical
-section records prior packaged Docker evidence, but it is not current for this
-source/capture checkpoint. Current local source and capture evidence does not prove
-local Docker, browser capture in CI, public deployment or browser URL, live OpenAI,
-real provider execution, container replacement or restart, long-lived `/data`
-volume persistence, target-host durability/networking, abrupt host-loss or backup,
-concurrent multi-container SQLite, tag or release. The browser capture remained
-local; CI did not execute the browser capture.
+The exact current hosted result proves the named GitHub `verify` and packaged
+`container-smoke` lanes on activation `5364dd4…`. It does not prove local Docker,
+browser capture in CI, public deployment or browser URL, live OpenAI, real provider
+execution, container replacement or restart, long-lived `/data` volume persistence,
+target-host durability/networking, abrupt host-loss or backup, concurrent
+multi-container SQLite, final documentation-tip CI, tag, or release. The browser
+capture remained local; CI did not execute the browser capture.
 
 ## Capture contract
 
@@ -93,13 +120,13 @@ fails closed without rewriting it, and the OpenAPI `RecoverySnapshot` schema
 publishes the exact conditional: if `status` is one of the three terminal enum
 values, then `currentStep` is constant `5`.
 
-The new model/store matrix covered 51 tests; the combined focused
-model/store/OpenAPI gate covered 63 tests; and the full Python suite covered 935
-tests. Ruff, strict MyPy over 31 source files, OpenAPI freshness, and the diff check
-also passed. This is local source/test evidence only. It is not a current full
-canonical, hosted CI, container, public-network, live OpenAI, or release result, and
-the ordinary final-state screenshots do not exercise malformed terminal snapshots
-or invalid transition mutation attempts.
+The source-level model/store matrix covered 51 tests and the combined focused
+model/store/OpenAPI gate covered 63 tests. The exact clean activation gate covered
+944 Python tests, Ruff, strict MyPy over 35 source files, OpenAPI freshness, and the
+diff check. This local and hosted deterministic evidence does not prove a public
+network, live OpenAI, real provider, final documentation-tip CI, or release result,
+and the ordinary final-state screenshots do not exercise malformed terminal
+snapshots or invalid transition mutation attempts.
 
 ## SQLite file-permission proof boundary
 

@@ -42,7 +42,7 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     ).hexdigest()
     assert (
         current_evidence_digest
-        == "cb775fffd9f4e75fccaffc6b2e3c608d52af9acbbfd989ce8b87f2817680cf05"
+        == "ac6b2f48e0fb1273876c87635ce549e17f02c09fdca0b33e03e0025b18cc0368"
     )
     assert "718 tests" not in current_evidence
 
@@ -70,13 +70,16 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     )
     expected_current_scope_lines = (
         "container, live OpenAI, deployment, or release evidence.",
-        "- Hosted verification and a full canonical gate are intentionally excluded from",
-        "- No current Task34 full canonical, GitHub Actions, or packaged container result",
+        "## Current Task34 hosted CI and packaged-container evidence",
+        "- GitHub Actions:",
+        "reported `PASS`; `container-smoke`",
+        "- Hosted `container-smoke` built the packaged image, confirmed runtime user",
+        "- A later final documentation tip and its CI remain pending and are not claimed.",
         (
-            "| Local source and tests | Focused and full Python source gates on "
-            "`8942517…`; no current full canonical result | **Verified locally** only "
-            "in the named server/model/store/OpenAPI lanes; not full canonical, "
-            "hosted CI, container, browser deployment, live OpenAI, or release proof |"
+            "| Local source and tests | Focused source gates on `8942517…`; exact "
+            "clean canonical gate on activation `5364dd4…` | **Verified locally** in "
+            "the named lanes; not local Docker, browser deployment, live OpenAI, or "
+            "release proof |"
         ),
         (
             "| Local final-build captures | "
@@ -87,15 +90,17 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
             "release proof |"
         ),
         (
-            "| Live OpenAI | [`live-validation.md`](live-validation.md) records only "
-            "a redacted invalid-key result | **Blocked / Unverified**; no valid "
-            "`OPENAI_API_KEY`, one-run trace, or three consecutive successes |"
+            "| Live OpenAI | Missing-key preflight on activation `5364dd4…`: "
+            "attempted 1 of 3 target runs, zero approvals, no models/tools/root trace "
+            "| **Blocked / Unverified**; no valid `OPENAI_API_KEY`, executed live "
+            "run, trace, or three consecutive successes |"
         ),
         (
-            "| GitHub CI/container | No current Task34 GitHub Actions run or packaged "
-            "container job has been observed | **Unverified** for this source/capture "
-            "checkpoint; superseded Task33 proof is retained only below and is not "
-            "inherited |"
+            "| GitHub CI/container | Exact activation `5364dd4…`; run `30593858167`; "
+            "`verify` job `91041814602`; `container-smoke` job `91042106744` | "
+            "**Verified in GitHub CI** for the exact hosted and packaged-container "
+            "lanes above; not local Docker, browser capture in CI, public deployment, "
+            "live OpenAI, final docs-tip CI, or release proof |"
         ),
         "| Public deployment | No public application origin | **Blocked / Unverified** |",
         (
@@ -103,19 +108,18 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
             "Unverified** |"
         ),
         "## Hosted container evidence boundary",
-        "There is no current Task34 hosted-container result. The superseded historical",
-        "section records prior packaged Docker evidence, but it is not current for this",
-        "local Docker, browser capture in CI, public deployment or browser URL, live OpenAI,",
-        "real provider execution, container replacement or restart, long-lived `/data`",
-        "concurrent multi-container SQLite, tag or release. The browser capture remained",
-        "local; CI did not execute the browser capture.",
+        "`container-smoke` lanes on activation `5364dd4…`. It does not prove local Docker,",
+        "browser capture in CI, public deployment or browser URL, live OpenAI, real provider",
+        "execution, container replacement or restart, long-lived `/data` volume persistence,",
+        "multi-container SQLite, final documentation-tip CI, tag, or release. The browser",
+        "capture remained local; CI did not execute the browser capture.",
         (
             "files. CI did not execute the browser capture. The six images prove "
             "only the local keyless"
         ),
         "SDK-stub final build; they do not prove live OpenAI, a public deployment, a container,",
         "a release, or a real provider mutation.",
-        "canonical, hosted CI, container, public-network, live OpenAI, or release result, and",
+        "network, live OpenAI, real provider, final documentation-tip CI, or release result,",
         "container-replacement, abrupt-host-loss, or concurrent multi-container SQLite proof.",
         "container proof. It does not prove multi-process or concurrent multi-container SQLite,",
         "target-host scheduling, abrupt host loss, public latency, or live provider behavior.",
@@ -142,11 +146,20 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
         "and the full Python suite passed 935 / 935 tests with 3 warnings in 24.53s.",
         "check also passed.",
         "- Independent Task34 specification and security/quality reviews passed with no",
+        "- Local exact clean gate on evidence activation",
+        "history-aware secret scan, and the diff check all passed.",
+        "- The live three-run command stopped at its missing-`OPENAI_API_KEY` preflight:",
+        "IDs, tools, or root trace. It did not execute three live runs.",
+        "reported `PASS`; `container-smoke`",
+        "reported `PASS`.",
+        "- Hosted `verify` passed `capture_manifest_valid`, 19 web test files / 369",
+        "- Hosted `container-smoke` built the packaged image, confirmed runtime user",
+        "`10001:10001`, and passed the offline network-none `deterministic-qa` and",
         (
-            "| Local source and tests | Focused and full Python source gates on "
-            "`8942517…`; no current full canonical result | **Verified locally** only "
-            "in the named server/model/store/OpenAPI lanes; not full canonical, "
-            "hosted CI, container, browser deployment, live OpenAI, or release proof |"
+            "| Local source and tests | Focused source gates on `8942517…`; exact "
+            "clean canonical gate on activation `5364dd4…` | **Verified locally** in "
+            "the named lanes; not local Docker, browser deployment, live OpenAI, or "
+            "release proof |"
         ),
         (
             "| Local final-build captures | "
@@ -157,12 +170,20 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
             "release proof |"
         ),
         (
-            "| Live OpenAI | [`live-validation.md`](live-validation.md) records only "
-            "a redacted invalid-key result | **Blocked / Unverified**; no valid "
-            "`OPENAI_API_KEY`, one-run trace, or three consecutive successes |"
+            "| Live OpenAI | Missing-key preflight on activation `5364dd4…`: "
+            "attempted 1 of 3 target runs, zero approvals, no models/tools/root trace "
+            "| **Blocked / Unverified**; no valid `OPENAI_API_KEY`, executed live "
+            "run, trace, or three consecutive successes |"
         ),
-        "source/capture checkpoint. Current local source and capture evidence does not prove",
-        "local Docker, browser capture in CI, public deployment or browser URL, live OpenAI,",
+        (
+            "| GitHub CI/container | Exact activation `5364dd4…`; run `30593858167`; "
+            "`verify` job `91041814602`; `container-smoke` job `91042106744` | "
+            "**Verified in GitHub CI** for the exact hosted and packaged-container "
+            "lanes above; not local Docker, browser capture in CI, public deployment, "
+            "live OpenAI, final docs-tip CI, or release proof |"
+        ),
+        "`container-smoke` lanes on activation `5364dd4…`. It does not prove local Docker,",
+        "browser capture in CI, public deployment or browser URL, live OpenAI, real provider",
         "validates API and DOM provenance before each viewport screenshot.",
         "produced against the clean source SHA, and the activation successor added the captured",
         (
@@ -172,8 +193,9 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
         "SDK-stub final build; they do not prove live OpenAI, a public deployment, a container,",
         "different clean frozen tree.",
         "The Task34 server model accepts `completed`, `closed_without_action`, and",
-        "also passed. This is local source/test evidence only. It is not a current full",
-        "canonical, hosted CI, container, public-network, live OpenAI, or release result, and",
+        "model/store/OpenAPI gate covered 63 tests. The exact clean activation gate covered",
+        "diff check. This local and hosted deterministic evidence does not prove a public",
+        "network, live OpenAI, real provider, final documentation-tip CI, or release result,",
         "cases prove these source-level parser boundaries; the screenshots do not prove",
         (
             "fresh equally bounded initial-plus-three cycle. Throughout retry, "
@@ -200,6 +222,9 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
 
     assert manifest["sourceCommit"] in current_evidence
     current_activation = "4ca13252e05357ff98023f9290375cd1718bcce6"
+    current_hosted_successor = "5364dd4f9f825f5d68c85ea005ceb277ab943e4c"
+    current_hosted_run = "30593858167"
+    current_hosted_jobs = ("91041814602", "91042106744")
     actions_base = (
         "https://github.com/charlie2233/backchannel-agent-support/actions/runs"
     )
@@ -221,6 +246,10 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
         "8942517…",
         current_activation,
         "4ca1325…",
+        current_hosted_successor,
+        "5364dd4…",
+        current_hosted_run,
+        *current_hosted_jobs,
         runtime_input["digest"],
         "e208c76…",
     ):
@@ -258,8 +287,11 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
         return " ".join(match.group(0).split())
 
     activation_heading = "## Current capture and evidence activation"
+    current_hosted_heading = (
+        "## Current Task34 hosted CI and packaged-container evidence"
+    )
     matrix_heading = "## Per-SHA proof matrix"
-    activation_end_heading = matrix_heading
+    activation_end_heading = current_hosted_heading
     activation_evidence = current_evidence.split(
         activation_heading,
         maxsplit=1,
@@ -300,12 +332,20 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
             "with no P0-P3 findings."
         ),
         (
-            "- Hosted verification and a full canonical gate are intentionally "
-            "excluded from this activation checkpoint."
+            f"- Local exact clean gate on evidence activation "
+            f"`{current_hosted_successor}`: 29 capture contracts, "
+            "`capture_manifest_valid`, 19 web test files / 369 tests and the "
+            "TypeScript/Vite build, Ruff, strict MyPy over 35 source files, "
+            "944 / 944 Python tests with 3 warnings in 25.73s, deterministic "
+            "stub and local production/static/API/SSE/reconnect/shutdown "
+            "smokes, OpenAPI verification, the history-aware secret scan, and "
+            "the diff check all passed."
         ),
         (
-            "- No current Task34 full canonical, GitHub Actions, or packaged "
-            "container result has been observed."
+            "- The live three-run command stopped at its missing-`OPENAI_API_KEY` "
+            "preflight: `attemptedRunCount: 1`, `targetRunCount: 3`, "
+            "`approvalCount: 0`, with no model IDs, tools, or root trace. It "
+            "did not execute three live runs."
         ),
     )
     assert activation_bullets == expected_activation_bullets
@@ -336,15 +376,83 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
     )
     assert "passed with no P0-P3 findings" in source_review_gate
 
-    excluded_gate = current_bullet(
-        "Hosted verification and a full canonical gate"
+    local_exact_gate = current_bullet(
+        "Local exact clean gate on evidence activation"
     )
-    assert "intentionally excluded from this activation checkpoint" in excluded_gate
+    for local_exact_fact in (
+        current_hosted_successor,
+        "29 capture contracts",
+        "`capture_manifest_valid`",
+        "19 web test files / 369 tests",
+        "TypeScript/Vite build",
+        "strict MyPy over 35 source files",
+        "944 / 944 Python tests with 3 warnings in 25.73s",
+        "deterministic stub",
+        "local production/static/API/SSE/reconnect/shutdown smokes",
+        "OpenAPI verification",
+        "history-aware secret scan",
+        "diff check all passed",
+    ):
+        assert local_exact_fact in local_exact_gate
 
-    unobserved_gate = current_bullet("No current Task34 full canonical")
-    assert (
-        "GitHub Actions, or packaged container result has been observed"
-        in unobserved_gate
+    live_preflight_gate = current_bullet(
+        "The live three-run command stopped at its missing-`OPENAI_API_KEY` preflight"
+    )
+    for live_preflight_fact in (
+        "`attemptedRunCount: 1`",
+        "`targetRunCount: 3`",
+        "`approvalCount: 0`",
+        "no model IDs, tools, or root trace",
+        "did not execute three live runs",
+    ):
+        assert live_preflight_fact in live_preflight_gate
+
+    current_hosted_evidence = current_evidence.split(
+        current_hosted_heading,
+        maxsplit=1,
+    )[1].split(
+        matrix_heading,
+        maxsplit=1,
+    )[0]
+    current_hosted_bullets = tuple(
+        " ".join(match.group(0).split())
+        for match in re.finditer(
+            r"^- .*?(?=^- |\Z)",
+            current_hosted_evidence,
+            flags=re.MULTILINE | re.DOTALL,
+        )
+    )
+    assert current_hosted_bullets == (
+        f"- Hosted validation commit: `{current_hosted_successor}`",
+        (
+            f"- GitHub Actions: [run {current_hosted_run}]"
+            f"({actions_base}/{current_hosted_run})."
+        ),
+        (
+            f"- Result: `verify` ([job {current_hosted_jobs[0]}]"
+            f"({actions_base}/{current_hosted_run}/job/{current_hosted_jobs[0]})) "
+            f"reported `PASS`; `container-smoke` ([job {current_hosted_jobs[1]}]"
+            f"({actions_base}/{current_hosted_run}/job/{current_hosted_jobs[1]})) "
+            "reported `PASS`."
+        ),
+        "- Both current job annotation APIs returned `[]`.",
+        (
+            "- Hosted `verify` passed `capture_manifest_valid`, 19 web test files / "
+            "369 tests, Ruff, strict MyPy over 35 source files, 944 Python tests "
+            "with 1 warning in 43.54s, deterministic stub smoke, OpenAPI "
+            "verification, and the history-aware secret scan."
+        ),
+        (
+            "- Hosted `container-smoke` built the packaged image, confirmed runtime "
+            "user `10001:10001`, and passed the offline network-none "
+            "`deterministic-qa` and `deployed-readonly` profiles, including "
+            "readiness, session isolation, SSE, reconnect, and bounded shutdown "
+            "checks."
+        ),
+        (
+            "- A later final documentation tip and its CI remain pending and are "
+            "not claimed."
+        ),
     )
 
     hosted_boundary_heading = "## Hosted container evidence boundary"
@@ -361,10 +469,10 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
         "| Lane | Exact evidence | Status and boundary |",
         "| --- | --- | --- |",
         (
-            "| Local source and tests | Focused and full Python source gates on "
-            "`8942517…`; no current full canonical result | **Verified locally** only "
-            "in the named server/model/store/OpenAPI lanes; not full canonical, "
-            "hosted CI, container, browser deployment, live OpenAI, or release proof |"
+            "| Local source and tests | Focused source gates on `8942517…`; exact "
+            "clean canonical gate on activation `5364dd4…` | **Verified locally** in "
+            "the named lanes; not local Docker, browser deployment, live OpenAI, or "
+            "release proof |"
         ),
         (
             "| Local final-build captures | "
@@ -375,19 +483,21 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
             "release proof |"
         ),
         (
-            "| Live OpenAI | [`live-validation.md`](live-validation.md) records only "
-            "a redacted invalid-key result | **Blocked / Unverified**; no valid "
-            "`OPENAI_API_KEY`, one-run trace, or three consecutive successes |"
+            "| Live OpenAI | Missing-key preflight on activation `5364dd4…`: "
+            "attempted 1 of 3 target runs, zero approvals, no models/tools/root trace "
+            "| **Blocked / Unverified**; no valid `OPENAI_API_KEY`, executed live "
+            "run, trace, or three consecutive successes |"
         ),
         (
             "| Local Docker | No Docker-family runtime is installed on this Mac | "
             "**Unverified locally** |"
         ),
         (
-            "| GitHub CI/container | No current Task34 GitHub Actions run or packaged "
-            "container job has been observed | **Unverified** for this source/capture "
-            "checkpoint; superseded Task33 proof is retained only below and is not "
-            "inherited |"
+            "| GitHub CI/container | Exact activation `5364dd4…`; run `30593858167`; "
+            "`verify` job `91041814602`; `container-smoke` job `91042106744` | "
+            "**Verified in GitHub CI** for the exact hosted and packaged-container "
+            "lanes above; not local Docker, browser capture in CI, public deployment, "
+            "live OpenAI, final docs-tip CI, or release proof |"
         ),
         (
             "| Public deployment | No public application origin | **Blocked / "
@@ -411,15 +521,14 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
         hosted_boundary_evidence.split()
     )
     assert normalized_hosted_boundary_evidence == (
-        "There is no current Task34 hosted-container result. The superseded "
-        "historical section records prior packaged Docker evidence, but it is not "
-        "current for this source/capture checkpoint. Current local source and "
-        "capture evidence does not prove local Docker, browser capture in CI, "
-        "public deployment or browser URL, live OpenAI, real provider execution, "
-        "container replacement or restart, long-lived `/data` volume persistence, "
-        "target-host durability/networking, abrupt host-loss or backup, concurrent "
-        "multi-container SQLite, tag or release. The browser capture remained "
-        "local; CI did not execute the browser capture."
+        "The exact current hosted result proves the named GitHub `verify` and "
+        "packaged `container-smoke` lanes on activation `5364dd4…`. It does not "
+        "prove local Docker, browser capture in CI, public deployment or browser "
+        "URL, live OpenAI, real provider execution, container replacement or "
+        "restart, long-lived `/data` volume persistence, target-host "
+        "durability/networking, abrupt host-loss or backup, concurrent "
+        "multi-container SQLite, final documentation-tip CI, tag, or release. "
+        "The browser capture remained local; CI did not execute the browser capture."
     )
 
     for observed_current_fact in (
@@ -454,12 +563,12 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
         "a malformed legacy terminal row fails closed without rewriting it, and the "
         "OpenAPI `RecoverySnapshot` schema publishes the exact conditional: if "
         "`status` is one of the three terminal enum values, then `currentStep` is "
-        "constant `5`. The new model/store matrix covered 51 tests; the combined "
-        "focused model/store/OpenAPI gate covered 63 tests; and the full Python "
-        "suite covered 935 tests. Ruff, strict MyPy over 31 source files, OpenAPI "
-        "freshness, and the diff check also passed. This is local source/test "
-        "evidence only. It is not a current full canonical, hosted CI, container, "
-        "public-network, live OpenAI, or release result, and the ordinary "
+        "constant `5`. The source-level model/store matrix covered 51 tests and the "
+        "combined focused model/store/OpenAPI gate covered 63 tests. The exact clean "
+        "activation gate covered 944 Python tests, Ruff, strict MyPy over 35 source "
+        "files, OpenAPI freshness, and the diff check. This local and hosted "
+        "deterministic evidence does not prove a public network, live OpenAI, real "
+        "provider, final documentation-tip CI, or release result, and the ordinary "
         "final-state screenshots do not exercise malformed terminal snapshots or "
         "invalid transition mutation attempts."
     )
@@ -474,13 +583,13 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
         "recovery row and event ledger unchanged",
         "malformed legacy terminal row fails closed without rewriting it",
         "OpenAPI `RecoverySnapshot` schema publishes the exact conditional",
-        "new model/store matrix covered 51 tests",
+        "source-level model/store matrix covered 51 tests",
         "combined focused model/store/OpenAPI gate covered 63 tests",
-        "full Python suite covered 935 tests",
-        "strict MyPy over 31 source files",
-        "local source/test evidence only",
-        "not a current full canonical, hosted CI, container, public-network, live "
-        "OpenAI, or release result",
+        "exact clean activation gate covered 944 Python tests",
+        "strict MyPy over 35 source files",
+        "local and hosted deterministic evidence",
+        "does not prove a public network, live OpenAI, real provider, final "
+        "documentation-tip CI, or release result",
         "screenshots do not exercise malformed terminal snapshots or invalid "
         "transition mutation attempts",
     ):
@@ -574,12 +683,19 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
         r"https://github\.com/[^)\s]+/actions/runs/\d+(?:/job/\d+)?",
         current_evidence,
     )
-    assert observed_action_urls == []
+    assert observed_action_urls == [
+        f"{actions_base}/{current_hosted_run}",
+        f"{actions_base}/{current_hosted_run}/job/{current_hosted_jobs[0]}",
+        f"{actions_base}/{current_hosted_run}/job/{current_hosted_jobs[1]}",
+    ]
     assert "Hosted validation successor:" not in current_evidence
     for required_current_boundary in (
-        "No current Task34 GitHub Actions run or packaged container job has been observed",
-        "**Unverified** for this source/capture checkpoint",
-        "There is no current Task34 hosted-container result",
+        "Hosted validation commit",
+        "Both current job annotation APIs returned `[]`",
+        "Hosted `verify` passed `capture_manifest_valid`",
+        "Hosted `container-smoke` built the packaged image",
+        "The exact current hosted result proves the named GitHub `verify` and "
+        "packaged `container-smoke` lanes",
         "does not prove local Docker",
         "browser capture in CI",
         "public deployment or browser URL",
@@ -590,14 +706,15 @@ def _assert_validation_matches_current_capture(validation: str) -> None:
         "target-host durability/networking",
         "abrupt host-loss or backup",
         "concurrent multi-container SQLite",
-        "tag or release",
+        "final documentation-tip CI, tag, or release",
+        "A later final documentation tip and its CI remain pending and are not claimed",
     ):
         assert required_current_boundary in normalized_current_evidence
     for forbidden_current_claim in (
-        "Current Task34 GitHub Actions passed",
-        "Current Task34 hosted CI passed",
-        "Current Task34 packaged container smoke passed",
-        "Current Task34 full canonical gate passed",
+        "No current Task34 GitHub Actions run",
+        "There is no current Task34 hosted-container result",
+        "final documentation tip passed",
+        "final docs-tip CI passed",
         "reported `FAILURE`",
         "reported `SKIPPED`",
     ):
@@ -1251,6 +1368,11 @@ def test_validation_rejects_superseded_provenance_in_current_evidence(
         "8942517…",
         "4ca13252e05357ff98023f9290375cd1718bcce6",
         "4ca1325…",
+        "5364dd4f9f825f5d68c85ea005ceb277ab943e4c",
+        "5364dd4…",
+        "30593858167",
+        "91041814602",
+        "91042106744",
         "e208c767646af920d90aa9396f441fb328c999c3235aff646ac20a5611543f27",
         "e208c76…",
     ),
@@ -1315,23 +1437,22 @@ def test_validation_rejects_unexpected_current_hosted_provenance(
     ("original", "replacement"),
     (
         (
-            "84af413c3a7833daa635e6a0b84e8f331cc1f7f2",
+            "5364dd4f9f825f5d68c85ea005ceb277ab943e4c",
             "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
         ),
-        ("30591690973", "99999999999"),
-        ("91035189804", "99999999998"),
-        ("91035490238", "99999999997"),
+        ("30593858167", "99999999999"),
+        ("91041814602", "99999999998"),
+        ("91042106744", "99999999997"),
         (
-            "Both pre-CI jobs passed and both pre-CI job annotation APIs returned `[]`",
-            "Pre-CI annotations were not inspected",
+            "Both current job annotation APIs returned `[]`",
+            "Current annotations were not inspected",
         ),
         ("19 web test files / 369 tests", "19 web test files / 368 tests"),
         ("strict MyPy over 35 source files", "strict MyPy over 34 source files"),
         (
-            "866 Python tests with 1 warning in 42.00s",
-            "865 Python tests with 2 warnings in 43.00s",
+            "944 Python tests with 1 warning in 43.54s",
+            "943 Python tests with 2 warnings in 44.54s",
         ),
-        ("owner-only `/data` mode `0700`", "`/data` mode was not inspected"),
         ("runtime user `10001:10001`", "runtime user was not inspected"),
         (
             "offline network-none `deterministic-qa` and `deployed-readonly` profiles",
@@ -1344,8 +1465,8 @@ def test_validation_rejects_current_hosted_fact_mutation(
     replacement: str,
 ) -> None:
     validation = _read("docs/validation.md")
-    hosted_heading = "### Client-terminal capture and hosted baselines (superseded)"
-    hosted_end_heading = "### SQLite-permission capture and hosted baselines (superseded)"
+    hosted_heading = "## Current Task34 hosted CI and packaged-container evidence"
+    hosted_end_heading = "## Per-SHA proof matrix"
     hosted_evidence = validation.split(hosted_heading, maxsplit=1)[1].split(
         hosted_end_heading,
         maxsplit=1,
@@ -1369,14 +1490,14 @@ def test_validation_rejects_current_hosted_fact_mutation(
 
 def test_validation_rejects_swapped_current_hosted_job_bindings() -> None:
     validation = _read("docs/validation.md")
-    hosted_heading = "### Client-terminal capture and hosted baselines (superseded)"
-    hosted_end_heading = "### SQLite-permission capture and hosted baselines (superseded)"
+    hosted_heading = "## Current Task34 hosted CI and packaged-container evidence"
+    hosted_end_heading = "## Per-SHA proof matrix"
     hosted_evidence = validation.split(hosted_heading, maxsplit=1)[1].split(
         hosted_end_heading,
         maxsplit=1,
     )[0]
-    verify_job = "91035189804"
-    container_job = "91035490238"
+    verify_job = "91041814602"
+    container_job = "91042106744"
     swapped_hosted_evidence = (
         hosted_evidence.replace(verify_job, "__VERIFY_JOB__")
         .replace(container_job, verify_job)
