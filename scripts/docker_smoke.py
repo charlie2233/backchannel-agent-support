@@ -11,6 +11,7 @@ import json
 import os
 import re
 import secrets
+import signal
 import socket
 import subprocess
 import sys
@@ -33,6 +34,7 @@ from urllib.request import (
 
 HTTP_TIMEOUT_SECONDS = 10
 INITIAL_SSE_FRAME_MAX_BYTES = 65_536
+LOCAL_SHUTDOWN_TIMEOUT_SECONDS = 5
 
 HTML_CSP = (
     "default-src 'none'; script-src 'self'; style-src 'self'; "
@@ -601,6 +603,124 @@ def _wait_for_server(process: subprocess.Popen[bytes], base_url: str) -> None:
     raise SmokeFailure("Production server did not become healthy within 60 seconds")
 
 
+def _terminate_local_process(
+    process: subprocess.Popen[bytes],
+) -> int:
+    poll_failure: SmokeFailure | None = None
+    try:
+        already_exited = process.poll()
+    except OSError:
+        already_exited = None
+        poll_failure = SmokeFailure(
+            "Production server pre-shutdown status could not be confirmed"
+        )
+    if already_exited is not None:
+        raise SmokeFailure(
+            "Production server exited before the smoke requested graceful shutdown"
+        )
+    try:
+        process.terminate()
+    except OSError as error:
+        terminate_failure = SmokeFailure(
+            "Production server could not receive bounded SIGTERM"
+        )
+        cleanup_failure = _force_cleanup_local_process(process)
+        failures = [failure for failure in (poll_failure, terminate_failure) if failure]
+        if cleanup_failure is not None:
+            failures.append(cleanup_failure)
+        raise _combine_smoke_failures(failures[0], failures[1:]) from error
+    try:
+        exit_code = process.wait(timeout=LOCAL_SHUTDOWN_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as error:
+        graceful_timeout_failure = SmokeFailure(
+            "Production server did not exit cleanly after SIGTERM; "
+            "bounded forced termination was required"
+        )
+        cleanup_failure = _force_cleanup_local_process(process)
+        failures = [
+            failure
+            for failure in (
+                poll_failure,
+                graceful_timeout_failure,
+                cleanup_failure,
+            )
+            if failure is not None
+        ]
+        raise _combine_smoke_failures(failures[0], failures[1:]) from error
+    except OSError as error:
+        graceful_wait_failure = SmokeFailure(
+            "Production server graceful shutdown status could not be confirmed"
+        )
+        cleanup_failure = _force_cleanup_local_process(process)
+        failures = [
+            failure
+            for failure in (
+                poll_failure,
+                graceful_wait_failure,
+                cleanup_failure,
+            )
+            if failure is not None
+        ]
+        raise _combine_smoke_failures(failures[0], failures[1:]) from error
+    if poll_failure is not None:
+        raise poll_failure
+    return exit_code
+
+
+def _force_cleanup_local_process(
+    process: subprocess.Popen[bytes],
+) -> SmokeFailure | None:
+    try:
+        process.kill()
+    except OSError:
+        return SmokeFailure("Production server forced cleanup could not be started")
+    try:
+        process.wait(timeout=LOCAL_SHUTDOWN_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        return SmokeFailure(
+            "Production server remained alive after bounded forced termination"
+        )
+    except OSError:
+        return SmokeFailure("Production server forced cleanup could not be confirmed")
+    return None
+
+
+def _combine_smoke_failures(
+    primary: SmokeFailure,
+    secondary: list[SmokeFailure],
+) -> SmokeFailure:
+    if not secondary:
+        return primary
+    details = " ".join(str(failure) for failure in secondary)
+    return SmokeFailure(f"{primary} Additional local proof failures: {details}")
+
+
+def _require_clean_local_shutdown_evidence(
+    *,
+    process_id: int,
+    exit_code: int,
+    stderr_log: bytes,
+) -> None:
+    if exit_code not in {0, -signal.SIGTERM}:
+        raise SmokeFailure("Production server did not exit cleanly after SIGTERM")
+    markers = (
+        b"INFO:     Shutting down",
+        b"INFO:     Waiting for application shutdown.",
+        b"INFO:     Application shutdown complete.",
+        f"INFO:     Finished server process [{process_id}]".encode("ascii"),
+    )
+    log_lines = stderr_log.splitlines()
+    cursor = 0
+    for marker in markers:
+        try:
+            position = log_lines.index(marker, cursor)
+        except ValueError:
+            raise SmokeFailure(
+                "Production server did not emit complete graceful shutdown evidence"
+            ) from None
+        cursor = position + 1
+
+
 def run_local_single_process_smoke() -> dict[str, object]:
     repository_root = Path(__file__).resolve().parent.parent
     port = _available_port()
@@ -625,33 +745,115 @@ def run_local_single_process_smoke() -> dict[str, object]:
         stdout_path = temporary_path / "server.stdout.log"
         stderr_path = temporary_path / "server.stderr.log"
         with stdout_path.open("wb") as stdout_file, stderr_path.open("wb") as stderr_file:
-            process = subprocess.Popen(
-                [sys.executable, "scripts/start.py"],
-                cwd=repository_root,
-                env=environment,
-                stdout=stdout_file,
-                stderr=stderr_file,
-            )
+            try:
+                process = subprocess.Popen(
+                    [sys.executable, "scripts/start.py"],
+                    cwd=repository_root,
+                    env=environment,
+                    stdout=stdout_file,
+                    stderr=stderr_file,
+                )
+            except OSError as error:
+                raise SmokeFailure("Production server process could not be started") from error
+            result: dict[str, object] | None = None
+            primary_failure: BaseException | None = None
+            shutdown_failure: SmokeFailure | None = None
+            shutdown_exit_code: int | None = None
+            shutdown_log_offset: int | None = None
+            shutdown_log_boundary_failure: SmokeFailure | None = None
             try:
                 _wait_for_server(process, base_url)
                 result = run_http_smoke(base_url, canary)
+            except BaseException as error:
+                primary_failure = error
             finally:
-                if process.poll() is None:
-                    process.terminate()
-                    try:
-                        process.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                        process.wait(timeout=5)
+                try:
+                    shutdown_log_offset = stderr_path.stat().st_size
+                except OSError:
+                    shutdown_log_boundary_failure = SmokeFailure(
+                        "Production server shutdown log boundary could not be recorded"
+                    )
+                try:
+                    shutdown_exit_code = _terminate_local_process(process)
+                except SmokeFailure as error:
+                    shutdown_failure = error
 
         encoded_canary = canary.encode("utf-8")
-        if any(
-            encoded_canary in log_path.read_bytes()
-            for log_path in (stdout_path, stderr_path)
+        log_read_failures: list[SmokeFailure] = []
+        try:
+            stdout_log = stdout_path.read_bytes()
+        except OSError:
+            stdout_log = b""
+            log_read_failures.append(
+                SmokeFailure("Production server stdout log could not be read")
+            )
+        stderr_log_read_failed = False
+        try:
+            stderr_log = stderr_path.read_bytes()
+        except OSError:
+            stderr_log = b""
+            stderr_log_read_failed = True
+            log_read_failures.append(
+                SmokeFailure("Production server stderr log could not be read")
+            )
+        canary_failure = (
+            SmokeFailure("A canary secret appeared in production server logs")
+            if encoded_canary in stdout_log or encoded_canary in stderr_log
+            else None
+        )
+        shutdown_evidence_failure: SmokeFailure | None = None
+        if (
+            shutdown_failure is None
+            and shutdown_exit_code is not None
+            and shutdown_log_offset is not None
+            and not stderr_log_read_failed
         ):
-            raise SmokeFailure("A canary secret appeared in production server logs")
+            try:
+                _require_clean_local_shutdown_evidence(
+                    process_id=process.pid,
+                    exit_code=shutdown_exit_code,
+                    stderr_log=stderr_log[shutdown_log_offset:],
+                )
+            except SmokeFailure as error:
+                shutdown_evidence_failure = error
+
+        secondary_failures = [
+            failure
+            for failure in (
+                canary_failure,
+                shutdown_failure,
+                shutdown_log_boundary_failure,
+                *log_read_failures,
+                shutdown_evidence_failure,
+            )
+            if failure is not None
+        ]
+        if primary_failure is not None:
+            if isinstance(primary_failure, SmokeFailure):
+                raise _combine_smoke_failures(
+                    primary_failure,
+                    secondary_failures,
+                ) from primary_failure
+            if isinstance(primary_failure, (Exception, SystemExit)):
+                safe_primary_failure = SmokeFailure(
+                    "Production smoke encountered an unexpected local error"
+                )
+                raise _combine_smoke_failures(
+                    safe_primary_failure,
+                    secondary_failures,
+                ) from primary_failure
+            raise primary_failure
+        if secondary_failures:
+            if len(secondary_failures) == 1:
+                raise secondary_failures[0]
+            raise SmokeFailure(
+                " ".join(str(failure) for failure in secondary_failures)
+            )
+        if result is None:
+            raise SmokeFailure("Production smoke did not produce a result")
         result["canaryCoverage"] = "responses_assets_server_logs"
         result["canarySecretAbsent"] = True
+        result["cleanShutdown"] = "passed"
         result["proofLane"] = "local_single_process_production"
         return result
 

@@ -22,7 +22,11 @@ checks approval, decline, receipts, replay SSE resume, CSP, readiness, static ro
 canary-secret non-disclosure rule. It also verifies the deployed session cookie remains Secure,
 HttpOnly, SameSite=Lax, and bounded by Max-Age. Because the local production lane models TLS
 termination over loopback HTTP, only that smoke client manually carries the observed Secure
-cookie across the loopback hop; the application never weakens the emitted cookie flags.
+cookie across the loopback hop; the application never weakens the emitted cookie flags. A pass
+also requires bounded SIGTERM handling and ordered, exact-process Uvicorn evidence that the ASGI
+lifespan shutdown completed; forced termination is cleanup only and fails the smoke. The
+`cleanShutdown=passed` marker remains local-process evidence, not container-orchestrator or
+public-deployment proof.
 
 The focused security regression is:
 
