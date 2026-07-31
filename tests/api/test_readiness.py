@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import time
@@ -18,6 +19,7 @@ from server.main import create_app
 from server.store import SQLiteStore
 
 _READINESS_CACHE_SECONDS = 5.0
+_STATIC_MANIFEST_NAME = ".backchannel-static-manifest.json"
 
 
 class _ManualClock:
@@ -36,12 +38,50 @@ class _ManualClock:
 
 def _static_dir(tmp_path: Path) -> Path:
     static_dir = tmp_path / "dist"
-    static_dir.mkdir()
+    assets_dir = static_dir / "assets"
+    assets_dir.mkdir(parents=True)
     (static_dir / "index.html").write_text(
-        "<!doctype html><title>Backchannel</title>",
+        "<!doctype html><html><head><title>Backchannel</title>"
+        '<script type="module" src="/assets/index-deadbeef.js"></script>'
+        '<link rel="stylesheet" href="/assets/index-feedface.css">'
+        "</head><body></body></html>",
         encoding="utf-8",
     )
+    (assets_dir / "index-deadbeef.js").write_text(
+        'document.body.dataset.runtime = "ready";',
+        encoding="utf-8",
+    )
+    (assets_dir / "index-feedface.css").write_text(
+        ":root { color-scheme: light; }",
+        encoding="utf-8",
+    )
+    _write_static_manifest(static_dir)
     return static_dir
+
+
+def _write_static_manifest(static_dir: Path) -> None:
+    artifact_paths = [
+        static_dir / "index.html",
+        *sorted(
+            path
+            for path in (static_dir / "assets").rglob("*")
+            if path.is_file() and not path.is_symlink()
+        ),
+    ]
+    files = []
+    for path in sorted(artifact_paths):
+        content = path.read_bytes()
+        files.append(
+            {
+                "path": path.relative_to(static_dir).as_posix(),
+                "size": len(content),
+                "sha256": hashlib.sha256(content).hexdigest(),
+            }
+        )
+    (static_dir / _STATIC_MANIFEST_NAME).write_text(
+        json.dumps({"version": 1, "files": files}, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _readiness_row(database_path: Path) -> tuple[int, int]:
@@ -502,6 +542,254 @@ def test_readiness_is_generic_503_when_configured_static_index_is_missing(
     assert "index.html" not in readiness.text
     assert health.status_code == 200
     assert health.json()["backend"] == "stub"
+    store.close()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing_manifest",
+        "malformed_manifest",
+        "deep_manifest",
+        "duplicate_manifest_key",
+        "noncanonical_manifest",
+        "reordered_manifest_keys",
+        "oversized_manifest",
+        "unsafe_manifest_path",
+        "duplicate_manifest_path",
+        "boolean_manifest_size",
+        "uppercase_manifest_digest",
+        "missing_asset",
+        "empty_asset",
+        "modified_asset",
+        "asset_directory",
+        "internal_asset_symlink",
+        "external_asset_symlink",
+        "extra_asset",
+        "extra_empty_asset_directory",
+        "unsafe_asset_directory",
+        "too_many_asset_directories",
+        "too_many_asset_files",
+        "empty_index",
+        "modified_index",
+        "missing_index_reference",
+        "relative_index_reference",
+    ],
+)
+def test_readiness_rejects_incomplete_or_changed_static_artifact(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    store = SQLiteStore(tmp_path / f"static-{mutation}.sqlite3")
+    static_dir = _static_dir(tmp_path)
+    manifest_path = static_dir / _STATIC_MANIFEST_NAME
+    asset_path = static_dir / "assets" / "index-deadbeef.js"
+    index_path = static_dir / "index.html"
+    if mutation == "missing_manifest":
+        manifest_path.unlink()
+    elif mutation == "malformed_manifest":
+        manifest_path.write_text("{", encoding="utf-8")
+    elif mutation == "deep_manifest":
+        manifest_path.write_text(
+            ("[" * 20_000) + "0" + ("]" * 20_000),
+            encoding="utf-8",
+        )
+    elif mutation == "duplicate_manifest_key":
+        manifest_path.write_text(
+            manifest_path.read_text(encoding="utf-8").replace(
+                '"version": 1,',
+                '"version": 1,\n  "version": 1,',
+                1,
+            ),
+            encoding="utf-8",
+        )
+    elif mutation == "noncanonical_manifest":
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    elif mutation == "reordered_manifest_keys":
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "files": manifest["files"],
+                    "version": manifest["version"],
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    elif mutation == "oversized_manifest":
+        manifest_path.write_bytes(b" " * (64 * 1024 + 1))
+    elif mutation in {
+        "unsafe_manifest_path",
+        "duplicate_manifest_path",
+        "boolean_manifest_size",
+        "uppercase_manifest_digest",
+    }:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if mutation == "unsafe_manifest_path":
+            manifest["files"][0]["path"] = "../outside.js"
+        elif mutation == "duplicate_manifest_path":
+            manifest["files"].append(dict(manifest["files"][0]))
+        elif mutation == "boolean_manifest_size":
+            manifest["files"][0]["size"] = True
+        else:
+            manifest["files"][0]["sha256"] = manifest["files"][0]["sha256"].upper()
+        manifest_path.write_text(
+            json.dumps(manifest, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    elif mutation == "missing_asset":
+        asset_path.unlink()
+    elif mutation == "empty_asset":
+        asset_path.write_bytes(b"")
+    elif mutation == "modified_asset":
+        original = asset_path.read_bytes()
+        asset_path.write_bytes(original[::-1])
+    elif mutation == "asset_directory":
+        asset_path.unlink()
+        asset_path.mkdir()
+    elif mutation in {"internal_asset_symlink", "external_asset_symlink"}:
+        asset_path.unlink()
+        target = (
+            static_dir / "assets" / "index-feedface.css"
+            if mutation == "internal_asset_symlink"
+            else tmp_path / "outside.js"
+        )
+        if mutation == "external_asset_symlink":
+            target.write_text("outside static root", encoding="utf-8")
+        asset_path.symlink_to(target)
+    elif mutation == "extra_asset":
+        (static_dir / "assets" / "unmanifested.js").write_text(
+            "unmanifested",
+            encoding="utf-8",
+        )
+    elif mutation == "extra_empty_asset_directory":
+        (static_dir / "assets" / "empty").mkdir()
+    elif mutation == "unsafe_asset_directory":
+        (static_dir / "assets" / "_unsafe").mkdir()
+    elif mutation == "too_many_asset_directories":
+        for branch in ("a", "b", "c"):
+            branch_path = static_dir / "assets" / branch
+            for _ in range(86):
+                branch_path /= "d"
+            branch_path.mkdir(parents=True)
+            (branch_path / "leaf.js").write_text("x", encoding="utf-8")
+    elif mutation == "too_many_asset_files":
+        for index in range(254):
+            (static_dir / "assets" / f"extra-{index:03d}.js").write_text(
+                "x",
+                encoding="utf-8",
+            )
+    elif mutation == "empty_index":
+        index_path.write_bytes(b"")
+    elif mutation == "modified_index":
+        index_path.write_bytes(index_path.read_bytes() + b"<!-- changed -->")
+    elif mutation == "missing_index_reference":
+        index_path.write_text(
+            index_path.read_text(encoding="utf-8").replace(
+                "/assets/index-deadbeef.js",
+                "/assets/missing-entry.js",
+            ),
+            encoding="utf-8",
+        )
+        _write_static_manifest(static_dir)
+    else:
+        index_path.write_text(
+            index_path.read_text(encoding="utf-8").replace(
+                "/assets/index-deadbeef.js",
+                "assets/index-deadbeef.js",
+            ),
+            encoding="utf-8",
+        )
+        _write_static_manifest(static_dir)
+
+    with TestClient(
+        create_app(
+            RuntimeSettings(live_ready=False),
+            store=store,
+            static_dir=static_dir,
+        )
+    ) as client:
+        readiness = client.get("/readyz")
+        health = client.get("/health")
+        root = client.get("/")
+        static_asset = client.get("/assets/index-feedface.css")
+
+    assert readiness.status_code == 503
+    assert readiness.json() == {"status": "not_ready"}
+    assert str(static_dir) not in readiness.text
+    assert mutation not in readiness.text
+    assert health.status_code == 200
+    assert root.status_code == 404
+    assert static_asset.status_code == 404
+    store.close()
+
+
+def test_static_readiness_cache_detects_mutation_then_recovers(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "static-cache.sqlite3")
+    static_dir = _static_dir(tmp_path)
+    asset_path = static_dir / "assets" / "index-deadbeef.js"
+    original = asset_path.read_bytes()
+    clock = _ManualClock()
+
+    with TestClient(
+        create_app(
+            RuntimeSettings(live_ready=False),
+            store=store,
+            static_dir=static_dir,
+            readiness_clock=clock,
+        )
+    ) as client:
+        first = client.get("/readyz")
+        asset_path.write_bytes(bytes([original[0] ^ 1]) + original[1:])
+        cached_success = client.get("/readyz")
+        clock.advance_past_cache()
+        changed = client.get("/readyz")
+        asset_path.write_bytes(original)
+        cached_failure = client.get("/readyz")
+        clock.advance_past_cache()
+        recovered = client.get("/readyz")
+
+    assert first.status_code == 200
+    assert cached_success.status_code == 200
+    assert changed.status_code == 503
+    assert cached_failure.status_code == 503
+    assert recovered.status_code == 200
+    store.close()
+
+
+def test_static_assets_missing_at_start_can_recover_without_restart(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "static-mount-recovery.sqlite3")
+    static_dir = _static_dir(tmp_path)
+    assets_dir = static_dir / "assets"
+    held_assets_dir = tmp_path / "held-assets"
+    assets_dir.rename(held_assets_dir)
+    clock = _ManualClock()
+
+    with TestClient(
+        create_app(
+            RuntimeSettings(live_ready=False),
+            store=store,
+            static_dir=static_dir,
+            readiness_clock=clock,
+        )
+    ) as client:
+        missing = client.get("/readyz")
+        held_assets_dir.rename(assets_dir)
+        clock.advance_past_cache()
+        recovered = client.get("/readyz")
+        javascript = client.get("/assets/index-deadbeef.js")
+
+    assert missing.status_code == 503
+    assert recovered.status_code == 200
+    assert javascript.status_code == 200
+    assert javascript.text == 'document.body.dataset.runtime = "ready";'
     store.close()
 
 

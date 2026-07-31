@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -16,6 +18,28 @@ HTML_CSP = (
     "base-uri 'none'; form-action 'none'"
 )
 API_CSP = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
+_STATIC_MANIFEST_NAME = ".backchannel-static-manifest.json"
+
+
+def _write_static_manifest(static_dir: Path) -> None:
+    artifact_paths = [
+        static_dir / "index.html",
+        *sorted(path for path in (static_dir / "assets").rglob("*") if path.is_file()),
+    ]
+    files = []
+    for path in sorted(artifact_paths):
+        content = path.read_bytes()
+        files.append(
+            {
+                "path": path.relative_to(static_dir).as_posix(),
+                "size": len(content),
+                "sha256": hashlib.sha256(content).hexdigest(),
+            }
+        )
+    (static_dir / _STATIC_MANIFEST_NAME).write_text(
+        json.dumps({"version": 1, "files": files}, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 
 @pytest.fixture
@@ -37,6 +61,7 @@ def static_dist(tmp_path: Path) -> Path:
         ":root { color-scheme: light; }",
         encoding="utf-8",
     )
+    _write_static_manifest(static_dir)
     return static_dir
 
 
@@ -123,6 +148,7 @@ def test_api_health_readiness_and_sse_routes_keep_precedence_over_spa(
         "/assets/missing.js",
         "/favicon.ico",
         "/manifest.json",
+        f"/{_STATIC_MANIFEST_NAME}",
         "/release/v0.3",
         "/%2e%2e/private",
         "/safe/%2e%2e/private",
@@ -152,4 +178,61 @@ def test_create_app_remains_api_only_unless_static_directory_is_configured(
     assert response.status_code == 404
     assert response.headers["content-type"].startswith("application/json")
     assert response.headers["content-security-policy"] == API_CSP
+    store.close()
+
+
+def test_external_index_symlink_is_never_ready_or_served(
+    tmp_path: Path,
+    static_dist: Path,
+) -> None:
+    outside_index = tmp_path / "outside-index.html"
+    outside_index.write_text(
+        "<!doctype html><title>outside-static-root-canary</title>",
+        encoding="utf-8",
+    )
+    index_path = static_dist / "index.html"
+    index_path.unlink()
+    index_path.symlink_to(outside_index)
+    store = SQLiteStore(tmp_path / "index-symlink.sqlite3")
+
+    with TestClient(
+        create_app(
+            RuntimeSettings(live_ready=False),
+            store=store,
+            static_dir=static_dist,
+        )
+    ) as client:
+        readiness = client.get("/readyz")
+        root = client.get("/")
+
+    assert readiness.status_code == 503
+    assert readiness.json() == {"status": "not_ready"}
+    assert root.status_code == 404
+    assert "outside-static-root-canary" not in root.text
+    store.close()
+
+
+def test_static_root_symlink_is_never_ready_or_served(
+    tmp_path: Path,
+    static_dist: Path,
+) -> None:
+    static_link = tmp_path / "linked-dist"
+    static_link.symlink_to(static_dist, target_is_directory=True)
+    store = SQLiteStore(tmp_path / "root-symlink.sqlite3")
+
+    with TestClient(
+        create_app(
+            RuntimeSettings(live_ready=False),
+            store=store,
+            static_dir=static_link,
+        )
+    ) as client:
+        readiness = client.get("/readyz")
+        root = client.get("/")
+        asset = client.get("/assets/index-deadbeef.js")
+
+    assert readiness.status_code == 503
+    assert readiness.json() == {"status": "not_ready"}
+    assert root.status_code == 404
+    assert asset.status_code == 404
     store.close()

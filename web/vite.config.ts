@@ -1,8 +1,10 @@
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vitest/config";
 
+import { staticArtifactManifestPlugin } from "./build/staticArtifactManifest.js";
+
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), staticArtifactManifestPlugin()],
   server: {
     proxy: {
       "/health": "http://127.0.0.1:8000",

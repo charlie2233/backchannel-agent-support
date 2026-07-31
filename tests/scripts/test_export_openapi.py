@@ -34,6 +34,23 @@ def test_openapi_export_is_deterministic_and_secret_free() -> None:
     assert "state_json" not in first
 
 
+def test_readiness_documents_static_integrity_and_generic_failure() -> None:
+    schema = json.loads(_exporter().render_openapi())
+
+    operation = schema["paths"]["/readyz"]["get"]
+    assert "exact build-manifest verification" in operation["description"]
+    assert operation["responses"]["503"] == {
+        "description": "The database or configured static build is not ready.",
+        "content": {
+            "application/json": {
+                "schema": {
+                    "$ref": "#/components/schemas/ReadinessResponse",
+                }
+            }
+        },
+    }
+
+
 def test_pending_approval_schema_exposes_only_policy_eligible_consent() -> None:
     schema = json.loads(_exporter().render_openapi())
 

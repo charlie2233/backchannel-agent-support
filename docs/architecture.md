@@ -312,10 +312,16 @@ neutral awaiting evidence; neither state presents the bundled replay fixture as 
 
 ## Production shape
 
-`npm run build` produces `web/dist`. `npm run start` launches one Uvicorn worker through
+`npm run build` produces `web/dist` and a deterministic, canonical
+`.backchannel-static-manifest.json`. The manifest covers `index.html` and the exact emitted asset
+tree with positive byte sizes and SHA-256 digests; the runtime verifies it but never creates or
+repairs it. `npm run start` launches one Uvicorn worker through
 `scripts/start.py`; local mode binds to `127.0.0.1`, while explicit deployed mode binds to
 `0.0.0.0`. FastAPI mounts hashed `/assets` and uses a restricted route-like SPA fallback;
-API, documentation, missing asset, and suspicious paths remain non-HTML 404s.
+API, documentation, missing asset, and suspicious paths remain non-HTML 404s. A configured static
+root does not serve the SPA shell or assets while its manifest, exact file closure, type, path,
+size, digest, or index-to-asset references fail verification. Symbolic links and special files
+are rejected.
 The launcher configures Uvicorn's process-local admission threshold at 64 tracked
 connections/tasks, a 128-connection listen backlog, and a five-second keep-alive timeout. Once
 the threshold is reached, newly parsed requests receive HTTP 503. These controls do not bound
@@ -324,8 +330,9 @@ multi-container saturation behavior.
 
 The multi-stage Dockerfile builds Node assets separately, installs the frozen Python runtime,
 runs as UID/GID 10001, stores SQLite under writable `/data`, and checks `/readyz`.
-Readiness checks the built index and coalesces the database readiness probe behind a process-local
-lock. The database result, including failures, is cached for five seconds. A refresh uses a
+Readiness coalesces separate database and static-artifact probes behind process-local locks. Both
+success and failure are cached for five seconds, so a newly damaged or repaired static tree can
+remain stale for less than one cache interval. A database refresh uses a
 dedicated SQLite connection configured with a 350 ms writer-lock timeout, starts
 `BEGIN IMMEDIATE`, retains the quick integrity, foreign-key, and required-schema checks, requires
 the probe to be a real trigger-free table with exact columns and primary-key positions, validates
@@ -336,6 +343,12 @@ five-second result can be stale, and the writer timeout does not bound every int
 does not prove the next write, available disk space, backup recovery, target-host durability or
 networking, NFS behavior, or concurrent multi-container safety. HTML receives a self-only
 script/style/image/connect CSP; API and non-HTML responses receive `default-src 'none'`.
+
+The static manifest detects partial builds, corruption, and build skew inside the intended
+root-owned immutable container image. It is not a signature or external provenance statement.
+A principal that can coherently replace both files and manifest, or mutate the tree during a
+request, remains outside this local integrity claim; image signing and target-host controls are
+separate release gates.
 
 This deployment requires a host that preserves one long-lived HTTP connection for SSE and a
 persistent `/data` volume. It is intentionally not converted to short-lived serverless

@@ -19,7 +19,13 @@ npm run openapi:check
 and pytest. `smoke:stub` proves the keyless deterministic Agents SDK approval path. The local
 production smoke starts the same one-process static/API/SSE application used by the image and
 checks approval, decline, receipts, replay SSE resume, CSP, readiness, static routing, and a
-canary-secret non-disclosure rule. It also verifies the deployed session cookie remains Secure,
+canary-secret non-disclosure rule. The frontend build deterministically emits the bounded static
+manifest; runtime readiness verifies the exact index/asset closure, positive sizes, SHA-256
+digests, safe paths, regular-file types, and index asset references. Missing, extra, empty,
+modified, linked, malformed, or non-canonical artifacts fail with generic not-ready/404
+boundaries. This is partial-build and corruption detection under the root-owned immutable-image
+boundary, not signed provenance or proof against coherent replacement of files and manifest. The
+smoke also verifies the deployed session cookie remains Secure,
 HttpOnly, SameSite=Lax, and bounded by Max-Age. Because the local production lane models TLS
 termination over loopback HTTP, only that smoke client manually carries the observed Secure
 cookie across the loopback hop; the application never weakens the emitted cookie flags. A pass

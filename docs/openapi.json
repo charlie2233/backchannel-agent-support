@@ -1925,6 +1925,7 @@
     },
     "/readyz": {
       "get": {
+        "description": "Report process readiness after a cached writable-schema probe and, when production static files are configured, exact build-manifest verification.",
         "operationId": "ready_readyz_get",
         "responses": {
           "200": {
@@ -1936,6 +1937,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReadinessResponse"
+                }
+              }
+            },
+            "description": "The database or configured static build is not ready."
           }
         },
         "summary": "Ready"

@@ -18,8 +18,9 @@ from agents.models.interface import ModelProvider
 from fastapi import FastAPI, HTTPException, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 from starlette.types import Receive, Scope, Send
 
 from server.cleanup import (
@@ -75,6 +76,10 @@ from server.replay.engine import (
     replay_recovery_id,
 )
 from server.replay.loader import ScenarioLoader, ScenarioNotFoundError
+from server.static_artifacts import (
+    read_static_index,
+    static_artifact_bundle_is_ready,
+)
 from server.store import (
     ApprovalDecisionError,
     RecoveryCreationClaim,
@@ -1313,6 +1318,29 @@ class _CachedReadinessProbe:
             return result
 
 
+class _ReadinessProtectedStaticFiles:
+    """Keep incomplete or changed production assets behind generic 404s."""
+
+    def __init__(
+        self,
+        static_files: StaticFiles,
+        *,
+        is_ready: Callable[[], bool],
+    ) -> None:
+        self._static_files = static_files
+        self._is_ready = is_ready
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if not await run_in_threadpool(self._is_ready):
+            response = JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content={"detail": "Not found"},
+            )
+            await response(scope, receive, send)
+            return
+        await self._static_files(scope, receive, send)
+
+
 def _is_route_like_spa_path(path: str) -> bool:
     if not path:
         return True
@@ -1432,19 +1460,25 @@ def create_app(
         max_per_recovery=runtime_settings.max_event_streams_per_recovery,
         retry_seconds=runtime_settings.event_stream_retry_seconds,
     )
-    configured_static_dir = static_dir.resolve() if static_dir is not None else None
-    static_index = (
-        configured_static_dir / "index.html" if configured_static_dir is not None else None
-    )
+    configured_static_dir = static_dir.absolute() if static_dir is not None else None
     terminal_ttl = timedelta(seconds=runtime_settings.terminal_recovery_ttl_seconds)
+    probe_clock = readiness_clock if readiness_clock is not None else monotonic
     database_readiness = _CachedReadinessProbe(
         lambda: _store_schema_is_ready(
             recovery_store,
             connection_factory=readiness_connection_factory,
             commit=readiness_commit,
         ),
-        clock=readiness_clock if readiness_clock is not None else monotonic,
+        clock=probe_clock,
         available=lambda: not recovery_store.closed,
+    )
+    static_readiness = (
+        _CachedReadinessProbe(
+            lambda: static_artifact_bundle_is_ready(configured_static_dir),
+            clock=probe_clock,
+        )
+        if configured_static_dir is not None
+        else None
     )
 
     @asynccontextmanager
@@ -1514,6 +1548,7 @@ def create_app(
     application.state.runtime_settings = runtime_settings
     application.state.static_dir = configured_static_dir
     application.state.database_readiness = database_readiness
+    application.state.static_readiness = static_readiness
     application.add_middleware(
         CORSMiddleware,
         allow_origins=list(runtime_settings.cors_origins),
@@ -1639,10 +1674,23 @@ def create_app(
             providerBoundary=ProviderBoundary.DEMO_ADAPTER_ONLY,
         )
 
-    @application.get("/readyz", response_model=ReadinessResponse)
+    @application.get(
+        "/readyz",
+        response_model=ReadinessResponse,
+        description=(
+            "Report process readiness after a cached writable-schema probe and, when "
+            "production static files are configured, exact build-manifest verification."
+        ),
+        responses={
+            status.HTTP_503_SERVICE_UNAVAILABLE: {
+                "model": ReadinessResponse,
+                "description": "The database or configured static build is not ready.",
+            }
+        },
+    )
     def ready() -> Response:
         database_ready = database_readiness.is_ready()
-        static_ready = static_index is None or static_index.is_file()
+        static_ready = static_readiness is None or static_readiness.is_ready()
         readiness_status = "ready" if database_ready and static_ready else "not_ready"
         return JSONResponse(
             status_code=(
@@ -2259,12 +2307,16 @@ def create_app(
 
     if configured_static_dir is not None:
         assets_dir = configured_static_dir / "assets"
-        if assets_dir.is_dir():
-            application.mount(
-                "/assets",
-                StaticFiles(directory=assets_dir, check_dir=True),
-                name="production-assets",
-            )
+        if static_readiness is None:
+            raise RuntimeError("Configured static artifacts require a readiness probe.")
+        application.mount(
+            "/assets",
+            _ReadinessProtectedStaticFiles(
+                StaticFiles(directory=assets_dir, check_dir=False),
+                is_ready=static_readiness.is_ready,
+            ),
+            name="production-assets",
+        )
 
         @application.api_route(
             "/{spa_path:path}",
@@ -2272,7 +2324,7 @@ def create_app(
             include_in_schema=False,
         )
         def spa_fallback(spa_path: str) -> Response:
-            if static_index is None or not static_index.is_file():
+            if not static_readiness.is_ready():
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="Not found",
@@ -2282,7 +2334,13 @@ def create_app(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="Not found",
                 )
-            return FileResponse(static_index, media_type="text/html")
+            static_index = read_static_index(configured_static_dir)
+            if static_index is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Not found",
+                )
+            return Response(content=static_index, media_type="text/html")
 
     return application
 
