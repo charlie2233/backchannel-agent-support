@@ -334,6 +334,18 @@ base keeps a readable version tag plus a reviewed immutable OCI index digest. A 
 binds the frontend, package installer, Python build, and runtime stages to those exact references
 and requires both Python stages to share one base. Updating a base therefore requires a deliberate
 tag-and-digest change followed by the packaged build/smoke gate.
+The root build context recursively excludes local `uv` caches, browser/runtime capture output,
+common private-key container formats, and npm/Python/netrc credential files before transfer to
+the builder. The release contract binds the complete root ignore-rule set, rejects ignore-file
+negations, malformed raw line boundaries, byte-order marks, NUL bytes, and alternate root
+Dockerfile-specific ignore files. Exact raw SHA-256 digests bind both `.dockerignore` and the
+Dockerfile before the readable semantic checks run. The Dockerfile contract rejects byte-order
+marks, all line-continuation syntax, external frontend selectors, unexpected pre-`FROM`
+instructions, and compound `ONBUILD` instructions. It also binds every `COPY` and `RUN`
+instruction to the reviewed lists and rejects every direct `ADD` source. This minimizes
+builder-visible local data. It does not prove a malicious builder or external cache is
+trustworthy, erase content retained by an earlier build, or identify secrets stored under an
+unknown future filename.
 Readiness coalesces separate database and static-artifact probes behind process-local locks. Both
 success and failure are cached for five seconds, so a newly damaged or repaired static tree can
 remain stale for less than one cache interval. A database refresh uses a

@@ -257,9 +257,18 @@ npm run smoke:docker
 
 Before the build, `uv run pytest tests/release/test_container_provenance.py -q` verifies that all
 four external stages use the reviewed tag-plus-SHA-256 references and that the Python build and
-runtime stages cannot drift apart. A post-push hosted Docker build remains the execution gate for
-proving that those exact multi-platform index pins still resolve for the runner architecture; the
-local contract alone does not make that claim.
+runtime stages cannot drift apart. It also requires the root ignore contract to exclude recursive
+local `uv` caches, capture output, common private-key formats, and npm/Python/netrc credential
+files. It binds the complete raw-byte root ignore-rule set with strict UTF-8 and Docker-compatible
+LF/CRLF boundaries, no NUL, byte-order mark, reinclusion rule, or alternate root override. The
+contract first binds exact raw SHA-256 digests for `.dockerignore` and the Dockerfile. Its readable
+checks then reject byte-order marks, line-continuation syntax, external frontend selectors,
+unexpected pre-`FROM` instructions, and compound `ONBUILD` instructions; bind every `COPY` and
+`RUN` instruction to the reviewed lists; and reject direct `ADD` sources. This minimizes data
+transferred to the builder but does not prove a malicious builder or old external cache is
+trustworthy, or detect a secret stored under an unknown future filename. A post-push hosted Docker
+build remains the execution gate for proving that those exact multi-platform index pins still
+resolve for the runner architecture; the local contract alone does not make that claim.
 
 The image smoke requires a disposable container, writable `/data`, explicit deployed Host, CORS,
 and identity configuration, and no build-time API key. Because the image healthcheck targets

@@ -9,9 +9,11 @@ __pycache__
 .pytest_cache
 .mypy_cache
 .ruff_cache
+**/.uv-cache
 node_modules
 web/dist
 coverage
+**/output
 tests
 docs
 e2e
@@ -24,4 +26,12 @@ test-results
 *.db-*
 *.log
 *.pid
+**/*.pem
+**/*.key
+**/*.p8
+**/*.p12
+**/*.pfx
+**/.npmrc
+**/.pypirc
+**/.netrc
 .DS_Store
