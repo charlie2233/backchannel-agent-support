@@ -329,7 +329,11 @@ pre-request sockets, replace edge connection/header timeouts, or prove fleet-wid
 multi-container saturation behavior.
 
 The multi-stage Dockerfile builds Node assets separately, installs the frozen Python runtime,
-runs as UID/GID 10001, stores SQLite under writable `/data`, and checks `/readyz`.
+runs as UID/GID 10001, stores SQLite under writable `/data`, and checks `/readyz`. Every external
+base keeps a readable version tag plus a reviewed immutable OCI index digest. A release contract
+binds the frontend, package installer, Python build, and runtime stages to those exact references
+and requires both Python stages to share one base. Updating a base therefore requires a deliberate
+tag-and-digest change followed by the packaged build/smoke gate.
 Readiness coalesces separate database and static-artifact probes behind process-local locks. Both
 success and failure are cached for five seconds, so a newly damaged or repaired static tree can
 remain stale for less than one cache interval. A database refresh uses a
@@ -349,6 +353,11 @@ root-owned immutable container image. It is not a signature or external provenan
 A principal that can coherently replace both files and manifest, or mutate the tree during a
 request, remains outside this local integrity claim; image signing and target-host controls are
 separate release gates.
+
+The pinned base digests make the checked-in Docker inputs reproducible and fail closed if a
+referenced manifest disappears. They do not sign the resulting image, attest the builder, scan
+base contents, or prove that a registry publisher is trustworthy; signing, SBOM/vulnerability
+policy, and target-host admission remain separate release gates.
 
 This deployment requires a host that preserves one long-lived HTTP connection for SSE and a
 persistent `/data` volume. It is intentionally not converted to short-lived serverless

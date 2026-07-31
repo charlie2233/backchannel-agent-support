@@ -251,9 +251,15 @@ keyless lookup exposes explicit replay/SDK choices without an automatic replacem
 When a Docker-compatible engine is available, run:
 
 ```bash
-docker build -t backchannel:v0.3 .
+docker build --pull -t backchannel:v0.3 .
 npm run smoke:docker
 ```
+
+Before the build, `uv run pytest tests/release/test_container_provenance.py -q` verifies that all
+four external stages use the reviewed tag-plus-SHA-256 references and that the Python build and
+runtime stages cannot drift apart. A post-push hosted Docker build remains the execution gate for
+proving that those exact multi-platform index pins still resolve for the runner architecture; the
+local contract alone does not make that claim.
 
 The image smoke requires a disposable container, writable `/data`, explicit deployed Host, CORS,
 and identity configuration, and no build-time API key. Because the image healthcheck targets

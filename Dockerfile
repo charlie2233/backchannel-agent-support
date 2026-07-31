@@ -1,4 +1,6 @@
-FROM node:22.22.0-bookworm-slim AS frontend-build
+# Update each readable tag and its reviewed OCI index digest together with
+# tests/release/test_container_provenance.py.
+FROM node:22.22.0-bookworm-slim@sha256:dd9d21971ec4395903fa6143c2b9267d048ae01ca6d3ea96f16cb30df6187d94 AS frontend-build
 
 WORKDIR /app
 COPY package.json package-lock.json ./
@@ -8,10 +10,10 @@ COPY web ./web
 RUN npm run build
 
 
-FROM ghcr.io/astral-sh/uv:0.10.1 AS uv-bin
+FROM ghcr.io/astral-sh/uv:0.10.1@sha256:452e02b117acd2d4eb3ba81a607bed9733b101b6c49492e352b1973463389012 AS uv-bin
 
 
-FROM python:3.12.12-slim-bookworm AS python-build
+FROM python:3.12.12-slim-bookworm@sha256:593bd06efe90efa80dc4eee3948be7c0fde4134606dd40d8dd8dbcade98e669c AS python-build
 
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy
@@ -22,7 +24,7 @@ COPY server ./server
 RUN uv sync --frozen --no-dev
 
 
-FROM python:3.12.12-slim-bookworm AS runtime
+FROM python:3.12.12-slim-bookworm@sha256:593bd06efe90efa80dc4eee3948be7c0fde4134606dd40d8dd8dbcade98e669c AS runtime
 
 ENV BACKCHANNEL_DB_PATH=/data/backchannel.sqlite3 \
     BACKCHANNEL_DEPLOYED_MODE=true \

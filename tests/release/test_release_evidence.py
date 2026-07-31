@@ -479,6 +479,7 @@ def test_ci_is_keyless_lockfile_based_and_declares_external_gates() -> None:
     assert "BACKCHANNEL_SMOKE_CANARY=%s" in workflow
     assert "-e BACKCHANNEL_ALLOWED_HOSTS=127.0.0.1" in packaged_start
     assert '-e OPENAI_API_KEY="$BACKCHANNEL_SMOKE_CANARY"' in workflow
+    assert "docker build --pull -t backchannel:build-week ." in container_job
     assert "BACKCHANNEL_DEMO_RESET_ENABLED" not in packaged_start
     assert re.search(r"sk-[A-Za-z0-9_-]{20,}", workflow) is None
 
