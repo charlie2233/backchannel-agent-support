@@ -1,24 +1,34 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import {
+  BUILD_ENV_ALLOWLIST,
   CAPTURE_FILES,
   CHROME_LAUNCH_OPTIONS,
   CaptureContractError,
   SERVER_ENV_ALLOWLIST,
   VIEWPORTS,
+  assertCaptureSourceStable,
   assertCaptureSafeDom,
   assertCompletedProvenance,
   assertDeclinedProvenance,
   assertFinalBuild,
+  assertNoFrontendEnvironmentFiles,
   assertPendingProvenance,
   assertResetResponse,
   assertSessionRecoveryId,
   assertTerminalViewportVisibility,
   captureFailureCode,
+  buildOwnedFinalBundle,
   createDecisionPayload,
   createServerEnvironment,
   isRecoveryCreationResponse,
@@ -196,6 +206,14 @@ test("publishes only allowlisted static failure codes", () => {
     captureFailureCode(new CaptureContractError("capture_terminal_viewport")),
     "capture_terminal_viewport",
   );
+  assert.equal(
+    captureFailureCode(new CaptureContractError("capture_final_build_failed")),
+    "capture_final_build_failed",
+  );
+  assert.equal(
+    captureFailureCode(new CaptureContractError("capture_source_changed")),
+    "capture_source_changed",
+  );
   const tokenShapedDetail = ["sk", "-", "Z".repeat(32)].join("");
   assert.equal(captureFailureCode(new Error(tokenShapedDetail)), "capture_unexpected");
   assert.equal(
@@ -212,6 +230,7 @@ test("requires the built final bundle and creates only an allowlisted keyless se
     assert.throws(() => assertFinalBuild(root), /capture_final_build_missing/);
     mkdirSync(join(root, "assets"));
     writeFileSync(join(root, "index.html"), "<!doctype html>");
+    writeFileSync(join(root, "assets", "index.js"), "export {};");
     assert.doesNotThrow(() => assertFinalBuild(root));
 
     const credentialName = ["OPENAI", "API", "KEY"].join("_");
@@ -242,6 +261,345 @@ test("requires the built final bundle and creates only an allowlisted keyless se
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("builds the served frontend into a new capture-owned directory with a secret-safe environment", () => {
+  const root = mkdtempSync(join(tmpdir(), "backchannel-owned-build-contract-"));
+  try {
+    const tempRoot = join(root, "capture-owned");
+    mkdirSync(tempRoot);
+    mkdirSync(join(root, "web"));
+    const credentialName = ["OPENAI", "API", "KEY"].join("_");
+    let observed = null;
+    const frontendDistPath = buildOwnedFinalBundle({
+      root,
+      tempRoot,
+      baseEnvironment: {
+        PATH: "/usr/bin:/bin",
+        LANG: "en_US.UTF-8",
+        LC_ALL: "en_US.UTF-8",
+        TMPDIR: "/private/capture-tmp",
+        HOME: "/must-not-be-forwarded",
+        [credentialName]: "must-not-be-forwarded",
+        VITE_PRIVATE_TOKEN: "must-not-be-forwarded",
+        RANDOM_SECRET: "must-not-be-forwarded",
+      },
+      spawnBuild(command, args, options) {
+        observed = { command, args, options };
+        mkdirSync(join(tempRoot, "frontend-dist", "assets"), {
+          recursive: true,
+        });
+        writeFileSync(
+          join(tempRoot, "frontend-dist", "index.html"),
+          "<!doctype html>",
+        );
+        writeFileSync(
+          join(tempRoot, "frontend-dist", "assets", "index.js"),
+          "export {};",
+        );
+        return { error: undefined, signal: null, status: 0 };
+      },
+    });
+
+    assert.equal(frontendDistPath, join(tempRoot, "frontend-dist"));
+    assert.equal(observed.command, "npm");
+    assert.deepEqual(observed.args, [
+      "--workspace",
+      "web",
+      "run",
+      "build",
+      "--",
+      "--outDir",
+      frontendDistPath,
+      "--emptyOutDir",
+    ]);
+    assert.equal(observed.options.cwd, root);
+    assert.equal(observed.options.stdio, "ignore");
+    assert.equal(observed.options.shell, false);
+    assert.equal(observed.options.timeout > 0, true);
+    assert.deepEqual(
+      Object.keys(observed.options.env).sort(),
+      [...BUILD_ENV_ALLOWLIST].sort(),
+    );
+    assert.equal(observed.options.env.CI, "1");
+    assert.equal(credentialName in observed.options.env, false);
+    assert.equal("HOME" in observed.options.env, false);
+    assert.equal("VITE_PRIVATE_TOKEN" in observed.options.env, false);
+    assert.equal("RANDOM_SECRET" in observed.options.env, false);
+    assert.doesNotThrow(() => assertFinalBuild(frontendDistPath));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("fails closed when the owned bundle path exists or the build process does not succeed exactly", () => {
+  const root = mkdtempSync(join(tmpdir(), "backchannel-owned-build-failure-"));
+  try {
+    mkdirSync(join(root, "web"));
+    const preexistingRoot = join(root, "preexisting");
+    mkdirSync(join(preexistingRoot, "frontend-dist"), { recursive: true });
+    assert.throws(
+      () =>
+        buildOwnedFinalBundle({
+          root,
+          tempRoot: preexistingRoot,
+          baseEnvironment: {},
+          spawnBuild() {
+            assert.fail("a preexisting output directory must not be built into");
+          },
+        }),
+      /capture_final_build_failed/,
+    );
+
+    const failures = [
+      {
+        error: Object.assign(new Error("timed out"), { code: "ETIMEDOUT" }),
+        signal: "SIGTERM",
+        status: null,
+      },
+      { error: undefined, signal: null, status: 2 },
+      { error: undefined, signal: "SIGTERM", status: null },
+    ];
+    for (const [index, result] of failures.entries()) {
+      const tempRoot = join(root, `failure-${index}`);
+      mkdirSync(tempRoot);
+      assert.throws(
+        () =>
+          buildOwnedFinalBundle({
+            root,
+            tempRoot,
+            baseEnvironment: {},
+            spawnBuild() {
+              return result;
+            },
+          }),
+        /capture_final_build_failed/,
+      );
+    }
+
+    const thrownRoot = join(root, "thrown");
+    mkdirSync(thrownRoot);
+    assert.throws(
+      () =>
+        buildOwnedFinalBundle({
+          root,
+          tempRoot: thrownRoot,
+          baseEnvironment: {},
+          spawnBuild() {
+            throw new Error("runner internals must be redacted");
+          },
+        }),
+      /capture_final_build_failed/,
+    );
+
+    const missingOutputRoot = join(root, "missing-output");
+    mkdirSync(missingOutputRoot);
+    assert.throws(
+      () =>
+        buildOwnedFinalBundle({
+          root,
+          tempRoot: missingOutputRoot,
+          baseEnvironment: {},
+          spawnBuild() {
+            return { error: undefined, signal: null, status: 0 };
+          },
+        }),
+      /capture_final_build_missing/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("requires a real existing non-symlink capture-owned build root", () => {
+  const root = mkdtempSync(join(tmpdir(), "backchannel-owned-build-root-"));
+  try {
+    mkdirSync(join(root, "web"));
+    const realDirectory = join(root, "real-directory");
+    const fileRoot = join(root, "file-root");
+    const symlinkRoot = join(root, "symlink-root");
+    mkdirSync(realDirectory);
+    writeFileSync(fileRoot, "not a directory");
+    symlinkSync(realDirectory, symlinkRoot);
+    for (const tempRoot of [
+      join(root, "missing-root"),
+      fileRoot,
+      symlinkRoot,
+    ]) {
+      assert.throws(
+        () =>
+          buildOwnedFinalBundle({
+            root,
+            tempRoot,
+            baseEnvironment: {},
+            spawnBuild() {
+              assert.fail("invalid owned roots must fail before spawn");
+            },
+          }),
+        /capture_final_build_failed/,
+      );
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("rejects empty, nested, extra, symlinked, and unbounded final build artifacts", () => {
+  const root = mkdtempSync(join(tmpdir(), "backchannel-final-build-shape-"));
+  const makeBundle = (name) => {
+    const bundle = join(root, name);
+    mkdirSync(join(bundle, "assets"), { recursive: true });
+    writeFileSync(join(bundle, "index.html"), "<!doctype html>");
+    writeFileSync(join(bundle, "assets", "index.js"), "export {};");
+    return bundle;
+  };
+  try {
+    const emptyIndex = makeBundle("empty-index");
+    writeFileSync(join(emptyIndex, "index.html"), "");
+    assert.throws(
+      () => assertFinalBuild(emptyIndex),
+      /capture_final_build_missing/,
+    );
+
+    const emptyAssets = makeBundle("empty-assets");
+    rmSync(join(emptyAssets, "assets", "index.js"));
+    assert.throws(
+      () => assertFinalBuild(emptyAssets),
+      /capture_final_build_missing/,
+    );
+
+    const emptyAssetFile = makeBundle("empty-asset-file");
+    writeFileSync(join(emptyAssetFile, "assets", "index.js"), "");
+    assert.throws(
+      () => assertFinalBuild(emptyAssetFile),
+      /capture_final_build_missing/,
+    );
+
+    const nestedAsset = makeBundle("nested-asset");
+    mkdirSync(join(nestedAsset, "assets", "nested"));
+    assert.throws(
+      () => assertFinalBuild(nestedAsset),
+      /capture_final_build_missing/,
+    );
+
+    const extraRootFile = makeBundle("extra-root-file");
+    writeFileSync(join(extraRootFile, "extra.txt"), "unexpected");
+    assert.throws(
+      () => assertFinalBuild(extraRootFile),
+      /capture_final_build_missing/,
+    );
+
+    const symlinkedIndex = makeBundle("symlinked-index");
+    rmSync(join(symlinkedIndex, "index.html"));
+    symlinkSync(
+      join(symlinkedIndex, "assets", "index.js"),
+      join(symlinkedIndex, "index.html"),
+    );
+    assert.throws(
+      () => assertFinalBuild(symlinkedIndex),
+      /capture_final_build_missing/,
+    );
+
+    const symlinkedAssetsDirectory = makeBundle("symlinked-assets-directory");
+    rmSync(join(symlinkedAssetsDirectory, "assets"), {
+      recursive: true,
+      force: true,
+    });
+    symlinkSync(
+      join(symlinkedIndex, "assets"),
+      join(symlinkedAssetsDirectory, "assets"),
+    );
+    assert.throws(
+      () => assertFinalBuild(symlinkedAssetsDirectory),
+      /capture_final_build_missing/,
+    );
+
+    const symlinkedAsset = makeBundle("symlinked-asset");
+    symlinkSync(
+      join(symlinkedAsset, "index.html"),
+      join(symlinkedAsset, "assets", "linked.js"),
+    );
+    assert.throws(
+      () => assertFinalBuild(symlinkedAsset),
+      /capture_final_build_missing/,
+    );
+
+    const tooManyAssets = makeBundle("too-many-assets");
+    for (let index = 0; index < 128; index += 1) {
+      writeFileSync(
+        join(tooManyAssets, "assets", `chunk-${index}.js`),
+        "x",
+      );
+    }
+    assert.throws(
+      () => assertFinalBuild(tooManyAssets),
+      /capture_final_build_missing/,
+    );
+
+    const valid = makeBundle("valid");
+    assert.doesNotThrow(() => assertFinalBuild(valid));
+    const symlinkedRoot = join(root, "symlinked-root");
+    symlinkSync(valid, symlinkedRoot);
+    assert.throws(
+      () => assertFinalBuild(symlinkedRoot),
+      /capture_final_build_missing/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("rejects ignored Vite environment files before spawning the owned build", () => {
+  const root = mkdtempSync(join(tmpdir(), "backchannel-owned-build-env-file-"));
+  try {
+    mkdirSync(join(root, "web"));
+    assert.doesNotThrow(() => assertNoFrontendEnvironmentFiles(root));
+    for (const name of [".env", ".env.local", ".env.production.local"]) {
+      writeFileSync(join(root, "web", name), "VITE_PRIVATE_TOKEN=forbidden");
+      assert.throws(
+        () => assertNoFrontendEnvironmentFiles(root),
+        /capture_environment_contract/,
+      );
+      rmSync(join(root, "web", name));
+    }
+    writeFileSync(join(root, "web", ".environment"), "not-a-vite-env-file");
+    assert.doesNotThrow(() => assertNoFrontendEnvironmentFiles(root));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("accepts only an unchanged clean source identity after the owned build", () => {
+  const runtimeInput = {
+    digest: "a".repeat(64),
+    paths: ["server/main.py", "web/src/App.tsx"],
+  };
+  const before = { sourceCommit: "b".repeat(40), runtimeInput };
+  assert.doesNotThrow(() =>
+    assertCaptureSourceStable(before, {
+      sourceCommit: before.sourceCommit,
+      runtimeInput: {
+        digest: runtimeInput.digest,
+        paths: [...runtimeInput.paths],
+      },
+    }),
+  );
+  assert.throws(
+    () =>
+      assertCaptureSourceStable(before, {
+        ...before,
+        sourceCommit: "c".repeat(40),
+      }),
+    /capture_source_changed/,
+  );
+  assert.throws(
+    () =>
+      assertCaptureSourceStable(before, {
+        ...before,
+        runtimeInput: { ...runtimeInput, digest: "d".repeat(64) },
+      }),
+    /capture_source_changed/,
+  );
 });
 
 test("accepts only the exact session reset acknowledgement", () => {

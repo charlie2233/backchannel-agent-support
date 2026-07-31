@@ -12,7 +12,6 @@
     "capture:verify": "node e2e/capture-manifest.mjs",
     "openapi:export": "uv run python scripts/export_openapi.py",
     "openapi:check": "uv run python scripts/export_openapi.py --check",
-    "pretest:e2e": "npm run build",
     "secret:scan": "uv run python scripts/secret_scan.py",
     "presmoke:deployed-defaults": "npm run build",
     "presmoke:production": "npm run build",

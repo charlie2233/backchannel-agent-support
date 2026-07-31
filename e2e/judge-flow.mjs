@@ -1,12 +1,13 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import {
   existsSync,
+  lstatSync,
   mkdtempSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
-  statSync,
 } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -25,8 +26,12 @@ import {
 const MODULE_PATH = fileURLToPath(import.meta.url);
 const ROOT = resolve(dirname(MODULE_PATH), "..");
 const FINAL_ASSET_DIRECTORY = join(ROOT, "docs", "assets", "final");
-const FINAL_BUILD_DIRECTORY = join(ROOT, "web", "dist");
 const SERVER_COMMAND = [".venv/bin/python", "scripts/start.py"];
+const FRONTEND_BUILD_TIMEOUT_MS = 120_000;
+const FINAL_BUILD_MAX_INDEX_BYTES = 1_048_576;
+const FINAL_BUILD_MAX_ASSET_COUNT = 128;
+const FINAL_BUILD_MAX_ASSET_BYTES = 16_777_216;
+const FINAL_BUILD_MAX_TOTAL_ASSET_BYTES = 67_108_864;
 const STARTUP_TIMEOUT_MS = 20_000;
 const UI_TIMEOUT_MS = 20_000;
 const SHUTDOWN_TIMEOUT_MS = 5_000;
@@ -70,6 +75,14 @@ export const SERVER_ENV_ALLOWLIST = Object.freeze([
   "BACKCHANNEL_IDENTITY_HMAC_SECRET",
 ]);
 
+export const BUILD_ENV_ALLOWLIST = Object.freeze([
+  "PATH",
+  "LANG",
+  "LC_ALL",
+  "TMPDIR",
+  "CI",
+]);
+
 const FORBIDDEN_DOM_MARKERS = Object.freeze([
   /OPENAI_API_KEY/i,
   /BACKCHANNEL_IDENTITY_HMAC_SECRET/i,
@@ -98,6 +111,7 @@ const PUBLIC_CAPTURE_FAILURE_CODES = new Set([
   "capture_environment_contract",
   "capture_external_origin",
   "capture_filename_contract",
+  "capture_final_build_failed",
   "capture_final_build_missing",
   "capture_forbidden_dom_marker",
   "capture_health_api",
@@ -114,6 +128,7 @@ const PUBLIC_CAPTURE_FAILURE_CODES = new Set([
   "capture_server_start_timeout",
   "capture_session_recovery",
   "capture_snapshot_api",
+  "capture_source_changed",
   "capture_terminal_viewport",
 ]);
 
@@ -138,12 +153,148 @@ function includesAll(text, fragments) {
 export function assertFinalBuild(frontendDistPath) {
   const indexPath = join(frontendDistPath, "index.html");
   const assetsPath = join(frontendDistPath, "assets");
+  try {
+    const rootStat = lstatSync(frontendDistPath);
+    const indexStat = lstatSync(indexPath);
+    const assetsStat = lstatSync(assetsPath);
+    requireContract(
+      rootStat.isDirectory() &&
+        !rootStat.isSymbolicLink() &&
+        indexStat.isFile() &&
+        !indexStat.isSymbolicLink() &&
+        indexStat.size > 0 &&
+        indexStat.size <= FINAL_BUILD_MAX_INDEX_BYTES &&
+        assetsStat.isDirectory() &&
+        !assetsStat.isSymbolicLink() &&
+        sameJson(readdirSync(frontendDistPath).sort(), [
+          "assets",
+          "index.html",
+        ]),
+      "capture_final_build_missing",
+    );
+    const assetNames = readdirSync(assetsPath);
+    requireContract(
+      assetNames.length > 0 &&
+        assetNames.length <= FINAL_BUILD_MAX_ASSET_COUNT,
+      "capture_final_build_missing",
+    );
+    let totalAssetBytes = 0;
+    for (const assetName of assetNames) {
+      const assetStat = lstatSync(join(assetsPath, assetName));
+      requireContract(
+        assetStat.isFile() &&
+          !assetStat.isSymbolicLink() &&
+          assetStat.size > 0 &&
+          assetStat.size <= FINAL_BUILD_MAX_ASSET_BYTES,
+        "capture_final_build_missing",
+      );
+      totalAssetBytes += assetStat.size;
+      requireContract(
+        totalAssetBytes <= FINAL_BUILD_MAX_TOTAL_ASSET_BYTES,
+        "capture_final_build_missing",
+      );
+    }
+  } catch (error) {
+    if (error instanceof CaptureContractError) {
+      throw error;
+    }
+    throw new CaptureContractError("capture_final_build_missing");
+  }
+}
+
+export function createBuildEnvironment(baseEnvironment) {
+  const environment = {
+    PATH: baseEnvironment.PATH ?? "/usr/bin:/bin",
+    LANG: baseEnvironment.LANG ?? "C.UTF-8",
+    LC_ALL: baseEnvironment.LC_ALL ?? "C.UTF-8",
+    TMPDIR: baseEnvironment.TMPDIR ?? tmpdir(),
+    CI: "1",
+  };
   requireContract(
-    existsSync(indexPath) &&
-      statSync(indexPath).isFile() &&
-      existsSync(assetsPath) &&
-      statSync(assetsPath).isDirectory(),
-    "capture_final_build_missing",
+    Object.keys(environment).every((key) => BUILD_ENV_ALLOWLIST.includes(key)) &&
+      Object.keys(environment).length === BUILD_ENV_ALLOWLIST.length,
+    "capture_environment_contract",
+  );
+  return environment;
+}
+
+export function assertNoFrontendEnvironmentFiles(root) {
+  let names;
+  try {
+    names = readdirSync(join(root, "web"));
+  } catch {
+    throw new CaptureContractError("capture_final_build_failed");
+  }
+  requireContract(
+    names.every((name) => name !== ".env" && !name.startsWith(".env.")),
+    "capture_environment_contract",
+  );
+}
+
+export function buildOwnedFinalBundle({
+  root,
+  tempRoot,
+  baseEnvironment,
+  spawnBuild = spawnSync,
+}) {
+  const ownedRoot = resolve(tempRoot);
+  const frontendDistPath = resolve(ownedRoot, "frontend-dist");
+  let ownedRootStat;
+  try {
+    ownedRootStat = lstatSync(ownedRoot);
+  } catch {
+    throw new CaptureContractError("capture_final_build_failed");
+  }
+  requireContract(
+    ownedRootStat.isDirectory() &&
+      !ownedRootStat.isSymbolicLink() &&
+      dirname(frontendDistPath) === ownedRoot &&
+      !existsSync(frontendDistPath),
+    "capture_final_build_failed",
+  );
+  assertNoFrontendEnvironmentFiles(root);
+  let result;
+  try {
+    result = spawnBuild(
+      "npm",
+      [
+        "--workspace",
+        "web",
+        "run",
+        "build",
+        "--",
+        "--outDir",
+        frontendDistPath,
+        "--emptyOutDir",
+      ],
+      {
+        cwd: root,
+        env: createBuildEnvironment(baseEnvironment),
+        shell: false,
+        stdio: "ignore",
+        timeout: FRONTEND_BUILD_TIMEOUT_MS,
+      },
+    );
+  } catch {
+    throw new CaptureContractError("capture_final_build_failed");
+  }
+  requireContract(
+    result !== null &&
+      typeof result === "object" &&
+      result.error === undefined &&
+      result.status === 0 &&
+      result.signal === null,
+    "capture_final_build_failed",
+  );
+  assertFinalBuild(frontendDistPath);
+  return frontendDistPath;
+}
+
+export function assertCaptureSourceStable(beforeBuild, afterBuild) {
+  requireContract(
+    beforeBuild.sourceCommit === afterBuild.sourceCommit &&
+      sameJson(beforeBuild.runtimeInput, afterBuild.runtimeInput),
+    "capture_source_changed",
   );
 }
 
@@ -1006,7 +1157,6 @@ async function captureOneViewport(
 
 async function runCapture() {
   const captureSource = prepareCaptureSource(ROOT);
-  assertFinalBuild(FINAL_BUILD_DIRECTORY);
   requireContract(
     existsSync(join(ROOT, SERVER_COMMAND[0])),
     "capture_python_missing",
@@ -1016,6 +1166,13 @@ async function runCapture() {
   let browser = null;
 
   try {
+    const frontendDistPath = buildOwnedFinalBundle({
+      root: ROOT,
+      tempRoot,
+      baseEnvironment: process.env,
+    });
+    const verifiedCaptureSource = prepareCaptureSource(ROOT);
+    assertCaptureSourceStable(captureSource, verifiedCaptureSource);
     const captureDirectory = join(tempRoot, "captures");
     mkdirSync(captureDirectory);
     const databasePath = join(tempRoot, "capture.sqlite3");
@@ -1027,7 +1184,7 @@ async function runCapture() {
     const environment = createServerEnvironment({
       baseEnvironment: process.env,
       databasePath,
-      frontendDistPath: FINAL_BUILD_DIRECTORY,
+      frontendDistPath,
       identityHmacSecret,
       port,
     });
