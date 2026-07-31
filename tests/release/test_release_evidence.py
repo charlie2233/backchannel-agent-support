@@ -502,9 +502,9 @@ def test_ci_is_keyless_lockfile_based_and_declares_external_gates() -> None:
 
 
 def test_release_docs_separate_hosted_container_proof_from_external_gates() -> None:
-    run_url = "https://github.com/charlie2233/backchannel-agent-support/actions/runs/29797660785"
+    run_url = "https://github.com/charlie2233/backchannel-agent-support/actions/runs/30602953030"
     stale_run_url = (
-        "https://github.com/charlie2233/backchannel-agent-support/actions/runs/29787371831"
+        "https://github.com/charlie2233/backchannel-agent-support/actions/runs/29797660785"
     )
     documents = {
         "validation": _read("docs/validation.md"),
@@ -515,7 +515,9 @@ def test_release_docs_separate_hosted_container_proof_from_external_gates() -> N
         normalized = " ".join(document.lower().split())
         assert run_url in document, name
         assert stale_run_url not in document, name
-        assert "88532416451" in document, name
+        assert "3c818e049bd8f5ad4c9f57da3e1b83e805d0bade" in document, name
+        assert "91069313987" in document, name
+        assert "91069638145" in document, name
         assert "github-hosted" in normalized, name
         assert "packaged container" in normalized, name
         assert "built frontend assets" in normalized, name

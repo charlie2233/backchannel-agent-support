@@ -260,11 +260,16 @@ identity configuration, and no build-time API key. A local production smoke is u
 for the packaged application contract, but it is not container-runtime proof.
 
 The GitHub-hosted `container-smoke` job in
-[CI run 29797660785](https://github.com/charlie2233/backchannel-agent-support/actions/runs/29797660785),
-job `88532416451`, is verified packaged container evidence. It completed the Docker build,
-started the image, and waited for readiness. The packaged app then served and validated its
-built frontend assets, including the HTML title, CSP headers, and emitted asset files; API calls
-separately exercised approval, decline, authoritative receipts, and SSE resume. The smoke also
+[CI run 30602953030](https://github.com/charlie2233/backchannel-agent-support/actions/runs/30602953030),
+job `91069638145`, is verified packaged container evidence for exact source commit
+`3c818e049bd8f5ad4c9f57da3e1b83e805d0bade`; both that job and verify job `91069313987`
+completed with zero annotations. Verify passed 297 web tests, TypeScript/Vite, Ruff, strict
+mypy, 978 Python tests, the deterministic stub and local one-process production smokes,
+OpenAPI freshness, and the history secret scan. The container job completed the Docker build,
+started the image, and waited for readiness. The packaged app then validated its canonical
+bounded SHA-256 frontend manifest and served the built frontend assets, including the HTML title,
+CSP headers, and emitted asset files; API calls separately exercised approval, decline,
+authoritative receipts, and SSE resume. The smoke also
 kept a masked secret canary out of responses and assets and verified the signed session boundary,
 secure cookie, and cross-session isolation. This remains an API/static packaged proof in an
 ephemeral GitHub Actions runtime, not a browser UI interaction.
